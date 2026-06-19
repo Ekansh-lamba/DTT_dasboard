@@ -1,0 +1,182 @@
+# DTT Module 1 — WFT Analysis Configuration
+# All tunable parameters live here. Never hard-code these in engine or UI code.
+# Units declared explicitly; engine converts deterministically (never infers).
+
+# ─── Input units (declared, never inferred from data) ──────────────────────
+input_units:
+  force:       N        # Fx / Fy / Fz arrive in Newtons
+  moment:      "N·m"    # Mx / My / Mz in Newton-metres
+  speed:       km/h     # Vehicle_Speed in km/h
+  accel:       g        # Latacc / Latacc_LPF / Longacc in g  (NOT m/s²)
+  yaw:         deg/s    # Yawrate in degrees per second
+  wheel_speed: rpm      # WS1 in revolutions per minute
+  dist:        m        # Dist column is cumulative odometer in metres
+
+# ─── Display settings ──────────────────────────────────────────────────────
+display:
+  default_unit: daN           # daN = default force display (matches Apollo reference)
+  unit_scales:
+    N:    1.0                 # multiply N by this → displayed value
+    daN:  0.1                 # N ÷ 10 → daN
+  default_sign_convention: SAE   # SAE J2047 or ISO 8855
+
+# SAE J2047 (default):  Fx forward, Fy left, Fz up (wheel-centric)
+# ISO 8855:             Fy and Fz signs flipped relative to SAE
+# Convention applied as a channel multiplier (sign_conventions below)
+sign_conventions:
+  SAE:
+    Fx: 1
+    Fy: 1
+    Fz: 1
+    Mx: 1
+    My: 1
+    Mz: 1
+  ISO:
+    Fx:  1
+    Fy: -1
+    Fz: -1
+    Mx: -1
+    My:  1
+    Mz: -1
+
+# ─── Per-wheel colour palette (FL blue / FR red / RL green / RR purple) ────
+wheel_colors:
+  FL: "#2E86DE"
+  FR: "#E74C3C"
+  RL: "#27AE60"
+  RR: "#8E44AD"
+
+# ─── Channel name patterns (resolved by channel_map.py) ────────────────────
+# Each entry is a list of regex patterns tried in order (case-insensitive)
+channel_patterns:
+  time:    ["^Time$"]
+  dist:    ["^Dist$", "^Distance$"]
+  lat:     ["^Latitude$", "^Lat$"]
+  lon:     ["^Longitude$", "^Lon$"]
+  alt:     ["^Altitude$", "^Alt$"]
+  speed:   ["^Vehicle_Speed$", "^VehicleSpeed$", "^Speed$", "^Velocity_Speed2D$"]
+  latacc:  ["^Latacc$", "^Latacc_LPF$", "^LatAcc$"]
+  longacc: ["^Longacc$", "^LongAcc$", "^Long_acc$"]
+  yawrate: ["^Yawrate$", "^Yaw_rate$", "^YawRate$"]
+
+# Keywords that disqualify a column from being a force/moment channel
+# (prevents find_channel_strict from matching e.g. Latitude when looking for "L*a*")
+channel_exclude_keywords:
+  - lat
+  - lon
+  - latitude
+  - longitude
+  - "long"     # quoted to prevent YAML treating as boolean
+  - latacc
+  - longacc
+  - acc
+  - speed
+  - dist
+  - time
+  - ws1
+  - rpm
+
+# ─── Memory & loading ──────────────────────────────────────────────────────
+loading:
+  chunksize:          200000   # rows per chunk during CSV parse
+  float32_columns:             # downcast these to float32 to halve memory usage
+    - force                    # category name → resolved to all Fx/Fy/Fz/Mx/My/Mz cols
+    - moment
+    - wheel_speed
+    - speed
+    - accel
+    - yaw
+    - dist
+  # keep Time as float64 for dt precision; GPS also float64 for coordinate accuracy
+  float64_columns:
+    - time
+    - gps
+
+# ─── Dynamic sampling-rate detection ───────────────────────────────────────
+sample_rate:
+  detect_from_n_early_rows: 5000   # use first N rows to compute median dt
+  time_col: Time                   # column to diff for dt detection
+  crosscheck_tolerance_frac: 0.15  # warn (not assert) if rebuilt time differs > 15%
+
+# ─── Validation gate ───────────────────────────────────────────────────────
+validation:
+  fz_range_n: [500, 60000]   # plausible Fz in Newtons (warn outside); ~50–6000 daN
+  max_nan_fraction: 0.05     # warn if any channel has > 5% NaN rows
+
+# ─── Force Histograms (§6.1) ───────────────────────────────────────────────
+histogram:
+  bins: 60
+  # Ranges in daN (applied after N→daN conversion).
+  # These are the CLIP guard (any sample outside is counted & warned).
+  force_ranges_dan:
+    Fx: [-300, 300]
+    Fy: [-300, 300]
+    Fz: [100, 1000]
+  percentiles: [80, 90, 95]
+  # Warn if fraction of samples outside range exceeds this threshold
+  clip_warn_fraction: 0.01   # warn if > 1% of samples clipped by range
+  # Auto-zoom visible x-axis to P1–P99 of data (true = recommended).
+  # The clip guard range above is still used for binning; this only changes the view.
+  autozoom_view: true
+
+# ─── Heatmaps (§6.2) ───────────────────────────────────────────────────────
+heatmap:
+  # Three pairings per wheel: Fx×Fy, Fz×Fy, Fz×Fx
+  bins: 20                   # bins per axis (configurable)
+  min_pct_label: 0.2         # annotate cell only if % > this
+  # Axis ranges in daN (defaults; overrideable)
+  ranges_dan:
+    Fx: [-300, 300]
+    Fy: [-300, 300]
+    Fz: [100, 1000]
+
+# ─── Trip Statistics (§6.3) ────────────────────────────────────────────────
+trip_stats:
+  speed_percentiles: [50, 90]
+  force_percentiles: [90, 95]
+
+# ─── g-g Plot & Force Severity (§6.4) ──────────────────────────────────────
+gg:
+  axis_limit_g: 1.2               # ±g limits on both axes
+  ref_circles_g: [0.2, 0.4, 0.6, 0.8, 1.0]
+  decimate_to: 50000              # max scatter points for g-g display
+  severity_percentile_bands: [80, 90, 95]   # Fz percentile bands for severity
+
+# ─── Fatigue / Rainflow + Miner's Rule (§6.4) ──────────────────────────────
+fatigue:
+  miner_slope_m: 5                # Wöhler exponent (m=5 for tyre/steel; configurable)
+  rf_bins: 35                     # bins for range-distribution histogram
+  max_pts_per_channel: 100000     # decimate signal to this before rainflow extraction
+  # FIXED internal computation unit for rainflow / damage.
+  # Damage ∝ range^m, so N vs daN differs by 10^m = 100,000×.
+  # This unit is applied to the raw signal BEFORE rainflow extraction.
+  # It is INDEPENDENT of the display_unit toggle in the UI.
+  # Changing this will rescale absolute damage values but not ratios.
+  damage_internal_unit: daN
+  # Siemens-style discrete colour steps for from-to matrix
+  rf_steps:  [0, 1, 3, 6, 13, 25, 48, 93]
+  rf_colors:
+    - "#FFFFFF"
+    - "#FF00FF"
+    - "#0000FF"
+    - "#00BFFF"
+    - "#008000"
+    - "#ADFF2F"
+    - "#FFFF00"
+    - "#FF8C00"
+    - "#FF0000"
+
+# ─── Box / Distance Distribution (§6.5) ────────────────────────────────────
+box_distance:
+  # Y-axis limits for box plots in daN (defaults; None = auto)
+  box_ylim_dan:
+    Fx: [-300, 300]
+    Fy: [-300, 300]
+    Fz: [100, 1000]
+
+# ─── Export ────────────────────────────────────────────────────────────────
+export:
+  pdf_dpi: 150        # DPI for figure→PNG rasterisation via kaleido
+  pdf_fig_width: 1200 # px width for kaleido render
+  pdf_fig_height: 700
+  html_plotlyjs: cdn  # 'cdn' (small file) or 'directory' or 'embed' (large)

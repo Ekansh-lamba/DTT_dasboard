@@ -1,0 +1,26 @@
+# DTT Module 1 — WFT Analysis Dashboard
+# Core dependencies
+streamlit>=1.35.0
+plotly>=5.22.0
+pandas>=2.2.0
+numpy>=1.26.0
+PyYAML>=6.0.0
+
+# Rainflow cycle counting (Miner's rule fatigue analysis)
+rainflow>=3.1.0
+
+# PDF export (reportlab + kaleido for Plotly static image rendering)
+reportlab>=4.2.0
+kaleido==0.2.1
+
+# Optional: weasyprint as PDF fallback (HTML→PDF)
+# weasyprint>=62.0
+
+# Testing
+pytest>=8.0.0
+
+# Optional accelerated CSV backend
+pyarrow>=16.0.0
+
+# Optional: scientific extras (used in possible future AUC analysis)
+scipy>=1.13.0
