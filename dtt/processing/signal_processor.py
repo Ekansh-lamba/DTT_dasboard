@@ -1,5 +1,4 @@
 import logging
-from typing import List
 
 import numpy as np
 import pandas as pd
@@ -24,7 +23,10 @@ def apply_filter(df: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
         logger.info("Filtering skipped (apply_filter=False)")
         return df
 
-    channels = [ch for ch in MANDATORY_CHANNELS if ch in df.columns]
+    rc = getattr(config, "run_channels", None)
+    _mandatory = rc.mandatory_channels if rc is not None and rc.mandatory_channels \
+        else MANDATORY_CHANNELS
+    channels = [ch for ch in _mandatory if ch in df.columns]
     sr       = config.sampling_rate
 
     df = df.copy()

@@ -1,6 +1,6 @@
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -119,7 +119,10 @@ PPTX_SLIDE_HEIGHT_EMU: int = 5143500
 
 @dataclass
 class RunConfig:
-    csv_path:       Path
+    csv_path:       Optional[Path] = None
+    raw_folder:     Optional[Path] = None      # imc STUDIO .raw folder (alt source)
+    raw_files:      Optional[list] = None       # explicit subset of .raw files
+    vehicle_type:   str   = ""                 # chosen preset name ("" = auto-detect)
     vehicle_name:   str   = "Vehicle"
     study_name:     str   = ""
     sampling_rate:  float = DEFAULT_SAMPLING_RATE
@@ -128,6 +131,8 @@ class RunConfig:
     apply_filter:   bool  = True
     miner_exponent: float = RAINFLOW_MINER
     output_dir:     Path  = field(default_factory=lambda: OUTPUTS_DIR)
+    run_channels:   object = None      # ChannelSet-derived config, built at run time
+    tyre:           object = None      # resolved TyreParams for the vehicle type
 
     def __post_init__(self) -> None:
         import datetime

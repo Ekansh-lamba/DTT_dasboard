@@ -1,10 +1,8 @@
 import json
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-import numpy as np
 import pandas as pd
 
 from dtt.config import MANDATORY_CHANNELS, OPTIONAL_MOMENT_CHANNELS, RunConfig
@@ -65,7 +63,12 @@ def validate(df: pd.DataFrame, metadata: dict, config: RunConfig) -> ValidationR
         report.warnings.append(w)
         logger.warning(w)
 
-    for ch in MANDATORY_CHANNELS:
+    # Axle-dynamic mandatory set: whatever force channels were discovered for
+    # this vehicle's actual layout (falls back to the fixed 12 for a car).
+    rc = getattr(config, "run_channels", None)
+    mandatory = rc.mandatory_channels if rc is not None and rc.mandatory_channels \
+        else MANDATORY_CHANNELS
+    for ch in mandatory:
         if ch in df.columns:
             report.channel_status[ch] = "PRESENT"
         else:
@@ -82,13 +85,13 @@ def validate(df: pd.DataFrame, metadata: dict, config: RunConfig) -> ValidationR
         report.warnings.append(msg)
         logger.warning(msg)
 
-    for ch in MANDATORY_CHANNELS:
+    for ch in mandatory:
         if ch in df.columns:
             n = int(df[ch].isna().sum())
             if n > 0:
                 report.nan_counts[ch] = n
 
-    all_force = [ch for ch in MANDATORY_CHANNELS if ch in df.columns]
+    all_force = [ch for ch in mandatory if ch in df.columns]
     if all_force:
         report.total_nan_rows = int(df[all_force].isna().all(axis=1).sum())
 

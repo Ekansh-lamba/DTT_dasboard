@@ -1,14 +1,16 @@
-"""Screen 2 — New Study: choose CSV, configure filtering/analysis, launch."""
+"""Screen 2 — New Study: choose CSV *or* imc raw folder, pick vehicle type,
+configure filtering, and launch. Shows a live auto-detected axle configuration.
+"""
 
 from __future__ import annotations
 
+import csv as _csv
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QHBoxLayout, QVBoxLayout, QFormLayout, QLineEdit, QComboBox, QPushButton,
-    QDoubleSpinBox, QSpinBox, QCheckBox, QLabel, QFileDialog, QGridLayout,
-    QFrame,
+    QHBoxLayout, QFormLayout, QLineEdit, QComboBox, QPushButton, QDoubleSpinBox,
+    QSpinBox, QCheckBox, QLabel, QFileDialog, QGridLayout, QWidget,
 )
 
 from gui import theme
@@ -16,9 +18,12 @@ from gui.pages.base_page import BasePage
 from gui.widgets.common import SectionTitle, Card, ScrollPage
 from gui.workers.pipeline_worker import RunRequest
 
+from dtt.channels import discover
+from dtt.vehicles import preset_names, match_preset
+from dtt.ingestion.imc_reader import resolve_raw_folder
+
 
 class NewStudyPage(BasePage):
-    # Emitted with a fully-built RunRequest when the user starts an analysis.
     start_requested = Signal(object)
 
     def __init__(self, repo, parent=None):
@@ -31,7 +36,7 @@ class NewStudyPage(BasePage):
         body = scroll.body()
 
         body.addWidget(SectionTitle("New Study"))
-        sub = QLabel("Configure and launch the DTT WFT analysis pipeline.")
+        sub = QLabel("Load a WFT CSV or an imc raw folder, then launch the pipeline.")
         sub.setStyleSheet(f"color:{theme.TEXT_MUTED};")
         body.addWidget(sub)
 
@@ -39,26 +44,65 @@ class NewStudyPage(BasePage):
         columns.setSpacing(18)
         body.addLayout(columns)
 
-        # ── Left: source + identity ──────────────────────────────────────────
+        # Left: source + identity
         left = Card()
         left.layout().addWidget(_card_title("Data Source"))
         form = QFormLayout()
         form.setSpacing(12)
         form.setLabelAlignment(Qt.AlignLeft)
 
-        csv_row = QHBoxLayout()
+        self.source_type = QComboBox()
+        self.source_type.addItems(["CSV file", "imc raw folder"])
+        self.source_type.currentIndexChanged.connect(self._on_source_type)
+        form.addRow("Source type", self.source_type)
+
+        # CSV picker (container)
+        self.csv_container = QWidget()
+        csv_row = QHBoxLayout(self.csv_container)
+        csv_row.setContentsMargins(0, 0, 0, 0)
         self.csv_combo = QComboBox()
-        self.csv_combo.setMinimumWidth(260)
-        browse = QPushButton("Browse…")
-        browse.setObjectName("Secondary")
-        browse.clicked.connect(self._browse_csv)
+        self.csv_combo.setMinimumWidth(240)
+        self.csv_combo.currentIndexChanged.connect(self._update_detection)
+        browse_csv = QPushButton("Browse…")
+        browse_csv.setObjectName("Secondary")
+        browse_csv.clicked.connect(self._browse_csv)
         csv_row.addWidget(self.csv_combo, 1)
-        csv_row.addWidget(browse)
-        csv_wrap = QFrame(); csv_wrap.setLayout(csv_row)
-        form.addRow("CSV file", csv_wrap)
+        csv_row.addWidget(browse_csv)
+        form.addRow("CSV file", self.csv_container)
+
+        # Raw picker (folder or specific files)
+        self.raw_container = QWidget()
+        raw_row = QHBoxLayout(self.raw_container)
+        raw_row.setContentsMargins(0, 0, 0, 0)
+        self.raw_edit = QLineEdit()
+        self.raw_edit.setPlaceholderText("Select an imc .raw folder or files…")
+        self.raw_edit.setReadOnly(True)
+        browse_raw = QPushButton("Folder…")
+        browse_raw.setObjectName("Secondary")
+        browse_raw.clicked.connect(self._browse_raw)
+        files_raw = QPushButton("Files…")
+        files_raw.setObjectName("Secondary")
+        files_raw.clicked.connect(self._browse_raw_files)
+        raw_row.addWidget(self.raw_edit, 1)
+        raw_row.addWidget(browse_raw)
+        raw_row.addWidget(files_raw)
+        form.addRow("Raw source", self.raw_container)
+
+        # Detected configuration (auto)
+        self.detect_label = QLabel("—")
+        self.detect_label.setWordWrap(True)
+        self.detect_label.setStyleSheet(
+            f"color:{theme.ACCENT}; font-size:12px; font-weight:600;")
+        form.addRow("Detected", self.detect_label)
 
         self.vehicle_edit = QLineEdit("RLDA_PV")
         form.addRow("Vehicle name", self.vehicle_edit)
+
+        self.vtype_combo = QComboBox()
+        self.vtype_combo.addItem("Auto-detect", "")
+        for name in preset_names():
+            self.vtype_combo.addItem(name, name)
+        form.addRow("Vehicle type", self.vtype_combo)
 
         self.study_edit = QLineEdit()
         self.study_edit.setPlaceholderText("Leave blank → timestamp")
@@ -66,7 +110,7 @@ class NewStudyPage(BasePage):
         left.layout().addLayout(form)
         columns.addWidget(left, 1)
 
-        # ── Right: filtering + modules ───────────────────────────────────────
+        # Right: filtering + modules
         right = Card()
         right.layout().addWidget(_card_title("Filtering"))
         fform = QFormLayout()
@@ -99,14 +143,12 @@ class NewStudyPage(BasePage):
         mod_grid = QGridLayout()
         mod_grid.setSpacing(8)
         self.module_checks = {}
-        modules = [
-            "Statistics", "Histograms", "Heatmaps",
-            "Boxplots", "Rainflow", "PowerPoint Report",
-        ]
-        for i, m in enumerate(modules):
+        for i, m in enumerate([
+                "Statistics", "Histograms", "Heatmaps",
+                "Boxplots", "Rainflow", "PowerPoint Report"]):
             cb = QCheckBox(m)
             cb.setChecked(True)
-            cb.setEnabled(False)            # backend runs full pipeline
+            cb.setEnabled(False)
             cb.setToolTip("The backend pipeline runs all modules in one pass.")
             self.module_checks[m] = cb
             mod_grid.addWidget(cb, i // 2, i % 2)
@@ -116,7 +158,7 @@ class NewStudyPage(BasePage):
         right.layout().addWidget(note)
         columns.addWidget(right, 1)
 
-        # ── Launch ───────────────────────────────────────────────────────────
+        # Launch
         launch_row = QHBoxLayout()
         launch_row.addStretch(1)
         self.start_btn = QPushButton("▶  Start Analysis")
@@ -131,10 +173,18 @@ class NewStudyPage(BasePage):
         body.addWidget(self.error_label)
         body.addStretch(1)
 
-        self._browsed_path: Path | None = None
+        self._raw_folder: Path | None = None
+        self._raw_files: list[Path] = []
         self.reload_csvs()
+        self._on_source_type()
 
-    # ── Helpers ─────────────────────────────────────────────────────────────
+    # Source switching
+    def _on_source_type(self, *_) -> None:
+        is_raw = self.source_type.currentIndex() == 1
+        self.raw_container.setVisible(is_raw)
+        self.csv_container.setVisible(not is_raw)
+        self._update_detection()
+
     def reload_csvs(self) -> None:
         self.csv_combo.clear()
         files = self.repo.list_csv_files()
@@ -151,29 +201,114 @@ class NewStudyPage(BasePage):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select WFT CSV", str(self.repo.csv_dir), "CSV files (*.csv)")
         if path:
-            self._browsed_path = Path(path)
             self.csv_combo.insertItem(0, Path(path).name + "  (browsed)", path)
             self.csv_combo.setCurrentIndex(0)
+            self._update_detection()
 
-    def _selected_csv(self) -> Path | None:
+    def _browse_raw(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select imc raw channel folder", str(self.repo.csv_dir.parent))
+        if folder:
+            self._raw_folder = Path(folder)
+            self._raw_files = []
+            self.raw_edit.setText(folder)
+            self._update_detection()
+
+    def _browse_raw_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select imc .raw files", str(self.repo.csv_dir.parent),
+            "imc raw files (*.raw *.dat)")
+        if paths:
+            self._raw_files = [Path(p) for p in paths]
+            self._raw_folder = None
+            self.raw_edit.setText(f"{len(self._raw_files)} files: "
+                                  + ", ".join(p.name for p in self._raw_files[:4])
+                                  + (" …" if len(self._raw_files) > 4 else ""))
+            self._update_detection()
+
+    # Live axle detection
+    def _current_columns(self) -> list[str]:
+        if self.source_type.currentIndex() == 1:      # raw source
+            if self._raw_files:
+                return [f.stem for f in self._raw_files]
+            if self._raw_folder and self._raw_folder.exists():
+                found = resolve_raw_folder(self._raw_folder)
+                return [f.stem for f in found.glob("*.raw")]
+            return []
         data = self.csv_combo.currentData()
-        return Path(data) if data else None
+        if not data or not Path(data).exists():
+            return []
+        # Instrument exports may have blank/offset header rows (like FAMOS CSVs),
+        # so scan the first few lines for the one that holds wheel-force channels.
+        try:
+            with open(data, newline="", encoding="utf-8", errors="replace") as fh:
+                lines = [fh.readline() for _ in range(6)]
+        except OSError:
+            return []
+        first_nonempty: list[str] = []
+        for ln in lines:
+            cols = [c.strip() for c in next(_csv.reader([ln]), [])]
+            if cols and not first_nonempty:
+                first_nonempty = cols
+            if discover(cols).n_positions > 0:
+                return cols
+        return first_nonempty
 
+    def _update_detection(self, *_) -> None:
+        cols = self._current_columns()
+        if not cols:
+            self.detect_label.setText("—")
+            return
+        cs = discover(cols)
+        if cs.n_positions == 0:
+            self.detect_label.setText("No wheel-force channels detected")
+            self.detect_label.setStyleSheet(f"color:{theme.WARNING}; font-size:12px;")
+            return
+        preset = match_preset(cs)
+        self.detect_label.setStyleSheet(
+            f"color:{theme.ACCENT}; font-size:12px; font-weight:600;")
+        self.detect_label.setText(f"{cs.summary()}   →  suggests: {preset.name}")
+
+    # Launch
     def _on_start(self) -> None:
         self.error_label.setText("")
-        csv_path = self._selected_csv()
-        if not csv_path or not csv_path.exists():
-            self.error_label.setText("Please select a valid CSV file.")
-            return
-        req = RunRequest(
-            csv_path=csv_path,
+        is_raw = self.source_type.currentIndex() == 1
+        vehicle_type = self.vtype_combo.currentData() or ""
+
+        common = dict(
             vehicle=self.vehicle_edit.text().strip() or "Vehicle",
+            vehicle_type=vehicle_type,
             study=self.study_edit.text().strip(),
             cutoff=self.cutoff_spin.value() if self.filter_check.isChecked() else None,
             order=self.order_spin.value() if self.filter_check.isChecked() else None,
             miner=self.miner_spin.value(),
             no_filter=not self.filter_check.isChecked(),
         )
+
+        if is_raw:
+            if self._raw_files:
+                existing = [f for f in self._raw_files if f.exists()]
+                if not existing:
+                    self.error_label.setText("Selected .raw files not found.")
+                    return
+                req = RunRequest(raw_files=existing, **common)
+            elif self._raw_folder and self._raw_folder.exists():
+                resolved = resolve_raw_folder(self._raw_folder)
+                if not list(resolved.glob("*.raw")):
+                    self.error_label.setText("No .raw files found in the selected folder or its sub-folders.")
+                    return
+                req = RunRequest(raw_folder=resolved, **common)
+            else:
+                self.error_label.setText("Please select an imc raw folder or files.")
+                return
+        else:
+            data = self.csv_combo.currentData()
+            csv_path = Path(data) if data else None
+            if not csv_path or not csv_path.exists():
+                self.error_label.setText("Please select a valid CSV file.")
+                return
+            req = RunRequest(csv_path=csv_path, **common)
+
         self.start_requested.emit(req)
 
 

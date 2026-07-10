@@ -28,8 +28,11 @@ from gui.models.repository import PROJECT_DIR
 
 @dataclass
 class RunRequest:
-    csv_path: Path
+    csv_path: Optional[Path] = None
+    raw_folder: Optional[Path] = None
+    raw_files: Optional[List[Path]] = None
     vehicle: str = "Vehicle"
+    vehicle_type: str = ""
     study: str = ""
     cutoff: Optional[float] = None
     order: Optional[int] = None
@@ -37,11 +40,21 @@ class RunRequest:
     no_filter: bool = False
 
     def to_cmd(self) -> List[str]:
-        cmd = [
-            sys.executable, "-m", "dtt.pipeline",
-            "--csv", str(self.csv_path),
-            "--vehicle", self.vehicle or "Vehicle",
-        ]
+        # A frozen .exe re-invokes itself in pipeline mode; from source we call
+        # the module directly.
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--run-pipeline"]
+        else:
+            cmd = [sys.executable, "-m", "dtt.pipeline"]
+        if self.raw_files:
+            cmd += ["--raw-files"] + [str(f) for f in self.raw_files]
+        elif self.raw_folder:
+            cmd += ["--raw", str(self.raw_folder)]
+        else:
+            cmd += ["--csv", str(self.csv_path)]
+        cmd += ["--vehicle", self.vehicle or "Vehicle"]
+        if self.vehicle_type:
+            cmd += ["--vehicle-type", self.vehicle_type]
         if self.study:
             cmd += ["--study", self.study]
         if self.cutoff is not None:
@@ -109,7 +122,7 @@ class PipelineWorker(QObject):
         self._stage_start = 0.0
         self._completed = 0
 
-    # ── Public API ───────────────────────────────────────────────────────────
+    # Public API
     def cancel(self) -> None:
         self._cancelled = True
         if self._proc and self._proc.poll() is None:
@@ -160,7 +173,7 @@ class PipelineWorker(QObject):
         else:
             self.finished.emit(False, f"Pipeline exited with code {self._proc.returncode}")
 
-    # ── Stage tracking ───────────────────────────────────────────────────────
+    # Stage tracking
     def _dispatch_stage(self, line: str) -> None:
         for pattern, stage in _STAGE_MARKERS:
             if pattern.search(line):

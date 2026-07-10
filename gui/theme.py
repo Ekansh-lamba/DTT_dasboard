@@ -7,7 +7,7 @@ one product.
 
 from __future__ import annotations
 
-# ── Palette ──────────────────────────────────────────────────────────────────
+# Palette
 BG          = "#0D1B2A"   # app background
 SURFACE     = "#13243A"   # cards / panels
 SURFACE_2   = "#1B3A5C"   # elevated panels, table headers

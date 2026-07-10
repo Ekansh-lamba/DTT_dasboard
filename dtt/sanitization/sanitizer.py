@@ -1,6 +1,5 @@
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
@@ -34,9 +33,7 @@ def _fill_nan_gaps(df: pd.DataFrame, channels: List[str], max_gap: int = 10) -> 
         if ch not in df.columns:
             continue
         series = df[ch].copy()
-        null_mask  = series.isna()
         filled     = series.ffill(limit=max_gap)
-        n_filled   = int((~null_mask & filled.notna()).sum())
         df[ch]     = filled
     return df
 
@@ -77,7 +74,10 @@ def _flag_outliers(df: pd.DataFrame, channels: List[str]) -> Dict[str, int]:
 
 def sanitize(df: pd.DataFrame, config: RunConfig) -> tuple:
     report = SanitizationReport(rows_input=len(df), rows_output=0)
-    force_channels = [ch for ch in MANDATORY_CHANNELS if ch in df.columns]
+    rc = getattr(config, "run_channels", None)
+    _mandatory = rc.mandatory_channels if rc is not None and rc.mandatory_channels \
+        else MANDATORY_CHANNELS
+    force_channels = [ch for ch in _mandatory if ch in df.columns]
 
     df, n_ts_dup = _remove_duplicate_timestamps(df)
     report.duplicate_ts_removed = n_ts_dup

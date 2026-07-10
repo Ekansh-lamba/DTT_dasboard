@@ -1,5 +1,4 @@
 import logging
-from pathlib import Path
 from typing import Optional
 
 import matplotlib
@@ -109,8 +108,15 @@ def generate_histograms(df: pd.DataFrame, config: RunConfig) -> None:
     sr  = config.sampling_rate
     weights_full, total_m, speed_unit = _get_speed_weights(df, sr)
 
-    for wheel, channels in WHEEL_GROUPS.items():
-        wc   = WHEEL_COLORS[wheel]
+    rc = config.run_channels
+    wheel_groups = rc.wheel_groups if rc is not None else WHEEL_GROUPS
+    wheel_colors = rc.wheel_colors if rc is not None else WHEEL_COLORS
+    chan_colors  = rc.chan_colors if rc is not None else CHAN_COLORS
+    all_force    = rc.mandatory_channels if rc is not None else \
+                   [ch for g in WHEEL_GROUPS.values() for ch in g]
+
+    for wheel, channels in wheel_groups.items():
+        wc   = wheel_colors[wheel]
         present = [ch for ch in channels if ch in df.columns]
         if not present:
             continue
@@ -126,7 +132,7 @@ def generate_histograms(df: pd.DataFrame, config: RunConfig) -> None:
             )
 
             for ax, ch in zip(axes, present):
-                col        = CHAN_COLORS.get(ch, wc["pri"])
+                col        = chan_colors.get(ch, wc["pri"])
                 force_type = _get_force_type(ch)
                 series     = pd.to_numeric(df[ch], errors="coerce").dropna()
                 vals       = series.values
@@ -153,8 +159,8 @@ def generate_histograms(df: pd.DataFrame, config: RunConfig) -> None:
             plt.close(fig)
             logger.info("Saved histogram: %s", fname.name)
 
-    for ch in [ch for g in WHEEL_GROUPS.values() for ch in g if ch in df.columns]:
-        col        = CHAN_COLORS.get(ch, "#00B4D8")
+    for ch in [ch for ch in all_force if ch in df.columns]:
+        col        = chan_colors.get(ch, "#00B4D8")
         force_type = _get_force_type(ch)
         series     = pd.to_numeric(df[ch], errors="coerce").dropna()
         vals       = series.values

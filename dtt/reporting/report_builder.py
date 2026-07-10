@@ -1,24 +1,19 @@
 import datetime
-import io
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
 from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
-from pptx.util import Inches, Pt, Emu
+from pptx.util import Pt, Emu
 
 from dtt.config import (
     MANDATORY_CHANNELS,
     WHEEL_GROUPS,
     PERCENTILES,
-    PLOT_COLORS,
     PPTX_SLIDE_WIDTH_EMU,
     PPTX_SLIDE_HEIGHT_EMU,
     RunConfig,

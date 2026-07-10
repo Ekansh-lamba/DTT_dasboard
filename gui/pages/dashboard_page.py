@@ -85,7 +85,7 @@ class DashboardPage(BasePage):
 
         self._latest_report: Path | None = None
 
-    # ── Data ────────────────────────────────────────────────────────────────
+    # Data
     def refresh(self) -> None:
         studies = self.repo.list_studies()
         total_figs = sum(s.figure_count for s in studies)
@@ -117,7 +117,7 @@ class DashboardPage(BasePage):
             self.report_label.setText("No reports generated yet.")
             self.open_report_btn.setEnabled(False)
 
-    # ── Actions ─────────────────────────────────────────────────────────────
+    # Actions
     def _open_selected(self, row: int, _col: int) -> None:
         item = self.table.item(row, 0)
         if item:

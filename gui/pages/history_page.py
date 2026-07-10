@@ -6,10 +6,10 @@ import os
 import subprocess
 import sys
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QHBoxLayout, QVBoxLayout, QLabel, QLineEdit, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QPushButton, QWidget,
+    QHBoxLayout, QVBoxLayout, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView,
+    QAbstractItemView, QPushButton, QWidget, QMessageBox,
 )
 
 from gui import theme
@@ -19,6 +19,7 @@ from gui.widgets.common import SectionTitle, Card, status_badge
 
 class HistoryPage(BasePage):
     open_study_requested = Signal(str)           # study name
+    studies_changed = Signal()                   # emitted after a delete
 
     def __init__(self, repo, parent=None):
         super().__init__(repo, parent)
@@ -77,10 +78,31 @@ class HistoryPage(BasePage):
             folder_btn = QPushButton("Folder")
             folder_btn.setObjectName("Secondary")
             folder_btn.clicked.connect(lambda _=False, p=s.path: _open_path(p))
+            delete_btn = QPushButton("Delete")
+            delete_btn.setObjectName("Secondary")
+            delete_btn.setStyleSheet(
+                f"color:{theme.DANGER}; border-color:{theme.DANGER}55;")
+            delete_btn.clicked.connect(lambda _=False, n=s.name: self._delete_study(n))
             hl.addWidget(open_btn)
             hl.addWidget(folder_btn)
+            hl.addWidget(delete_btn)
             self.table.setCellWidget(r, 4, holder)
         self._apply_filter()
+
+    def _delete_study(self, name: str) -> None:
+        resp = QMessageBox.question(
+            self, "Delete study",
+            f"Permanently delete study '{name}' and all its outputs?\n"
+            "This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if resp != QMessageBox.Yes:
+            return
+        if self.repo.delete_study(name):
+            self.refresh()
+            self.studies_changed.emit()
+        else:
+            QMessageBox.warning(self, "Delete failed",
+                                f"Could not delete '{name}'. It may be open elsewhere.")
 
     def _apply_filter(self) -> None:
         text = self.search.text().strip().lower()

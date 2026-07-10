@@ -12,6 +12,7 @@ from dtt.config import (
     N_TO_DAN_FACTOR,
     EXCLUDE_KEYWORDS,
     TIME_COLUMN,
+    DEFAULT_SAMPLING_RATE,
     RunConfig,
 )
 
@@ -134,6 +135,12 @@ def _detect_force_channels(df: pd.DataFrame) -> list:
                 strict = find_channel_strict(df, w, f)
                 if strict:
                     found.append(strict)
+    if not found:
+        # Generalized detection for any axle layout (A1L_Fx, A3RO_Fz, …).
+        from dtt.channels import discover, FORCE_COMPONENTS
+        cs = discover([str(c) for c in df.columns])
+        found = [orig for orig, (pos, comp) in cs.source_map.items()
+                 if comp in FORCE_COMPONENTS]
     return found
 
 
@@ -206,3 +213,51 @@ def load_csv(path: Path, config: RunConfig) -> Tuple[pd.DataFrame, dict]:
         len(df_raw), len(df_raw.columns), duration_s, sr,
     )
     return df_raw, metadata
+
+
+def _finalize_raw(df, imeta, config, name) -> Tuple[pd.DataFrame, dict]:
+    if df.empty:
+        raise ValueError(f"No imc channels found: {name}")
+    force_channels = _detect_force_channels(df)
+    if not force_channels:
+        raise ValueError(f"No force channels detected: {name}")
+
+    df, dan_applied = _apply_n_to_dan(df, force_channels)
+    sr = imeta.get("output_fs_hz", config.sampling_rate or DEFAULT_SAMPLING_RATE)
+
+    metadata = {
+        "file_name":        name,
+        "rows":             len(df),
+        "columns":          len(df.columns),
+        "force_channels":   force_channels,
+        "sampling_rate_hz": sr,
+        "duration_s":       imeta.get("duration_s", round(len(df) / sr, 2) if sr else 0),
+        "n_to_dan_applied": dan_applied,
+        "raw_fs_hz":        imeta.get("raw_fs_hz"),
+        "source_type":      "imc_raw",
+    }
+    logger.info(
+        "Loaded imc raw: %d rows, %d cols, raw %.0f Hz -> %.0f Hz, %d force channels",
+        len(df), len(df.columns), imeta.get("raw_fs_hz", 0), sr, len(force_channels),
+    )
+    return df, metadata
+
+
+def load_raw_folder(folder: Path, config: RunConfig) -> Tuple[pd.DataFrame, dict]:
+    """Load an imc ``.raw`` channel folder (FAMOS-grade) as a DataFrame."""
+    from dtt.ingestion.imc_reader import read_folder
+    folder = Path(folder)
+    logger.info("Loading imc raw folder: %s", folder)
+    target = config.sampling_rate or DEFAULT_SAMPLING_RATE
+    df, imeta = read_folder(folder, target_fs=target)
+    return _finalize_raw(df, imeta, config, folder.name)
+
+
+def load_raw_files(files, config: RunConfig) -> Tuple[pd.DataFrame, dict]:
+    """Load a specific subset of imc ``.raw`` files as a DataFrame."""
+    from dtt.ingestion.imc_reader import read_files
+    files = [Path(f) for f in files]
+    logger.info("Loading %d imc raw files", len(files))
+    target = config.sampling_rate or DEFAULT_SAMPLING_RATE
+    df, imeta = read_files(files, target_fs=target)
+    return _finalize_raw(df, imeta, config, f"{len(files)} files")

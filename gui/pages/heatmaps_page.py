@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QLabel, QPushButton
+from PySide6.QtWidgets import QHBoxLayout, QLabel
 
-from gui import theme
 from gui.pages.base_page import BasePage
-from gui.widgets.common import SectionTitle, Card, ScrollPage, FigureGrid
+from gui.widgets.common import SectionTitle, ScrollPage, FigureGrid
 from gui.widgets.image_viewer import ImageViewerDialog
 from gui.models.repository import WHEELS
 

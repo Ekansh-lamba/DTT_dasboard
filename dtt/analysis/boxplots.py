@@ -3,14 +3,12 @@ import logging
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 
 from dtt.config import (
     WHEEL_GROUPS,
-    WHEEL_COLORS,
     CHAN_COLORS,
     BOX_YLIMS,
     PLOT_COLORS,
@@ -39,11 +37,15 @@ def _style_ax(ax):
 
 def generate_boxplots(df: pd.DataFrame, config: RunConfig) -> None:
     out    = config.figures_dir
-    wheels = list(WHEEL_GROUPS.keys())
+    rc     = config.run_channels
+    wheels = list(rc.wheel_groups.keys()) if rc is not None else list(WHEEL_GROUPS.keys())
 
     for force_type in ["Fx", "Fy", "Fz"]:
-        channels  = [f"{w}_{force_type}" for w in wheels]
-        present   = [ch for ch in channels if ch in df.columns]
+        if rc is not None:
+            channels = [rc.channel_for(w, force_type) for w in wheels]
+        else:
+            channels = [f"{w}_{force_type}" for w in wheels]
+        present   = [ch for ch in channels if ch and ch in df.columns]
         if not present:
             continue
 
@@ -61,7 +63,8 @@ def generate_boxplots(df: pd.DataFrame, config: RunConfig) -> None:
             vals = series.values
             data_per_ch.append(vals)
             labels.append(ch)
-            colors.append(CHAN_COLORS.get(ch, "#00B4D8"))
+            _chan_colors = rc.chan_colors if rc is not None else CHAN_COLORS
+            colors.append(_chan_colors.get(ch, "#00B4D8"))
             p5_vals.append(float(np.percentile(vals, 5)))
             p95_vals.append(float(np.percentile(vals, 95)))
             mean_vals.append(float(np.mean(vals)))

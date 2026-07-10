@@ -11,7 +11,6 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFrame, QLabel,
     QPushButton, QStackedWidget, QComboBox, QButtonGroup, QMessageBox,
@@ -24,6 +23,8 @@ from gui.workers.pipeline_worker import PipelineController, RunRequest
 from gui.pages.dashboard_page import DashboardPage
 from gui.pages.new_study_page import NewStudyPage
 from gui.pages.processing_page import ProcessingPage
+from gui.pages.preprocess_page import PreprocessPage
+from gui.pages.signals_page import SignalsPage
 from gui.pages.validation_page import ValidationPage
 from gui.pages.statistics_page import StatisticsPage
 from gui.pages.histograms_page import HistogramsPage
@@ -39,6 +40,8 @@ NAV_ITEMS = [
     ("dashboard",  "Dashboard",   "▣"),
     ("new_study",  "New Study",   "＋"),
     ("processing", "Processing",  "⟳"),
+    ("preprocess", "Preprocess",  "⚙"),
+    ("signals",    "Signals",     "≋"),
     ("validation", "Validation",  "✓"),
     ("statistics", "Statistics",  "∑"),
     ("histograms", "Histograms",  "▥"),
@@ -51,7 +54,7 @@ NAV_ITEMS = [
 
 # Pages bound to the active study (everything except these is study-agnostic)
 _STUDY_PAGES = {
-    "validation", "statistics", "histograms",
+    "preprocess", "signals", "validation", "statistics", "histograms",
     "heatmaps", "boxplots", "rainflow", "reports",
 }
 
@@ -93,9 +96,7 @@ class MainWindow(QMainWindow):
         self._select_initial_study()
         self.navigate("dashboard")
 
-    # ════════════════════════════════════════════════════════════════════════
     # UI construction
-    # ════════════════════════════════════════════════════════════════════════
     def _build_sidebar(self) -> QFrame:
         bar = QFrame()
         bar.setObjectName("Sidebar")
@@ -120,9 +121,16 @@ class MainWindow(QMainWindow):
 
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
+        from PySide6.QtCore import QSize
+        from gui.widgets.icons import preprocess_icon
         self.nav_buttons: Dict[str, QPushButton] = {}
         for key, label, glyph in NAV_ITEMS:
-            btn = QPushButton(f"  {glyph}   {label}")
+            if key == "preprocess":
+                btn = QPushButton(f"   {label}")
+                btn.setIcon(preprocess_icon())
+                btn.setIconSize(QSize(16, 16))
+            else:
+                btn = QPushButton(f"  {glyph}   {label}")
             btn.setObjectName("NavButton")
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
@@ -162,6 +170,8 @@ class MainWindow(QMainWindow):
         self.dashboard  = DashboardPage(self.repo)
         self.new_study  = NewStudyPage(self.repo)
         self.processing = ProcessingPage(self.repo)
+        self.preprocess = PreprocessPage(self.repo)
+        self.signals    = SignalsPage(self.repo)
         self.validation = ValidationPage(self.repo)
         self.statistics = StatisticsPage(self.repo)
         self.histograms = HistogramsPage(self.repo)
@@ -173,7 +183,8 @@ class MainWindow(QMainWindow):
 
         mapping = {
             "dashboard": self.dashboard, "new_study": self.new_study,
-            "processing": self.processing, "validation": self.validation,
+            "processing": self.processing, "preprocess": self.preprocess,
+            "signals": self.signals, "validation": self.validation,
             "statistics": self.statistics, "histograms": self.histograms,
             "heatmaps": self.heatmaps, "boxplots": self.boxplots,
             "rainflow": self.rainflow, "reports": self.reports,
@@ -191,7 +202,12 @@ class MainWindow(QMainWindow):
         self.new_study.start_requested.connect(self._start_pipeline)
         self.reports.regenerate_requested.connect(self._regenerate_report)
         self.history.open_study_requested.connect(self._open_study_by_name)
+        self.history.studies_changed.connect(self._on_studies_changed)
         self.dashboard.navigate_requested.connect(self._handle_nav_request)
+
+    def _on_studies_changed(self) -> None:
+        self._reload_study_selector(self.study_selector.currentData())
+        self.dashboard.refresh()
 
     def _wire_pipeline(self) -> None:
         self.pipeline.log_line.connect(self.processing.append_log)
@@ -200,9 +216,7 @@ class MainWindow(QMainWindow):
         self.pipeline.progress.connect(self.processing.on_progress)
         self.pipeline.finished.connect(self._on_pipeline_finished)
 
-    # ════════════════════════════════════════════════════════════════════════
     # Navigation
-    # ════════════════════════════════════════════════════════════════════════
     def navigate(self, key: str) -> None:
         if key not in self.pages:
             return
@@ -227,9 +241,7 @@ class MainWindow(QMainWindow):
         else:
             self.navigate(request)
 
-    # ════════════════════════════════════════════════════════════════════════
     # Active study management
-    # ════════════════════════════════════════════════════════════════════════
     def _reload_study_selector(self, select: Optional[str] = None) -> None:
         self.study_selector.blockSignals(True)
         self.study_selector.clear()
@@ -267,9 +279,7 @@ class MainWindow(QMainWindow):
         self.active_study = self.repo.get_study(name)
         self.navigate("validation")
 
-    # ════════════════════════════════════════════════════════════════════════
     # Backend integration
-    # ════════════════════════════════════════════════════════════════════════
     def _start_pipeline(self, request: RunRequest) -> None:
         if self.pipeline.is_running:
             QMessageBox.information(self, "Pipeline busy",

@@ -1,0 +1,6 @@
+# Build-time dependency for packaging the desktop app into a Windows .exe.
+#   pip install -r build-requirements.txt
+#   pyinstaller --noconfirm --onefile --windowed --name DTT-Platform \
+#       --collect-all PySide6 --collect-all matplotlib --collect-all scipy \
+#       --collect-submodules dtt --collect-submodules gui gui/main.py
+pyinstaller>=6.0

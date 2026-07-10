@@ -1,16 +1,41 @@
-# ── Datasets (large WFT CSVs — regenerate with generate_sample_data.py) ──
+# ============================================================
+# CONFIDENTIAL DATA — never commit measurement data, reports,
+# or proprietary engineering coding to the repository.
+# ============================================================
+
+# Raw measurement data (imc STUDIO / classic FAMOS)
+Raw data_no sanitisation/
+raw data in .dat format/
+*.raw
+*.dat
+
+# WFT CSV datasets
 csv/
+*.csv
 
-# ── Specification / instruction documents (internal) ──
-instructions/
-
-# ── Generated pipeline outputs (figures, reports, processed data) ──
+# Generated pipeline outputs (figures, processed data, reports)
 dtt/outputs/
 
-# ── Legacy / scratch ──
+# Engineering reports / presentations
+*.pptx
+*.ppt
+*.xlsx
+*.xls
+
+# Proprietary channel-mapping / FAMOS coding
+imc coding_filtering_Channel mapping.txt
+*Channel mapping*.txt
+*coding*.txt
+
+# Internal specification / instruction documents
+instructions/
+
+# Legacy / scratch
 previous progress/
 
-# ── Python ──
+# ============================================================
+# Python / tooling
+# ============================================================
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -21,12 +46,10 @@ dist/
 venv/
 env/
 .python-version
-
-# ── Packaging artifacts ──
 *.spec
 *.manifest
 
-# ── OS / IDE ──
+# OS / IDE
 .DS_Store
 Thumbs.db
 .vscode/

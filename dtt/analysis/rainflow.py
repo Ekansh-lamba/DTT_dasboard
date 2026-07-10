@@ -1,7 +1,6 @@
 import csv
 import logging
 from pathlib import Path
-from typing import List
 
 import matplotlib
 matplotlib.use("Agg")
@@ -11,7 +10,6 @@ import pandas as pd
 import rainflow
 
 from dtt.config import (
-    MANDATORY_CHANNELS,
     WHEEL_GROUPS,
     WHEEL_COLORS,
     CHAN_COLORS,
@@ -83,8 +81,6 @@ def _build_fromto_matrix(cycles: list, n_bins: int = RAINFLOW_BINS, shared_edges
 
 def _draw_fromto_ax(ax, mat: np.ndarray, edges: np.ndarray, title: str, col: str):
     _style_ax(ax)
-    n      = len(edges) - 1
-    labels = [f"{(edges[i]+edges[i+1])/2:.0f}" for i in range(n)]
     extent = [edges[0], edges[-1], edges[0], edges[-1]]
     log_mat = np.log10(mat + 1)
     im = ax.imshow(
@@ -126,14 +122,18 @@ def _save_cycles_csv(cycles: list, ch: str, out_dir: Path) -> None:
 def generate_rainflow(df: pd.DataFrame, config: RunConfig) -> None:
     out    = config.figures_dir
     m      = config.miner_exponent
-    wheels = list(WHEEL_GROUPS.keys())
+    rc     = config.run_channels
+    wheel_groups = rc.wheel_groups if rc is not None else WHEEL_GROUPS
+    wheel_colors = rc.wheel_colors if rc is not None else WHEEL_COLORS
+    chan_colors  = rc.chan_colors if rc is not None else CHAN_COLORS
+    wheels = list(wheel_groups.keys())
 
     for wheel in wheels:
-        channels = [ch for ch in WHEEL_GROUPS[wheel] if ch in df.columns]
+        channels = [ch for ch in wheel_groups[wheel] if ch in df.columns]
         if not channels:
             continue
 
-        col_pri = WHEEL_COLORS[wheel]["pri"]
+        col_pri = wheel_colors[wheel]["pri"]
         all_cycles = {}
         for ch in channels:
             cycles = _extract_cycles(df, ch)
@@ -163,7 +163,7 @@ def generate_rainflow(df: pd.DataFrame, config: RunConfig) -> None:
         )
 
         for col_idx, ch in enumerate(channels):
-            col    = CHAN_COLORS.get(ch, col_pri)
+            col    = chan_colors.get(ch, col_pri)
             cycles = all_cycles[ch]
             mat, edges = _build_fromto_matrix(cycles, RAINFLOW_BINS, shared_edges)
 

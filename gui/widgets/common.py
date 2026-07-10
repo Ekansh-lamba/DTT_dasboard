@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QPixmap, QPainter, QFont
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap, QPainter
 from PySide6.QtWidgets import (
     QFrame, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QScrollArea,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QSizePolicy,
@@ -16,9 +16,7 @@ from PySide6.QtWidgets import (
 from gui import theme
 
 
-# ════════════════════════════════════════════════════════════════════════════
 # Simple building blocks
-# ════════════════════════════════════════════════════════════════════════════
 
 class Card(QFrame):
     """A rounded surface panel with a vertical layout."""
@@ -86,9 +84,7 @@ def status_badge(status: str) -> Badge:
     return Badge(status, color)
 
 
-# ════════════════════════════════════════════════════════════════════════════
 # Image viewing
-# ════════════════════════════════════════════════════════════════════════════
 
 class ZoomableImageView(QGraphicsView):
     """A pan + scroll-to-zoom image canvas used for figure inspection."""

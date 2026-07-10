@@ -31,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-# ── Canonical project locations ──────────────────────────────────────────────
+# Canonical project locations
 # repository.py lives at: <root>/gui/models/repository.py
 PROJECT_DIR = Path(__file__).resolve().parents[2]      # …/apollo tyres
 DTT_DIR     = PROJECT_DIR / "dtt"
@@ -56,9 +56,7 @@ PIPELINE_STAGES: List[str] = [
 ]
 
 
-# ════════════════════════════════════════════════════════════════════════════
 # Value objects
-# ════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class ChannelStat:
@@ -98,7 +96,7 @@ class Study:
     _validation: Optional[dict] = field(default=None, repr=False)
     _stats: Optional[Dict[str, ChannelStat]] = field(default=None, repr=False)
 
-    # ── Derived paths ────────────────────────────────────────────────────────
+    # Derived paths
     @property
     def figures_dir(self) -> Path:
         return self.path / "figures"
@@ -123,7 +121,7 @@ class Study:
     def processed_csv(self) -> Path:
         return self.path / "processed_data.csv"
 
-    # ── Existence flags ──────────────────────────────────────────────────────
+    # Existence flags
     @property
     def has_validation(self) -> bool:
         return self.validation_file.exists()
@@ -168,7 +166,7 @@ class Study:
             return "Validated"
         return "Empty"
 
-    # ── Validation payload ───────────────────────────────────────────────────
+    # Validation payload
     def validation(self) -> dict:
         if self._validation is None:
             self._validation = _read_json(self.validation_file) or {}
@@ -195,7 +193,7 @@ class Study:
                     return raw
         return self.modified.strftime("%Y-%m-%d")
 
-    # ── Stats payload ────────────────────────────────────────────────────────
+    # Stats payload
     def stats(self) -> Dict[str, ChannelStat]:
         if self._stats is None:
             raw = _read_json(self.stats_file) or {}
@@ -217,7 +215,7 @@ class Study:
             self._stats = parsed
         return self._stats
 
-    # ── Figure lookups ───────────────────────────────────────────────────────
+    # Figure lookups
     def figure(self, filename: str) -> Optional[Path]:
         p = self.figures_dir / filename
         return p if p.exists() else None
@@ -249,7 +247,7 @@ class Study:
     def rainflow_cycle_csvs(self) -> List[Path]:
         return self.figures("rainflow_cycles_*.csv")
 
-    # ── Log ──────────────────────────────────────────────────────────────────
+    # Log
     def read_log(self) -> str:
         if not self.has_log:
             return ""
@@ -259,9 +257,7 @@ class Study:
             return ""
 
 
-# ════════════════════════════════════════════════════════════════════════════
 # Repository
-# ════════════════════════════════════════════════════════════════════════════
 
 class StudyRepository:
     """Discovers and loads studies from the backend ``outputs`` directory."""
@@ -270,7 +266,7 @@ class StudyRepository:
         self.outputs_dir = Path(outputs_dir)
         self.csv_dir = Path(csv_dir)
 
-    # ── Discovery ────────────────────────────────────────────────────────────
+    # Discovery
     def list_studies(self) -> List[Study]:
         """All study folders, newest first."""
         if not self.outputs_dir.exists():
@@ -282,6 +278,18 @@ class StudyRepository:
         ]
         studies.sort(key=lambda s: s.modified, reverse=True)
         return studies
+
+    def delete_study(self, name: str) -> bool:
+        """Permanently remove a study folder. Returns True on success."""
+        import shutil
+        d = self.outputs_dir / name
+        if not d.is_dir():
+            return False
+        try:
+            shutil.rmtree(d)
+            return True
+        except OSError:
+            return False
 
     def get_study(self, name: str) -> Optional[Study]:
         d = self.outputs_dir / name
@@ -296,7 +304,7 @@ class StudyRepository:
             return []
         return sorted(self.csv_dir.glob("*.csv"))
 
-    # ── Aggregate dashboard metrics ──────────────────────────────────────────
+    # Aggregate dashboard metrics
     def latest_report(self) -> Optional[Path]:
         latest: Optional[Path] = None
         latest_mtime = -1.0
@@ -309,9 +317,7 @@ class StudyRepository:
         return latest
 
 
-# ════════════════════════════════════════════════════════════════════════════
 # Helpers
-# ════════════════════════════════════════════════════════════════════════════
 
 def _read_json(path: Path) -> Optional[dict]:
     try:

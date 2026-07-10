@@ -4,7 +4,7 @@ import sys
 import time
 from pathlib import Path
 
-from dtt.config import RunConfig, OUTPUTS_DIR
+from dtt.config import RunConfig
 from dtt.ingestion.loader import load_csv
 from dtt.validation.validator import validate
 from dtt.sanitization.sanitizer import sanitize
@@ -31,7 +31,7 @@ def _setup_logging(config: RunConfig) -> None:
 
 
 def run(
-    csv_path: Path,
+    csv_path: Path = None,
     vehicle_name: str = "Vehicle",
     study_name: str   = "",
     sampling_rate: float = None,
@@ -40,9 +40,18 @@ def run(
     apply_filter_flag: bool = True,
     miner_exponent: float   = None,
     output_dir: Path        = None,
+    raw_folder: Path        = None,
+    raw_files:  list        = None,
+    vehicle_type: str       = "",
 ) -> Path:
+    if csv_path is None and raw_folder is None and not raw_files:
+        raise ValueError("Provide csv_path, raw_folder, or raw_files")
+
     kwargs = dict(
-        csv_path     = Path(csv_path),
+        csv_path     = Path(csv_path) if csv_path else None,
+        raw_folder   = Path(raw_folder) if raw_folder else None,
+        raw_files    = [Path(f) for f in raw_files] if raw_files else None,
+        vehicle_type = vehicle_type,
         vehicle_name = vehicle_name,
         study_name   = study_name,
     )
@@ -57,20 +66,42 @@ def run(
     _setup_logging(config)
     logger = logging.getLogger("pipeline")
 
+    source = (f"{len(config.raw_files)} raw files" if config.raw_files
+              else config.raw_folder or config.csv_path)
     logger.info("=" * 60)
     logger.info("DTT WFT Automation Pipeline  –  Starting")
     logger.info("Vehicle:  %s", config.vehicle_name)
     logger.info("Study:    %s", config.study_name)
-    logger.info("CSV:      %s", config.csv_path)
+    logger.info("Source:   %s", source)
+    if config.vehicle_type:
+        logger.info("Vehicle type: %s", config.vehicle_type)
     logger.info("Output:   %s", config.run_output_dir)
     logger.info("=" * 60)
 
     t0 = time.perf_counter()
 
     logger.info("[1/9]  Data Ingestion")
-    df, metadata = load_csv(config.csv_path, config)
+    if config.raw_files:
+        from dtt.ingestion.loader import load_raw_files
+        df, metadata = load_raw_files(config.raw_files, config)
+    elif config.raw_folder is not None:
+        from dtt.ingestion.loader import load_raw_folder
+        df, metadata = load_raw_folder(config.raw_folder, config)
+    else:
+        df, metadata = load_csv(config.csv_path, config)
     if metadata.get("sampling_rate_hz"):
         config.sampling_rate = metadata["sampling_rate_hz"]
+
+    # Build the axle-dynamic channel configuration from the actual columns
+    # BEFORE validation so every stage (incl. validation) is axle-aware.
+    from dtt.run_channels import build_run_channels
+    config.run_channels = build_run_channels(list(df.columns))
+    logger.info("Channel configuration: %s", config.run_channels.summary())
+
+    from dtt.vehicles import get_preset, match_preset
+    preset = get_preset(config.vehicle_type) or match_preset(config.run_channels.channel_set)
+    config.tyre = preset.tyre
+    logger.info("Vehicle preset: %s  (tyre %s)", preset.name, preset.tyre.tyre_type)
 
     logger.info("[2/9]  Channel Validation")
     validation_report = validate(df, metadata, config)
@@ -122,8 +153,12 @@ def run(
 
 def _cli() -> None:
     parser = argparse.ArgumentParser(description="DTT WFT Automation Pipeline")
-    parser.add_argument("--csv",      required=True,        help="Path to WFT CSV file")
+    src = parser.add_mutually_exclusive_group(required=True)
+    src.add_argument("--csv",                               help="Path to WFT CSV file")
+    src.add_argument("--raw",                               help="Path to imc STUDIO .raw channel folder")
+    src.add_argument("--raw-files", nargs="+",              help="Specific imc .raw files")
     parser.add_argument("--vehicle",  default="Vehicle",    help="Vehicle name for report naming")
+    parser.add_argument("--vehicle-type", default="",       help="Vehicle-type preset ('' = auto-detect)")
     parser.add_argument("--study",    default="",           help="Study identifier (default: timestamp)")
     parser.add_argument("--sr",       type=float,           help="Override sampling rate (Hz)")
     parser.add_argument("--cutoff",   type=float,           help="Override filter cutoff (Hz)")
@@ -135,6 +170,9 @@ def _cli() -> None:
 
     run(
         csv_path         = args.csv,
+        raw_folder       = args.raw,
+        raw_files        = args.raw_files,
+        vehicle_type     = args.vehicle_type,
         vehicle_name     = args.vehicle,
         study_name       = args.study,
         sampling_rate    = args.sr,

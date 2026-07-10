@@ -1,7 +1,6 @@
 import json
 import logging
-from pathlib import Path
-from typing import Dict, List
+from typing import Dict
 
 import numpy as np
 import pandas as pd
@@ -12,7 +11,10 @@ logger = logging.getLogger(__name__)
 
 
 def compute_statistics(df: pd.DataFrame, config: RunConfig) -> Dict:
-    channels = [ch for ch in MANDATORY_CHANNELS if ch in df.columns]
+    if config.run_channels is not None:
+        channels = [ch for ch in config.run_channels.mandatory_channels if ch in df.columns]
+    else:
+        channels = [ch for ch in MANDATORY_CHANNELS if ch in df.columns]
     results  = {}
 
     for ch in channels:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QLabel, QProgressBar, QPlainTextEdit,
-    QFrame, QPushButton, QSplitter, QWidget,
+    QFrame, QPushButton, QSplitter,
 )
 
 from gui import theme
@@ -108,7 +108,7 @@ class ProcessingPage(BasePage):
         splitter.addWidget(log_card)
         splitter.setSizes([420, 640])
 
-    # ── Worker signal handlers ───────────────────────────────────────────────
+    # Worker signal handlers
     def begin(self, study_name: str) -> None:
         for row in self.rows.values():
             row.set_state("pending")

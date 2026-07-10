@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QPushButton, QFileDialog,
@@ -73,7 +73,6 @@ class ReportsPage(BasePage):
             self.table.setItem(r, 1, QTableWidgetItem(f"{rpt.stat().st_size/1024:.0f}"))
             self.table.setItem(r, 2, QTableWidgetItem(
                 datetime.fromtimestamp(rpt.stat().st_mtime).strftime("%Y-%m-%d %H:%M")))
-            row_actions = QHBoxLayout()
             open_btn = QPushButton("Open")
             open_btn.setObjectName("Secondary")
             open_btn.clicked.connect(lambda _=False, p=rpt: _open_path(p))
