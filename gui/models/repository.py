@@ -31,12 +31,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-# Canonical project locations
-# repository.py lives at: <root>/gui/models/repository.py
-PROJECT_DIR = Path(__file__).resolve().parents[2]      # …/apollo tyres
-DTT_DIR     = PROJECT_DIR / "dtt"
-OUTPUTS_DIR = DTT_DIR / "outputs"
-CSV_DIR     = PROJECT_DIR / "csv"
+# Canonical locations — shared with the backend so the GUI and the pipeline
+# (incl. the frozen exe's persistent data folder) always agree.
+from dtt.config import OUTPUTS_DIR, CSV_DIR, DATA_DIR
+
+PROJECT_DIR = Path(__file__).resolve().parents[2]      # …/apollo tyres (source runs)
 
 WHEELS  = ("FL", "FR", "RL", "RR")
 SIGNALS = ("Fx", "Fy", "Fz")

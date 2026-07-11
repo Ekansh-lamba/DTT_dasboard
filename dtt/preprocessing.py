@@ -1,11 +1,4 @@
-"""
-Interactive preprocessing transforms (sanitisation, filtering, resampling).
 
-Pure NumPy/SciPy functions used both by the GUI's live-preview Preprocess screen
-and available for batch use. They mirror the FAMOS operations seen in the imc
-recipe: smoothing/low-pass (``FiltLP``/``smo``), decimation (``red``), plus the
-platform's threshold and outlier rules.
-"""
 
 from __future__ import annotations
 

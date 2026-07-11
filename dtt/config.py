@@ -1,8 +1,17 @@
+import sys
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# When packaged as an exe, BASE_DIR points at the ephemeral extraction folder,
+# so persist all user data (studies, csv) under the user's home instead.
+if getattr(sys, "frozen", False):
+    DATA_DIR = Path.home() / "DTT-Platform"
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+else:
+    DATA_DIR = BASE_DIR
 
 MANDATORY_CHANNELS: List[str] = [
     "FL_Fx", "FL_Fy", "FL_Fz",
@@ -109,7 +118,9 @@ OUTLIER_HIGH_PCTILE: float = 99.0
 
 GPS_SPIKE_THRESHOLD_M: float = 200.0
 
-OUTPUTS_DIR = BASE_DIR / "dtt" / "outputs"
+OUTPUTS_DIR = (DATA_DIR / "outputs") if getattr(sys, "frozen", False) \
+    else (BASE_DIR / "dtt" / "outputs")
+CSV_DIR = DATA_DIR / "csv"
 
 FIGURE_DPI: int = 150
 

@@ -11,12 +11,16 @@ PySide6 (Qt) GUI.
 
 ## Download & run (for reviewers)
 
-A prebuilt Windows executable is published on the **Releases** page:
+A prebuilt Windows build is published on the **Releases** page:
 
-1. Go to **Releases** → download **`DTT-Platform.exe`**.
-2. Double-click it. No Python install required.
+1. Go to **Releases** → download **`DTT-Platform-windows.zip`**.
+2. **Extract** the zip anywhere.
+3. Run **`DTT-Platform.exe`** inside the extracted folder. No Python install required.
 
-(The `.exe` is produced automatically by GitHub Actions — see *Building the exe*.)
+Studies you create are saved under **`Documents\..\DTT-Platform\outputs`** (a
+`DTT-Platform` folder in your home directory), so results persist between runs.
+
+(The build is produced automatically by GitHub Actions — see *Building the exe*.)
 
 > **Note:** measurement data is **not** shipped in the repo (confidential). Use
 > the built-in **New Study** screen to load your own imc `.raw` folder/files or a
@@ -94,12 +98,12 @@ Automatic (GitHub Actions, [`.github/workflows/build-exe.yml`](.github/workflows
 
 Locally:
 ```bash
-pip install -r build-requirements.txt
-pyinstaller --noconfirm --onefile --windowed --name DTT-Platform ^
-    --collect-all PySide6 --collect-all matplotlib --collect-all scipy ^
-    --collect-submodules dtt --collect-submodules gui gui/main.py
+pip install -r dtt/requirements.txt -r gui/requirements.txt -r build-requirements.txt
+pyinstaller --noconfirm DTT-Platform.spec
 ```
-The result is `dist/DTT-Platform.exe`.
+The result is `dist/DTT-Platform.exe`. The build config is in
+[DTT-Platform.spec](DTT-Platform.spec) (only Qt Core/Gui/Widgets/Svg are bundled;
+heavy unused Qt modules are excluded to keep the exe small).
 
 ---
 
