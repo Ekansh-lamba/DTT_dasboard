@@ -140,6 +140,10 @@ class RunConfig:
     filter_order:   int   = FILTER_ORDER
     filter_cutoff:  float = FILTER_CUTOFF
     apply_filter:   bool  = True
+    famos_mode:     bool  = True       # use the imc/FAMOS recipe (smo/FiltLP/red)
+    famos_applied:  bool  = False      # set once ingestion has run the recipe
+    deglitch:       bool  = False      # rolling-median de-glitch of DAQ artifacts
+    deglitch_nsigma: float = 6.0
     miner_exponent: float = RAINFLOW_MINER
     output_dir:     Path  = field(default_factory=lambda: OUTPUTS_DIR)
     run_channels:   object = None      # ChannelSet-derived config, built at run time

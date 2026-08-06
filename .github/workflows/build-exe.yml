@@ -26,20 +26,36 @@ jobs:
           pip install -r gui/requirements.txt
           pip install pyinstaller
 
+      # onedir: fast to launch, but the whole folder has to be shipped together.
       - name: Build executable (onedir)
         run: pyinstaller --noconfirm DTT-Platform.spec
 
-      - name: Package as zip
-        run: Compress-Archive -Path dist/DTT-Platform/* -DestinationPath DTT-Platform-windows.zip
+      - name: Package onedir as zip
+        run: Compress-Archive -Path dist/DTT-Platform -DestinationPath DTT-Platform-windows.zip
 
-      - name: Upload build artifact
+      # onefile: one self-contained .exe that can be sent to someone as-is.
+      # Slower to start (it unpacks itself each launch) but needs no extraction.
+      - name: Build executable (onefile)
+        env:
+          DTT_BUILD_ONEFILE: "1"
+        run: pyinstaller --noconfirm --distpath dist-onefile DTT-Platform.spec
+
+      - name: Rename onefile exe
+        run: Move-Item dist-onefile/DTT-Platform.exe DTT-Platform-standalone.exe
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: DTT-Platform-windows
-          path: DTT-Platform-windows.zip
+          path: |
+            DTT-Platform-windows.zip
+            DTT-Platform-standalone.exe
 
       - name: Publish to Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: DTT-Platform-windows.zip
+          generate_release_notes: true
+          files: |
+            DTT-Platform-windows.zip
+            DTT-Platform-standalone.exe

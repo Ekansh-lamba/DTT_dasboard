@@ -1,3 +1,17 @@
+"""Signal conditioning stage.
+
+By default this reproduces the imc/FAMOS recipe rather than a generic
+Butterworth pass: WFT forces and moments are smoothed with ``smo(x, 0.1)``,
+``Latacc`` gets ``FiltLP(4, 5 Hz)`` then ``smo(x, 0.5)``, and speed/longitudinal
+accel get ``smo(x, 0.5)``. See :mod:`dtt.preprocessing` for the operators and
+how they were validated against a real FAMOS export.
+
+A 4th-order 10 Hz Butterworth on the force channels — the previous behaviour —
+is materially more aggressive than FAMOS's 0.1 s smoothing and shifts every
+downstream statistic, histogram and rainflow count. Set ``famos_mode=False``
+to get it back.
+"""
+
 import logging
 
 import numpy as np
@@ -5,6 +19,7 @@ import pandas as pd
 from scipy.signal import butter, filtfilt
 
 from dtt.config import RunConfig, MANDATORY_CHANNELS
+from dtt.preprocessing import apply_famos_recipe
 
 logger = logging.getLogger(__name__)
 
@@ -18,34 +33,59 @@ def _butterworth_lpf(signal: np.ndarray, order: int, cutoff: float, sr: float) -
     return filtfilt(b, a, signal)
 
 
-def apply_filter(df: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
-    if not config.apply_filter:
-        logger.info("Filtering skipped (apply_filter=False)")
-        return df
-
+def _apply_legacy_butterworth(df: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
     rc = getattr(config, "run_channels", None)
     _mandatory = rc.mandatory_channels if rc is not None and rc.mandatory_channels \
         else MANDATORY_CHANNELS
     channels = [ch for ch in _mandatory if ch in df.columns]
-    sr       = config.sampling_rate
+    sr = config.sampling_rate
 
     df = df.copy()
     for ch in channels:
         series = pd.to_numeric(df[ch], errors="coerce")
-        valid  = series.dropna()
+        valid = series.dropna()
         if len(valid) < 4 * config.filter_order:
             logger.warning("Channel %s too short for filtering, skipping", ch)
             continue
-        arr              = series.values.copy()
-        finite_mask      = np.isfinite(arr)
+        arr = series.values.copy()
+        finite_mask = np.isfinite(arr)
         if finite_mask.sum() < 4 * config.filter_order:
             continue
         arr[~finite_mask] = np.nanmean(arr[finite_mask])
-        filtered          = _butterworth_lpf(arr, config.filter_order, config.filter_cutoff, sr)
-        df[ch]            = filtered
+        df[ch] = _butterworth_lpf(arr, config.filter_order, config.filter_cutoff, sr)
 
     logger.info(
         "Butterworth LPF applied: order=%d  cutoff=%.1f Hz  SR=%.0f Hz  channels=%d",
         config.filter_order, config.filter_cutoff, sr, len(channels),
     )
     return df
+
+
+def apply_filter(df: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
+    """Condition every channel per the FAMOS recipe (or the legacy Butterworth)."""
+    if not config.apply_filter:
+        logger.info("Filtering skipped (apply_filter=False)")
+        return df
+
+    if not getattr(config, "famos_mode", True):
+        return _apply_legacy_butterworth(df, config)
+
+    if getattr(config, "famos_applied", False):
+        # imc raw ingestion already ran smo/FiltLP at the native rate, which is
+        # the only place it can be done correctly (before red()).
+        logger.info("FAMOS recipe already applied during ingestion — not repeating")
+        return df
+
+    out, _, applied = apply_famos_recipe(
+        df, config.sampling_rate,
+        decimate_factor=1,                     # rate is fixed by ingestion
+        deglitch=getattr(config, "deglitch", False),
+        deglitch_nsigma=getattr(config, "deglitch_nsigma", 6.0),
+        emit_lpf_columns=False,
+    )
+    treated = sum(1 for v in applied.values() if v not in ("passthrough", "rebuilt time base"))
+    logger.info("FAMOS recipe applied at %.0f Hz: %d/%d channels conditioned",
+                config.sampling_rate, treated, len(applied))
+    for ch, op in applied.items():
+        logger.debug("  %-16s %s", ch, op)
+    return out

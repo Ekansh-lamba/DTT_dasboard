@@ -20,6 +20,15 @@ from dtt.reporting.report_builder import build_report
 def _setup_logging(config: RunConfig) -> None:
     log_path = config.logs_dir / "pipeline.log"
     fmt      = "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s"
+    # The GUI reads our stdout as UTF-8 to drive its live log. Left alone, a
+    # frozen build writes the Windows ANSI codepage and every en/em-dash in a
+    # log line arrives as a replacement char. PYTHONIOENCODING does not help
+    # here — the PyInstaller bootloader ignores it — so set it on the stream.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass                                   # None or already-closed stream
     logging.basicConfig(
         level=logging.INFO,
         format=fmt,
@@ -43,6 +52,8 @@ def run(
     raw_folder: Path        = None,
     raw_files:  list        = None,
     vehicle_type: str       = "",
+    famos_mode: bool        = True,
+    deglitch:   bool        = False,
 ) -> Path:
     if csv_path is None and raw_folder is None and not raw_files:
         raise ValueError("Provide csv_path, raw_folder, or raw_files")
@@ -61,6 +72,8 @@ def run(
     if miner_exponent is not None: kwargs["miner_exponent"] = miner_exponent
     if output_dir     is not None: kwargs["output_dir"]     = Path(output_dir)
     kwargs["apply_filter"] = apply_filter_flag
+    kwargs["famos_mode"]   = famos_mode
+    kwargs["deglitch"]     = deglitch
 
     config = RunConfig(**kwargs)
     _setup_logging(config)
@@ -91,6 +104,13 @@ def run(
         df, metadata = load_csv(config.csv_path, config)
     if metadata.get("sampling_rate_hz"):
         config.sampling_rate = metadata["sampling_rate_hz"]
+    # imc raw ingestion runs smo/FiltLP at the native rate (before red()), which
+    # is the only correct place for it; tell stage 4 not to condition twice.
+    config.famos_applied = bool(metadata.get("famos_recipe"))
+    if config.famos_applied:
+        logger.info("FAMOS recipe applied at ingestion (red x%s): %d channels",
+                    metadata.get("famos_decimate", 1),
+                    len(metadata["famos_recipe"]))
 
     # Build the axle-dynamic channel configuration from the actual columns
     # BEFORE validation so every stage (incl. validation) is axle-aware.
@@ -109,7 +129,8 @@ def run(
     logger.info("[3/9]  Data Sanitization")
     df, san_report = sanitize(df, config)
 
-    logger.info("[4/9]  Signal Processing (Butterworth LPF)")
+    logger.info("[4/9]  Signal Processing (%s)",
+                "imc/FAMOS recipe" if config.famos_mode else "Butterworth LPF")
     df = apply_filter(df, config)
 
     logger.info("[5/9]  Statistical Analysis")
@@ -163,7 +184,11 @@ def _cli() -> None:
     parser.add_argument("--sr",       type=float,           help="Override sampling rate (Hz)")
     parser.add_argument("--cutoff",   type=float,           help="Override filter cutoff (Hz)")
     parser.add_argument("--order",    type=int,             help="Override filter order")
-    parser.add_argument("--no-filter", action="store_true", help="Disable LPF filtering")
+    parser.add_argument("--no-filter", action="store_true", help="Disable all filtering")
+    parser.add_argument("--no-famos",  action="store_true",
+                        help="Use the legacy Butterworth LPF instead of the imc/FAMOS recipe")
+    parser.add_argument("--deglitch",  action="store_true",
+                        help="Rolling-median de-glitch of DAQ artifact spikes before filtering")
     parser.add_argument("--miner",    type=float,           help="Miner's rule exponent (default 8)")
     parser.add_argument("--outdir",                         help="Override output directory")
     args = parser.parse_args()
@@ -179,6 +204,8 @@ def _cli() -> None:
         filter_order     = args.order,
         filter_cutoff    = args.cutoff,
         apply_filter_flag= not args.no_filter,
+        famos_mode       = not args.no_famos,
+        deglitch         = args.deglitch,
         miner_exponent   = args.miner,
         output_dir       = args.outdir,
     )

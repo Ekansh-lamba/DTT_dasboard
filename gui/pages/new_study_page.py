@@ -95,6 +95,13 @@ class NewStudyPage(BasePage):
             f"color:{theme.ACCENT}; font-size:12px; font-weight:600;")
         form.addRow("Detected", self.detect_label)
 
+        # All WFT channels found in the source, listed before the run starts.
+        self.channels_label = QLabel("")
+        self.channels_label.setWordWrap(True)
+        self.channels_label.setStyleSheet(
+            f"color:{theme.TEXT_MUTED}; font-family:monospace; font-size:11px;")
+        form.addRow("Channels", self.channels_label)
+
         self.vehicle_edit = QLineEdit("RLDA_PV")
         form.addRow("Vehicle name", self.vehicle_edit)
 
@@ -116,10 +123,29 @@ class NewStudyPage(BasePage):
         fform = QFormLayout()
         fform.setSpacing(12)
 
-        self.filter_check = QCheckBox("Apply Butterworth low-pass filter")
+        self.filter_check = QCheckBox("Apply signal conditioning")
         self.filter_check.setChecked(True)
         self.filter_check.toggled.connect(self._toggle_filter)
         right.layout().addWidget(self.filter_check)
+
+        self.famos_check = QCheckBox("Use imc/FAMOS recipe (recommended)")
+        self.famos_check.setChecked(True)
+        self.famos_check.setToolTip(
+            "Reproduce the imc config file exactly: smo(x, 0.1) on WFT forces and "
+            "moments, FiltLP(4, 5 Hz) + smo(x, 0.5) on Latacc, smo(x, 0.5) on "
+            "speed, then red().\nUncheck to use the legacy Butterworth low-pass "
+            "below, which is markedly more aggressive than FAMOS on the forces "
+            "and shifts every downstream statistic.")
+        self.famos_check.toggled.connect(self._toggle_filter)
+        right.layout().addWidget(self.famos_check)
+
+        self.deglitch_check = QCheckBox("Remove DAQ artifact spikes")
+        self.deglitch_check.setChecked(False)
+        self.deglitch_check.setToolTip(
+            "Bridge samples that sit far outside a rolling median of their "
+            "neighbours.\nLeave off for a cleanly-read imc recording; turn on if "
+            "the raw traces show isolated out-of-family spikes.")
+        right.layout().addWidget(self.deglitch_check)
 
         self.cutoff_spin = QDoubleSpinBox()
         self.cutoff_spin.setRange(0.1, 1000.0)
@@ -177,6 +203,7 @@ class NewStudyPage(BasePage):
         self._raw_files: list[Path] = []
         self.reload_csvs()
         self._on_source_type()
+        self._toggle_filter()
 
     # Source switching
     def _on_source_type(self, *_) -> None:
@@ -193,9 +220,15 @@ class NewStudyPage(BasePage):
         for f in files:
             self.csv_combo.addItem(f.name, str(f))
 
-    def _toggle_filter(self, on: bool) -> None:
-        self.cutoff_spin.setEnabled(on)
-        self.order_spin.setEnabled(on)
+    def _toggle_filter(self, *_) -> None:
+        on = self.filter_check.isChecked()
+        # Cutoff/order drive the legacy Butterworth only — the FAMOS recipe
+        # fixes them per channel from the imc config file.
+        legacy = on and not self.famos_check.isChecked()
+        self.famos_check.setEnabled(on)
+        self.deglitch_check.setEnabled(on)
+        self.cutoff_spin.setEnabled(legacy)
+        self.order_spin.setEnabled(legacy)
 
     def _browse_csv(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -258,16 +291,31 @@ class NewStudyPage(BasePage):
         cols = self._current_columns()
         if not cols:
             self.detect_label.setText("—")
+            self.channels_label.setText("")
             return
         cs = discover(cols)
         if cs.n_positions == 0:
             self.detect_label.setText("No wheel-force channels detected")
             self.detect_label.setStyleSheet(f"color:{theme.WARNING}; font-size:12px;")
+            self.channels_label.setText("")
             return
         preset = match_preset(cs)
         self.detect_label.setStyleSheet(
             f"color:{theme.ACCENT}; font-size:12px; font-weight:600;")
         self.detect_label.setText(f"{cs.summary()}   →  suggests: {preset.name}")
+
+        # List every discovered WFT channel, grouped by wheel position.
+        by_pos: dict[str, list[str]] = {}
+        for _orig, (pos, comp) in cs.source_map.items():
+            by_pos.setdefault(pos.label, []).append(comp)
+        n_ch = sum(len(v) for v in by_pos.values())
+        lines = [f"{n_ch} WFT channels across {cs.n_positions} positions:"]
+        for lbl in sorted(by_pos):
+            comps = sorted(by_pos[lbl],
+                           key=lambda c: ("Fx", "Fy", "Fz", "Mx", "My", "Mz").index(c)
+                           if c in ("Fx", "Fy", "Fz", "Mx", "My", "Mz") else 99)
+            lines.append(f"  {lbl}: {'  '.join(comps)}")
+        self.channels_label.setText("\n".join(lines))
 
     # Launch
     def _on_start(self) -> None:
@@ -279,10 +327,12 @@ class NewStudyPage(BasePage):
             vehicle=self.vehicle_edit.text().strip() or "Vehicle",
             vehicle_type=vehicle_type,
             study=self.study_edit.text().strip(),
-            cutoff=self.cutoff_spin.value() if self.filter_check.isChecked() else None,
-            order=self.order_spin.value() if self.filter_check.isChecked() else None,
+            cutoff=self.cutoff_spin.value() if self.cutoff_spin.isEnabled() else None,
+            order=self.order_spin.value() if self.order_spin.isEnabled() else None,
             miner=self.miner_spin.value(),
             no_filter=not self.filter_check.isChecked(),
+            no_famos=not self.famos_check.isChecked(),
+            deglitch=self.deglitch_check.isChecked(),
         )
 
         if is_raw:

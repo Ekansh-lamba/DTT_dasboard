@@ -235,6 +235,9 @@ def _finalize_raw(df, imeta, config, name) -> Tuple[pd.DataFrame, dict]:
         "n_to_dan_applied": dan_applied,
         "raw_fs_hz":        imeta.get("raw_fs_hz"),
         "source_type":      "imc_raw",
+        "famos_recipe":     imeta.get("famos_recipe") or {},
+        "famos_decimate":   imeta.get("famos_decimate", 1),
+        "deglitch":         imeta.get("deglitch", False),
     }
     logger.info(
         "Loaded imc raw: %d rows, %d cols, raw %.0f Hz -> %.0f Hz, %d force channels",
@@ -249,7 +252,9 @@ def load_raw_folder(folder: Path, config: RunConfig) -> Tuple[pd.DataFrame, dict
     folder = Path(folder)
     logger.info("Loading imc raw folder: %s", folder)
     target = config.sampling_rate or DEFAULT_SAMPLING_RATE
-    df, imeta = read_folder(folder, target_fs=target)
+    df, imeta = read_folder(folder, target_fs=target,
+                            famos=getattr(config, "famos_mode", True),
+                            deglitch=getattr(config, "deglitch", False))
     return _finalize_raw(df, imeta, config, folder.name)
 
 
@@ -259,5 +264,7 @@ def load_raw_files(files, config: RunConfig) -> Tuple[pd.DataFrame, dict]:
     files = [Path(f) for f in files]
     logger.info("Loading %d imc raw files", len(files))
     target = config.sampling_rate or DEFAULT_SAMPLING_RATE
-    df, imeta = read_files(files, target_fs=target)
+    df, imeta = read_files(files, target_fs=target,
+                           famos=getattr(config, "famos_mode", True),
+                           deglitch=getattr(config, "deglitch", False))
     return _finalize_raw(df, imeta, config, f"{len(files)} files")

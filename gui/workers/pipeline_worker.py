@@ -13,6 +13,7 @@ structured Qt signals the Processing screen consumes.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -38,6 +39,8 @@ class RunRequest:
     order: Optional[int] = None
     miner: Optional[float] = None
     no_filter: bool = False
+    no_famos: bool = False        # fall back to the legacy Butterworth LPF
+    deglitch: bool = False        # rolling-median removal of DAQ artifact spikes
 
     def to_cmd(self) -> List[str]:
         # A frozen .exe re-invokes itself in pipeline mode; from source we call
@@ -65,6 +68,10 @@ class RunRequest:
             cmd += ["--miner", str(self.miner)]
         if self.no_filter:
             cmd += ["--no-filter"]
+        if self.no_famos:
+            cmd += ["--no-famos"]
+        if self.deglitch:
+            cmd += ["--deglitch"]
         return cmd
 
 
@@ -135,6 +142,10 @@ class PipelineWorker(QObject):
         """Entry point — call via QThread.started."""
         cmd = self._request.to_cmd()
         self.log_line.emit("$ " + " ".join(cmd))
+        # We decode the pipe as UTF-8, so tell the child to encode it that way.
+        # Without this it writes the Windows ANSI codepage and any non-ASCII in a
+        # log line (the en-dash in the banner) arrives as a replacement char.
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
         try:
             self._proc = subprocess.Popen(
                 cmd,
@@ -145,6 +156,7 @@ class PipelineWorker(QObject):
                 bufsize=1,
                 encoding="utf-8",
                 errors="replace",
+                env=env,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except Exception as exc:                     # noqa: BLE001

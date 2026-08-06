@@ -48,8 +48,9 @@ class HeatmapsPage(BasePage):
             return
         self.corr_grid.set_figures(
             [(title, self.study.heatmap(name)) for title, name in _CORRELATION])
+        wheels = (self.study.wheel_labels() if self.study.has_stats else None) or list(WHEELS)
         self.hex_grid.set_figures(
-            [(f"Hexbin — {w}", self.study.hexbin(w)) for w in WHEELS])
+            [(f"Hexbin — {w}", self.study.hexbin(w)) for w in wheels])
 
     def _open(self, path) -> None:
         ImageViewerDialog.show_for(path, self)

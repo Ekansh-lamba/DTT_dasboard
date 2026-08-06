@@ -65,8 +65,11 @@ class RainflowPage(BasePage):
             self.grid.set_figures([])
             self.table.setRowCount(0)
             return
+        # Only the wheels this study recorded — a fixed FL/FR/RL/RR list shows
+        # empty tiles for positions that were never instrumented.
+        wheels = (self.study.wheel_labels() if self.study.has_stats else None) or list(WHEELS)
         self.grid.set_figures(
-            [(f"Rainflow — {w}", self.study.rainflow_image(w)) for w in WHEELS])
+            [(f"Rainflow — {w}", self.study.rainflow_image(w)) for w in wheels])
 
         self._csvs = self.study.rainflow_cycle_csvs()
         self.table.setRowCount(0)
@@ -91,7 +94,6 @@ class RainflowPage(BasePage):
                 self, "Export cycle CSV", src.name, "CSV files (*.csv)")
             if dst:
                 shutil.copyfile(src, dst)
-
     def _export_all(self) -> None:
         if not self._csvs:
             return
@@ -100,8 +102,6 @@ class RainflowPage(BasePage):
             return
         for src in self._csvs:
             shutil.copyfile(src, Path(folder) / src.name)
-
-
 def _count_rows(path: Path) -> int:
     try:
         with path.open(encoding="utf-8", errors="replace") as fh:

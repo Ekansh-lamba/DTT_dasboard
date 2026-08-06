@@ -2,15 +2,35 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout, QGridLayout, QLabel, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView,
+    QHeaderView, QAbstractItemView, QPushButton, QFileDialog,
 )
 
 from gui import theme
 from gui.pages.base_page import BasePage
 from gui.widgets.common import SectionTitle, Card, ScrollPage, KpiCard, Badge
+
+
+class _FamosWorker(QThread):
+    """Runs the FAMOS cross-check off the UI thread (CSV read + filter sweep)."""
+    done = Signal(object, object)     # (matches, note)
+    failed = Signal(str)
+
+    def __init__(self, csv_path: str):
+        super().__init__()
+        self.csv_path = csv_path
+
+    def run(self):
+        try:
+            from dtt.validation.famos_validation import crosscheck_csv
+            matches, note = crosscheck_csv(self.csv_path)
+            self.done.emit(matches, note)
+        except Exception as exc:                      # surface, don't crash
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
 class ValidationPage(BasePage):
@@ -80,7 +100,99 @@ class ValidationPage(BasePage):
         self.optional_label.setStyleSheet("font-family:monospace;")
         self.optional_card.layout().addWidget(self.optional_label)
         body.addWidget(self.optional_card)
+
+        # FAMOS cross-check
+        fam_head = QHBoxLayout()
+        fam_head.addWidget(SectionTitle("FAMOS Cross-Check"))
+        fam_head.addStretch(1)
+        self.famos_badge = Badge("—", theme.TEXT_MUTED)
+        fam_head.addWidget(self.famos_badge)
+        body.addLayout(fam_head)
+
+        self.famos_card = Card()
+        intro = QLabel(
+            "Runs our low-pass filter on a FAMOS export's raw channels and scores "
+            "the result against FAMOS's own filtered columns (e.g. Latacc vs "
+            "Latacc_LPF), sample-by-sample. ≥ 95% match = FAMOS-grade.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet(f"color:{theme.TEXT_MUTED}; font-size:12px;")
+        self.famos_card.layout().addWidget(intro)
+
+        row = QHBoxLayout()
+        self.famos_btn = QPushButton("Validate against FAMOS CSV…")
+        self.famos_btn.setObjectName("Primary")
+        self.famos_btn.clicked.connect(self._run_famos)
+        row.addWidget(self.famos_btn)
+        self.famos_status = QLabel("")
+        self.famos_status.setStyleSheet(f"color:{theme.TEXT_MUTED};")
+        row.addWidget(self.famos_status, 1)
+        self.famos_card.layout().addLayout(row)
+
+        self.famos_table = QTableWidget(0, 5)
+        self.famos_table.setHorizontalHeaderLabels(
+            ["Channel", "Reference", "Match %", "Corr %", "Operation"])
+        self.famos_table.verticalHeader().setVisible(False)
+        self.famos_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.famos_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.famos_table.setMaximumHeight(200)
+        self.famos_card.layout().addWidget(self.famos_table)
+        body.addWidget(self.famos_card)
         body.addStretch(1)
+
+        self._famos_worker: _FamosWorker | None = None
+
+    # FAMOS cross-check
+    def _run_famos(self) -> None:
+        start_dir = str(self.repo.csv_dir) if hasattr(self.repo, "csv_dir") else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select a FAMOS CSV export", start_dir, "CSV files (*.csv)")
+        if not path:
+            return
+        self.famos_btn.setEnabled(False)
+        self.famos_status.setText(f"Validating {Path(path).name} …")
+        self.famos_badge.set_status("RUNNING", theme.ORANGE)
+        self.famos_table.setRowCount(0)
+        self._famos_worker = _FamosWorker(path)
+        self._famos_worker.done.connect(self._on_famos_done)
+        self._famos_worker.failed.connect(self._on_famos_failed)
+        self._famos_worker.start()
+
+    def _on_famos_failed(self, msg: str) -> None:
+        self.famos_btn.setEnabled(True)
+        self.famos_status.setText(f"Failed: {msg}")
+        self.famos_badge.set_status("ERROR", theme.DANGER)
+
+    def _on_famos_done(self, matches, note) -> None:
+        self.famos_btn.setEnabled(True)
+        if note:
+            self.famos_status.setText(note)
+            self.famos_badge.set_status("NO REF", theme.WARNING)
+            return
+        for m in matches:
+            r = self.famos_table.rowCount()
+            self.famos_table.insertRow(r)
+            self.famos_table.setItem(r, 0, QTableWidgetItem(m.channel))
+            self.famos_table.setItem(r, 1, QTableWidgetItem(m.reference))
+            mi = QTableWidgetItem(f"{m.match_pct:.2f}%")
+            mi.setForeground(Qt.green if m.passed else Qt.red)
+            self.famos_table.setItem(r, 2, mi)
+            self.famos_table.setItem(r, 3, QTableWidgetItem(f"{m.corr_pct:.2f}%"))
+            # The pair may be related by smo() rather than FiltLP(); showing a
+            # cutoff/order for a smoothing match would read as "0 Hz · order 0".
+            if getattr(m, "operation", "FiltLP") == "smo":
+                op = f"smo({m.best_smooth_s:g} s)"
+            else:
+                op = f"FiltLP {m.best_cutoff:g} Hz · order {m.best_order}"
+            self.famos_table.setItem(r, 4, QTableWidgetItem(op))
+        if matches:
+            best = max(m.match_pct for m in matches)
+            passed = all(m.passed for m in matches)
+            self.famos_status.setText(
+                f"{len(matches)} channel(s) checked · best match {best:.2f}% "
+                f"vs FAMOS · threshold 95%.")
+            self.famos_badge.set_status(
+                "FAMOS-GRADE" if passed else "BELOW 95%",
+                theme.SUCCESS if passed else theme.DANGER)
 
     def refresh(self) -> None:
         if not self.study or not self.study.has_validation:

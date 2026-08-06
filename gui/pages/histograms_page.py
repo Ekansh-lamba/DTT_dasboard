@@ -25,9 +25,7 @@ class HistogramsPage(BasePage):
         head.addStretch(1)
 
         self.wheel_combo = QComboBox()
-        self.wheel_combo.addItems(["All (combined)", *WHEELS])
         self.signal_combo = QComboBox()
-        self.signal_combo.addItems(["Combined", *SIGNALS])
         self.kind_combo = QComboBox()
         self.kind_combo.addItems(["Distance-weighted", "Percentage"])
         for w in (QLabel("Wheel:"), self.wheel_combo,
@@ -55,7 +53,30 @@ class HistogramsPage(BasePage):
         self._current = None
 
     def refresh(self) -> None:
+        self._reload_selectors()
         self._update_view()
+
+    def _reload_selectors(self) -> None:
+        """Offer only the wheels and components this study actually recorded.
+
+        A two-WFT or multi-axle recording has neither all four legacy wheels nor
+        necessarily Fx/Fy/Fz, so a fixed list offers entries that can never load.
+        """
+        wheels = list(WHEELS)
+        signals = list(SIGNALS)
+        if self.study and self.study.has_stats:
+            wheels = self.study.wheel_labels() or wheels
+            signals = self.study.components() or signals
+
+        for combo, items in ((self.wheel_combo, wheels),
+                             (self.signal_combo, ["Combined", *signals])):
+            prev = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(items)
+            if prev in items:
+                combo.setCurrentText(prev)
+            combo.blockSignals(False)
 
     def _resolve(self):
         if not self.study:
@@ -63,19 +84,17 @@ class HistogramsPage(BasePage):
         wheel = self.wheel_combo.currentText()
         signal = self.signal_combo.currentText()
         kind = "distance" if self.kind_combo.currentIndex() == 0 else "percentage"
-
-        if wheel.startswith("All"):
-            # combined view needs a specific wheel; fall back to FL
-            wheel = WHEELS[0]
-            self.wheel_combo.blockSignals(True)
-            self.wheel_combo.setCurrentText(wheel)
-            self.wheel_combo.blockSignals(False)
+        if not wheel:
+            return None, "No wheel channels in this study"
 
         if signal == "Combined":
             path = self.study.histogram_combined(wheel, kind)
+            name = f"hist_{kind}_{wheel}.png"
         else:
             path = self.study.histogram(wheel, signal, kind)
-        return path, f"hist_{kind}_{wheel}" + (f"_{signal}" if signal != "Combined" else "") + ".png"
+            channel = self.study.channel_for(wheel, signal) or f"{wheel}_{signal}"
+            name = f"hist_{kind}_{channel}.png"
+        return path, name
 
     def _update_view(self) -> None:
         path, name = self._resolve()

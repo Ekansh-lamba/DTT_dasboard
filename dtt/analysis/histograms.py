@@ -49,21 +49,69 @@ def _style_ax(ax):
     ax.title.set_color(TEXT_PRI)
 
 
+_MAX_PLAUSIBLE_MPS = 120.0        # 432 km/h — beyond any test vehicle
+
+
+def _speed_as_mps(raw: pd.Series) -> tuple:
+    """Convert a candidate speed channel to m/s, or return (None, reason).
+
+    Rejects channels that cannot be a road speed. A dead (all-zero) channel is
+    the important case: it yields all-zero weights, so every histogram bar is
+    zero and the plot renders *blank* — which looks like a loading failure
+    rather than the missing-data problem it actually is. Sustained-negative or
+    full-scale values (a mis-scaled aux channel) are rejected for the same
+    reason: silently weighting by them produces confidently wrong distances.
+    """
+    v = pd.to_numeric(raw, errors="coerce").to_numpy(dtype=float)
+    finite = v[np.isfinite(v)]
+    if finite.size < 8:
+        return None, "no finite samples"
+    if not np.any(np.abs(finite) > 1e-9):
+        return None, "all zero"
+    med = float(np.median(finite))
+    if med < 0:
+        return None, f"median is negative ({med:.1f})"
+    # km/h if the typical value is too big to be m/s for a road vehicle
+    unit = "km/h" if med > 10.0 else "m/s"
+    mps = v / 3.6 if unit == "km/h" else v
+    hi = float(np.nanpercentile(np.abs(mps[np.isfinite(mps)]), 99.9))
+    if hi > _MAX_PLAUSIBLE_MPS:
+        return None, f"implausible peak ({hi * 3.6:.0f} km/h)"
+    return (np.nan_to_num(mps), unit), ""
+
+
 def _get_speed_weights(df: pd.DataFrame, sr: float) -> tuple:
-    col = _try_find_col(df, SPEED_CANDIDATES)
-    if col is None:
-        return None, None, "none"
-    raw = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    med = float(np.nanmedian(raw)) if raw.size else 0.0
-    if med > 10.0:
-        sp_mps = raw / 3.6
-        unit   = "km/h"
+    """Per-sample distance weights (m) from the first *usable* speed channel.
+
+    Returns ``(weights, total_m, unit)``; ``weights`` is None when no channel is
+    usable, which tells the caller to weight by sample count instead and say so.
+    """
+    rejected = []
+    seen = set()
+    for name in SPEED_CANDIDATES:
+        col = _try_find_col(df, [name])
+        if col is None or col in seen:
+            continue          # candidates alias onto the same column case-insensitively
+        seen.add(col)
+        result, why = _speed_as_mps(df[col])
+        if result is None:
+            rejected.append(f"{col} ({why})")
+            continue
+        mps, unit = result
+        weights = mps / float(sr)
+        total_m = float(np.nansum(weights))
+        if total_m <= 0:
+            rejected.append(f"{col} (zero total distance)")
+            continue
+        logger.info("Distance weighting from '%s' (%s): %.3f km total",
+                    col, unit, total_m / 1000.0)
+        return weights, total_m, unit
+    if rejected:
+        logger.warning("No usable speed channel — rejected: %s", "; ".join(rejected))
     else:
-        sp_mps = raw
-        unit   = "m/s"
-    weights     = sp_mps.values / float(sr)
-    total_m     = float(np.nansum(np.nan_to_num(weights)))
-    return weights, total_m, unit
+        logger.warning("No speed channel found (looked for %s)", ", ".join(SPEED_CANDIDATES))
+    logger.warning("Histograms will be weighted by sample count, not distance")
+    return None, None, "none"
 
 
 def _get_force_type(ch: str) -> Optional[str]:
@@ -73,19 +121,59 @@ def _get_force_type(ch: str) -> Optional[str]:
     return None
 
 
-def _plot_single_histogram(ax, vals, weights, bins, force_type, ch, mode, total_m, col):
+# Keep the configured axis while it still holds this much of the data.
+_RANGE_FIT_FRACTION = 0.98
+
+
+def _axis_range(vals: np.ndarray, force_type: Optional[str], ch: str = "") -> Optional[tuple]:
+    """Pick the histogram x-range for ``vals``.
+
+    ``FORCE_RANGES_DAN`` is tuned for a passenger car (Fz 100-1000 daN). A
+    heavier vehicle, a different WFT calibration or a truck axle can sit an
+    order of magnitude outside it, and a fixed axis then puts the *entire*
+    distribution off-plot — the histogram renders blank rather than wrong, which
+    reads as "not loading". So the configured range is used only while it
+    actually contains the data, and a robust percentile range is used otherwise.
+    """
+    finite = vals[np.isfinite(vals)]
+    cfg = FORCE_RANGES_DAN.get(force_type) if force_type else None
+    if finite.size == 0:
+        return cfg
+    if cfg:
+        inside = float(np.mean((finite >= cfg[0]) & (finite <= cfg[1])))
+        if inside >= _RANGE_FIT_FRACTION:
+            return cfg
+        logger.warning(
+            "%s: only %.1f%% of samples fall in the configured %s range %s - "
+            "using the data's own range instead", ch or force_type,
+            100.0 * inside, force_type, cfg)
+    lo = float(np.percentile(finite, 0.5))
+    hi = float(np.percentile(finite, 99.5))
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        lo, hi = float(np.min(finite)), float(np.max(finite))
+    if hi <= lo:
+        hi = lo + 1.0
+    pad = 0.02 * (hi - lo)
+    return (lo - pad, hi + pad)
+
+
+def _plot_single_histogram(ax, vals, weights, bins, xlim, ch, mode, total_m, col):
     _style_ax(ax)
+    # Without a usable speed channel the bars are sample counts, not distance —
+    # label them as such rather than printing "Distance (km)" over a count.
+    weighted = weights is not None and bool(total_m) and total_m > 0
     if mode == "distance":
-        w_plot = weights / 1000.0 if weights is not None else np.ones(len(vals))
-        ylabel = "Distance (km)"
-        total_label = f"{total_m / 1000.0:.3f} km" if total_m else ""
+        w_plot = weights / 1000.0 if weighted else np.ones(len(vals))
+        ylabel = "Distance (km)" if weighted else "Samples (no speed data)"
+        total_label = f"{total_m / 1000.0:.3f} km" if weighted else f"{len(vals):,} pts"
     else:
-        if weights is not None and total_m and total_m > 0:
+        if weighted:
             w_plot = (weights / total_m) * 100.0
+            ylabel = "% Distance"
         else:
             w_plot = np.ones(len(vals)) / len(vals) * 100.0
-        ylabel = "% Distance"
-        total_label = f"{np.nansum(w_plot):.1f} %" if weights is not None else ""
+            ylabel = "% Samples (no speed data)"
+        total_label = f"{np.nansum(w_plot):.1f} %"
 
     ax.bar(
         (bins[:-1] + bins[1:]) / 2.0,
@@ -95,7 +183,6 @@ def _plot_single_histogram(ax, vals, weights, bins, force_type, ch, mode, total_
         edgecolor="none",
         alpha=0.82,
     )
-    xlim = FORCE_RANGES_DAN.get(force_type) if force_type else None
     if xlim:
         ax.set_xlim(xlim)
     ax.set_xlabel("Force (daN)", fontsize=8)
@@ -127,7 +214,8 @@ def generate_histograms(df: pd.DataFrame, config: RunConfig) -> None:
                 axes = [axes]
             fig.suptitle(
                 f"{wheel}  –  Force Distribution  ({mode.title()})\n"
-                f"Speed weighting: {speed_unit}",
+                + (f"Speed weighting: {speed_unit}" if weights_full is not None
+                   else "Sample-count weighting — no usable speed channel"),
                 color=TEXT_PRI, fontsize=11, fontweight="bold",
             )
 
@@ -145,13 +233,10 @@ def generate_histograms(df: pd.DataFrame, config: RunConfig) -> None:
                 else:
                     w = np.ones(len(vals))
 
-                xlim = FORCE_RANGES_DAN.get(force_type) if force_type else None
-                if xlim:
-                    bins = np.linspace(xlim[0], xlim[1], HIST_BINS + 1)
-                else:
-                    bins = np.linspace(vals.min(), vals.max(), HIST_BINS + 1)
+                xlim = _axis_range(vals, force_type, ch)
+                bins = np.linspace(xlim[0], xlim[1], HIST_BINS + 1)
 
-                _plot_single_histogram(ax, vals, w, bins, force_type, ch, mode, total_m, col)
+                _plot_single_histogram(ax, vals, w, bins, xlim, ch, mode, total_m, col)
 
             fig.tight_layout(rect=[0, 0, 1, 0.93])
             fname = out / f"hist_{mode}_{wheel}.png"
@@ -171,12 +256,12 @@ def generate_histograms(df: pd.DataFrame, config: RunConfig) -> None:
             w = np.nan_to_num(w)
         else:
             w = np.ones(len(vals))
-        xlim = FORCE_RANGES_DAN.get(force_type) if force_type else None
-        bins = np.linspace(xlim[0], xlim[1], HIST_BINS + 1) if xlim else np.linspace(vals.min(), vals.max(), HIST_BINS + 1)
+        xlim = _axis_range(vals, force_type, ch)
+        bins = np.linspace(xlim[0], xlim[1], HIST_BINS + 1)
 
         for mode in ("distance", "percentage"):
             fig, ax = plt.subplots(figsize=(6, 4), facecolor=BG)
-            _plot_single_histogram(ax, vals, w, bins, force_type, ch, mode, total_m, col)
+            _plot_single_histogram(ax, vals, w, bins, xlim, ch, mode, total_m, col)
             fig.tight_layout()
             fname = out / f"hist_{mode}_{ch}.png"
             fig.savefig(fname, dpi=FIGURE_DPI, bbox_inches="tight", facecolor=BG)

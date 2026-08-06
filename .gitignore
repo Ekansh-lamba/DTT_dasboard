@@ -42,6 +42,11 @@ __pycache__/
 .eggs/
 build/
 dist/
+dist-onefile/
+# Packaged artefacts produced by package.ps1 / build_exe.ps1
+DTT-Platform-source.zip
+DTT-Platform-app-windows-x64.zip
+DTT-Platform-windows.zip
 .venv/
 venv/
 env/

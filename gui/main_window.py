@@ -1,13 +1,4 @@
-"""QMainWindow shell: sidebar navigation + QStackedWidget pages.
-
-The window plays the Controller role of the MVC split: it owns the
-:class:`StudyRepository` (model access), the :class:`PipelineController`
-(backend integration), and routes navigation + the active-study selection to
-every page (view).
-"""
-
 from __future__ import annotations
-
 from typing import Dict, Optional
 
 from PySide6.QtCore import Qt
@@ -15,11 +6,9 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFrame, QLabel,
     QPushButton, QStackedWidget, QComboBox, QButtonGroup, QMessageBox,
 )
-
 from gui import theme
 from gui.models.repository import StudyRepository, Study
 from gui.workers.pipeline_worker import PipelineController, RunRequest
-
 from gui.pages.dashboard_page import DashboardPage
 from gui.pages.new_study_page import NewStudyPage
 from gui.pages.processing_page import ProcessingPage
@@ -32,10 +21,8 @@ from gui.pages.heatmaps_page import HeatmapsPage
 from gui.pages.boxplots_page import BoxplotsPage
 from gui.pages.rainflow_page import RainflowPage
 from gui.pages.reports_page import ReportsPage
+from gui.pages.comparison_page import ComparisonPage
 from gui.pages.history_page import HistoryPage
-
-
-# (key, label, icon-glyph)  — order defines sidebar + stack order
 NAV_ITEMS = [
     ("dashboard",  "Dashboard",   "▣"),
     ("new_study",  "New Study",   "＋"),
@@ -49,10 +36,9 @@ NAV_ITEMS = [
     ("boxplots",   "Boxplots",    "◫"),
     ("rainflow",   "Rainflow",    "∿"),
     ("reports",    "Reports",     "▤"),
+    ("comparison", "Compare",     "⇄"),
     ("history",    "History",     "≡"),
 ]
-
-# Pages bound to the active study (everything except these is study-agnostic)
 _STUDY_PAGES = {
     "preprocess", "signals", "validation", "statistics", "histograms",
     "heatmaps", "boxplots", "rainflow", "reports",
@@ -179,6 +165,7 @@ class MainWindow(QMainWindow):
         self.boxplots   = BoxplotsPage(self.repo)
         self.rainflow   = RainflowPage(self.repo)
         self.reports    = ReportsPage(self.repo)
+        self.comparison = ComparisonPage(self.repo)
         self.history    = HistoryPage(self.repo)
 
         mapping = {
@@ -188,7 +175,7 @@ class MainWindow(QMainWindow):
             "statistics": self.statistics, "histograms": self.histograms,
             "heatmaps": self.heatmaps, "boxplots": self.boxplots,
             "rainflow": self.rainflow, "reports": self.reports,
-            "history": self.history,
+            "comparison": self.comparison, "history": self.history,
         }
         for key, _, _ in NAV_ITEMS:
             page = mapping[key]
@@ -253,7 +240,6 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.study_selector.setCurrentIndex(idx)
         self.study_selector.blockSignals(False)
-        # Sync active study to selection
         name = self.study_selector.currentData()
         self.active_study = self.repo.get_study(name) if name else None
 
@@ -278,8 +264,6 @@ class MainWindow(QMainWindow):
             self.study_selector.setCurrentIndex(idx)
         self.active_study = self.repo.get_study(name)
         self.navigate("validation")
-
-    # Backend integration
     def _start_pipeline(self, request: RunRequest) -> None:
         if self.pipeline.is_running:
             QMessageBox.information(self, "Pipeline busy",
@@ -290,13 +274,7 @@ class MainWindow(QMainWindow):
         self.processing.cancel_btn.clicked.connect(self.pipeline.cancel)
         self.navigate("processing")
         self.pipeline.start(request)
-
     def _regenerate_report(self, study: Study) -> None:
-        """Re-run the full pipeline for an existing study's source data.
-
-        The backend regenerates the report as part of a full run; we reuse the
-        original CSV if it can be located, else prompt the user via New Study.
-        """
         v = study.validation()
         csv_name = v.get("file_name", "")
         csv_path = self.repo.csv_dir / csv_name if csv_name else None

@@ -29,8 +29,9 @@ class BoxplotsPage(BasePage):
         if not self.study:
             self.grid.set_figures([])
             return
+        signals = (self.study.components() if self.study.has_stats else None) or list(SIGNALS)
         self.grid.set_figures(
-            [(f"Boxplot — {s}", self.study.boxplot(s)) for s in SIGNALS])
+            [(f"Boxplot — {s}", self.study.boxplot(s)) for s in signals])
 
     def _open(self, path) -> None:
         ImageViewerDialog.show_for(path, self)

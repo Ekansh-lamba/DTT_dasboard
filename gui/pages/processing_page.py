@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QElapsedTimer, QTimer
 from PySide6.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QLabel, QProgressBar, QPlainTextEdit,
     QFrame, QPushButton, QSplitter,
@@ -67,6 +67,11 @@ class ProcessingPage(BasePage):
         head = QHBoxLayout()
         head.addWidget(SectionTitle("Pipeline Processing"))
         head.addStretch(1)
+        self.elapsed_label = QLabel("⏱ 0.0s")
+        self.elapsed_label.setStyleSheet(
+            f"color:{theme.TEXT}; font-family:monospace; font-size:14px;"
+            f"font-weight:700; margin-right:10px;")
+        head.addWidget(self.elapsed_label)
         self.badge = QLabel("Idle")
         self.badge.setStyleSheet(
             f"background:{theme.SURFACE_2}; color:{theme.TEXT_MUTED};"
@@ -108,6 +113,15 @@ class ProcessingPage(BasePage):
         splitter.addWidget(log_card)
         splitter.setSizes([420, 640])
 
+        # Overall run timer (live).
+        self._elapsed = QElapsedTimer()
+        self._tick = QTimer(self)
+        self._tick.setInterval(100)
+        self._tick.timeout.connect(self._update_elapsed)
+
+    def _update_elapsed(self) -> None:
+        self.elapsed_label.setText(f"⏱ {self._elapsed.elapsed() / 1000:.1f}s")
+
     # Worker signal handlers
     def begin(self, study_name: str) -> None:
         for row in self.rows.values():
@@ -115,6 +129,12 @@ class ProcessingPage(BasePage):
             row.time.setText("")
         self.log.clear()
         self.progress.setValue(0)
+        self._elapsed.restart()
+        self.elapsed_label.setText("⏱ 0.0s")
+        self.elapsed_label.setStyleSheet(
+            f"color:{theme.ORANGE}; font-family:monospace; font-size:14px;"
+            f"font-weight:700; margin-right:10px;")
+        self._tick.start()
         self.badge.setText("Running")
         self.badge.setStyleSheet(
             f"background:{theme.ORANGE}33; color:{theme.ORANGE};"
@@ -140,6 +160,13 @@ class ProcessingPage(BasePage):
 
     def on_finished(self, success: bool, info: str) -> None:
         self.cancel_btn.setEnabled(False)
+        self._tick.stop()
+        total = self._elapsed.elapsed() / 1000
+        self.elapsed_label.setText(f"⏱ {total:.1f}s total")
+        self.elapsed_label.setStyleSheet(
+            f"color:{theme.SUCCESS if success else theme.DANGER};"
+            f"font-family:monospace; font-size:14px; font-weight:700; margin-right:10px;")
+        self.append_log(f"Total run time: {total:.1f}s")
         if success:
             for row in self.rows.values():
                 if row.status.text() in ("Pending", "Running…"):

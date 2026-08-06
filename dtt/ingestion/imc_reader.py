@@ -1,38 +1,14 @@
-"""
-imc STUDIO raw-format reader (FAMOS-grade signal + calibration).
-
-Each imc `.raw` file stores ONE channel as a header of ``|XXn`` key blocks
-followed by a flat sample blob, then a small trailer (``|CS|CJ|CE``).
-
-Decoded per channel:
-  * name / comment     from the ``|CN`` block
-  * calibration factor + physical unit  from the ``|CM`` block
-  * data type          int16 for WFT force/moment channels; 32-bit for GPS
-                       position channels (detected from blob size vs rate)
-  * samples            the flat blob between the header and the ``|CS`` trailer
-
-Physical value = raw_sample * factor   (unit from the CM block, e.g. "N").
-The per-channel factor was validated against the reference FAMOS CSV export
-(e.g. FL_Fz median ≈ 594 daN vs 608 daN in the CSV).
-
-A companion ``Storage.imcdbc`` (XML) gives each channel's start/end epoch,
-used for the true sample rate and for time-synchronising channels.
-"""
-
 from __future__ import annotations
-
 import re
 import struct
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
-
 import numpy as np
 import pandas as pd
-
-# raw imc channel name  ->  pipeline channel name  (from the FAMOS mapping file)
-#   WFT_Fx_fl -> FL_Fx , etc.
+_EVENT_SIG = b"|RC5"
+_EVENT_LEN = 16
 _WFT_RE = re.compile(r"WFT_(F[xyz]|M[xyz])_(fl|fr|rl|rr)$", re.I)
 
 _AUX_MAP = {
@@ -115,35 +91,87 @@ def _locate_data(raw: bytes, itemsize: int) -> int:
     return best_s
 
 
+def _strip_event_records(blob: bytes) -> bytes:
+    """Remove the embedded 16-byte ``|RC5`` event records from a data blob.
+
+    imc STUDIO interleaves these marker records into the streamed samples; read
+    as int16 they show up as ~40k spikes per channel. FAMOS skips them.
+    """
+    if _EVENT_SIG not in blob:
+        return blob
+    out = bytearray()
+    i = blob.find(_EVENT_SIG)
+    prev = 0
+    while i != -1:
+        out += blob[prev:i]
+        prev = i + _EVENT_LEN
+        i = blob.find(_EVENT_SIG, prev)
+    out += blob[prev:]
+    return bytes(out)
+
+
+def _find_data_start(clean: bytes, itemsize: int = 2) -> int:
+    """Byte offset in the marker-stripped blob where the ascii header ends and
+    smooth signal begins. Picks the offset whose window is both smoothest and
+    not full-scale garbage (which is how a wrong byte alignment looks).
+    """
+    dt = "<i2" if itemsize == 2 else "<i4"
+    best_s, best = 0, 1e18
+    hi = max(1, min(600, len(clean) - 40000))
+    for s in range(0, hi):
+        seg = np.frombuffer(clean[s:s + 40000], dtype=dt).astype(float)
+        seg = seg - seg.mean()
+        smooth = np.std(np.diff(seg)) / (np.std(seg) + 1e-9)   # low = smooth
+        rng = np.percentile(np.abs(seg), 99) / 32768.0          # ~1 if garbage
+        if smooth + rng < best:
+            best, best_s = smooth + rng, s
+    return best_s
+
+
 def read_raw(path: Path, fs: float, itemsize: int = 2,
              n_force: Optional[int] = None) -> Optional[ImcChannel]:
     raw = Path(path).read_bytes()
     if not raw.startswith(b"|imc3"):
         return None
-    cs = raw.find(b"|CS")
+    cs = raw.rfind(b"|CS")               # trailer (last occurrence)
     if cs < 0:
         cs = len(raw)
     raw_name, comment = _channel_name(raw)
     factor, unit = _cm_factor_unit(raw)
+    cp = raw.find(b"|CP1")
+    region = raw[(cp if cp >= 0 else 0):cs]
+    clean = _strip_event_records(region)          # drop |RC5 event records
+    start = _find_data_start(clean, itemsize)     # header -> data boundary
+    end = len(clean) - ((len(clean) - start) % itemsize)
     dt = "<i2" if itemsize == 2 else "<i4"
-    # Data blob ends at the trailer; its length (sample count) is identical for
-    # all same-rate channels in a recording, so a shared count anchors the
-    # start deterministically:  start = cs - n * itemsize.
-    if n_force is not None:
-        n = n_force
-        start = cs - n * itemsize
-    else:
-        start = _locate_data(raw, itemsize)
-        n = (cs - start) // itemsize
-    if start < 0:
-        start = _locate_data(raw, itemsize)
-        n = (cs - start) // itemsize
-    samples = np.frombuffer(raw[start:start + n * itemsize], dtype=dt).astype(np.float64)
+    samples = np.frombuffer(clean[start:end], dtype=dt).astype(np.float64)
+    # Trim the leading header/preamble garbage: _find_data_start's coarse 40k
+    # window can land a few hundred bytes early, inside a messy transition where
+    # header bytes are interspersed with the first samples (shows as a spike at
+    # t=0). Advance to where a stable clean run of real samples begins.
+    if samples.size > 3000:
+        ref = samples[500:2500]
+        m = np.median(ref)
+        sd = 1.4826 * np.median(np.abs(ref - m)) or 1.0
+        thr = 15.0 * sd
+        win = 50
+        lim = min(500, samples.size - win)
+        k = 0
+        while k < lim and not np.all(np.abs(samples[k:k + win] - m) < thr):
+            k += 1
+        if k:
+            samples = samples[k:]
+        # trailing garbage (mirror of the leading trim)
+        j = samples.size
+        low = max(win, samples.size - 500)
+        while j > low and not np.all(np.abs(samples[j - win:j] - m) < thr):
+            j -= 1
+        if j < samples.size:
+            samples = samples[:j]
     data = samples * factor
 
-    pipeline_name = _map_name(raw_name)
     return ImcChannel(
-        name=pipeline_name, raw_name=raw_name, unit=unit,
+        name=_map_name(raw_name), raw_name=raw_name, unit=unit,
         factor=factor, data=data, fs=fs, comment=comment,
     )
 
@@ -273,8 +301,6 @@ def read_famos(path: Path) -> Optional[ImcChannel]:
     samples = np.frombuffer(data_bytes[:count * size], dtype=dtype).astype(np.float64)
     return ImcChannel(name=_map_name(name), raw_name=name, unit=unit,
                       factor=factor, data=samples * factor + offset, fs=1.0 / dx)
-
-
 def _detect_format(files) -> str:
     for f in files:
         head = f.read_bytes()[:8]
@@ -300,37 +326,42 @@ def _read_channels(files, spans) -> List[ImcChannel]:
             if ch is not None and ch.data.size:
                 channels.append(ch)
         return channels
-
-    # imc3: every same-rate WFT channel shares one sample count, which anchors
-    # the data start deterministically across header-length quirks.
-    locked = [
-        (raw.find(b"|CS") - _locate_data(raw, 2)) // 2
-        for raw in (f.read_bytes() for f in files if _WFT_RE.match(f.stem))
-        if raw.find(b"|CS") >= 0
-    ]
-    ref_n = int(np.median(locked)) if locked else 0
+    prelim = []
+    wft_counts: List[int] = []
     for f in files:
         if not f.read_bytes()[:8].startswith(b"|imc3"):
             continue
         is_wft = bool(_WFT_RE.match(f.stem))
-        itemsize = 4 if (ref_n and not is_wft
-                         and f.stat().st_size // 2 > ref_n * 1.6) else 2
-        n_force = ref_n if (is_wft and ref_n) else None
         try:
-            ch = read_raw(f, fs=1.0, itemsize=itemsize, n_force=n_force)
+            ch = read_raw(f, fs=1.0, itemsize=2)
         except Exception:
             continue
         if ch is None or ch.data.size == 0:
             continue
+        if is_wft:
+            wft_counts.append(ch.data.size)
+        prelim.append((f, is_wft, ch))
+
+    ref_n = int(np.median(wft_counts)) if wft_counts else 0
+    for f, is_wft, ch in prelim:
+        # A 32-bit aux channel (GPS) read as int16 yields ~2x samples: re-read.
+        if not is_wft and ref_n and ch.data.size > ref_n * 1.6:
+            try:
+                ch32 = read_raw(f, fs=1.0, itemsize=4)
+                if ch32 is not None and ch32.data.size:
+                    ch = ch32
+            except Exception:
+                pass
         span = spans.get(f.stem)
         if span and span[1] > span[0]:
-            ch.fs = ch.data.size / (span[1] - span[0])
+            ch.fs = ch.data.size / (span[1] - span[0])   # -> true ~1000 Hz
             ch.start_epoch = span[0]
         channels.append(ch)
     return channels
 
 
-def _assemble(channels, target_fs, source) -> tuple[pd.DataFrame, dict]:
+def _assemble(channels, target_fs, source, famos: bool = True,
+              deglitch: bool = False) -> tuple[pd.DataFrame, dict]:
     if not channels:
         return pd.DataFrame(), {"error": "no imc channels found"}
 
@@ -349,13 +380,21 @@ def _assemble(channels, target_fs, source) -> tuple[pd.DataFrame, dict]:
         out[c.name] = arr
     df = pd.DataFrame(out)
 
-    if target_fs and fs > target_fs:
-        step = max(1, int(round(fs / target_fs)))
+    fs_out = fs
+    applied = {}
+    step = max(1, int(round(fs / target_fs))) if (target_fs and fs > target_fs) else 1
+    if famos:
+        # FAMOS order: smo/FiltLP at the native rate, *then* red(). Decimating
+        # first would alias the whole 50-500 Hz band back over the signal, which
+        # is what produces phantom spikes in a 1000 Hz WFT recording.
+        from dtt.preprocessing import apply_famos_recipe
+        df, fs_out, applied = apply_famos_recipe(
+            df, fs, decimate_factor=step, deglitch=deglitch,
+            emit_lpf_columns=False)
+    elif step > 1:
         df = df.iloc[::step].reset_index(drop=True)
         fs_out = fs / step
         df["Time"] = np.arange(len(df)) / fs_out
-    else:
-        fs_out = fs
 
     meta = {
         "source": str(source),
@@ -366,20 +405,34 @@ def _assemble(channels, target_fs, source) -> tuple[pd.DataFrame, dict]:
         "duration_s": round(len(df) / fs_out, 2) if fs_out else 0,
         "units": {c.name: c.unit for c in channels},
         "factors": {c.name: c.factor for c in channels},
+        "famos_recipe": applied,
+        "famos_decimate": step,
+        "deglitch": bool(deglitch),
     }
     return df, meta
 
 
-def read_folder(folder: Path, target_fs: Optional[float] = None) -> tuple[pd.DataFrame, dict]:
-    """Read every channel in an imc raw folder into one time-aligned DataFrame."""
+def read_folder(folder: Path, target_fs: Optional[float] = None,
+                famos: bool = True, deglitch: bool = False
+                ) -> tuple[pd.DataFrame, dict]:
+    """Read every channel in an imc raw folder into one time-aligned DataFrame.
+
+    With ``famos`` (default) the imc/FAMOS recipe — ``smo`` / ``FiltLP`` at the
+    native rate followed by ``red()`` — is applied as the data is assembled, so
+    the frame matches a FAMOS export rather than a raw stride-decimation.
+    """
     folder = resolve_raw_folder(folder)
     spans = read_imcdbc(folder)
     files = sorted(folder.glob("*.raw"))
-    return _assemble(_read_channels(files, spans), target_fs, folder)
+    return _assemble(_read_channels(files, spans), target_fs, folder,
+                     famos=famos, deglitch=deglitch)
 
 
-def read_files(files, target_fs: Optional[float] = None) -> tuple[pd.DataFrame, dict]:
+def read_files(files, target_fs: Optional[float] = None,
+               famos: bool = True, deglitch: bool = False
+               ) -> tuple[pd.DataFrame, dict]:
     """Read a specific list of imc ``.raw`` files (a subset of a recording)."""
     files = [Path(f) for f in files]
     spans = read_imcdbc(files[0].parent) if files else {}
-    return _assemble(_read_channels(files, spans), target_fs, "selected files")
+    return _assemble(_read_channels(files, spans), target_fs, "selected files",
+                     famos=famos, deglitch=deglitch)

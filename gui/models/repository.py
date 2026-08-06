@@ -94,6 +94,7 @@ class Study:
     # Lazily-populated cached payloads
     _validation: Optional[dict] = field(default=None, repr=False)
     _stats: Optional[Dict[str, ChannelStat]] = field(default=None, repr=False)
+    _channels: object = field(default=None, repr=False)
 
     # Derived paths
     @property
@@ -214,6 +215,39 @@ class Study:
             self._stats = parsed
         return self._stats
 
+    # Channel configuration
+    def run_channels(self):
+        """The axle-dynamic channel config for THIS study, from its own stats.
+
+        Wheel labels and component names cannot be assumed to be FL/FR/RL/RR x
+        Fx/Fy/Fz: a recording may carry only two instrumented wheels, more than
+        two axles, or channel names with an axle suffix (``FR_Fx_2``). The
+        pipeline names its figures after the real channel, so the UI has to
+        resolve them the same way the pipeline did.
+        """
+        if self._channels is None:
+            from dtt.run_channels import build_run_channels
+            self._channels = build_run_channels(list(self.stats().keys()))
+        return self._channels
+
+    def wheel_labels(self) -> List[str]:
+        """Wheel/position labels actually present, in axle order."""
+        return self.run_channels().labels
+
+    def components(self) -> List[str]:
+        """Force components actually present (usually Fx, Fy, Fz)."""
+        rc = self.run_channels()
+        seen: List[str] = []
+        for comps in rc._label_comp.values():
+            for c in comps:
+                if c not in seen:
+                    seen.append(c)
+        return seen
+
+    def channel_for(self, label: str, component: str) -> Optional[str]:
+        """Real channel name for a wheel label + component, e.g. FR+Fx -> FR_Fx_2."""
+        return self.run_channels().channel_for(label, component)
+
     # Figure lookups
     def figure(self, filename: str) -> Optional[Path]:
         p = self.figures_dir / filename
@@ -225,8 +259,13 @@ class Study:
         return sorted(self.figures_dir.glob(pattern))
 
     def histogram(self, wheel: str, signal: str, kind: str = "distance") -> Optional[Path]:
-        """kind = 'distance' | 'percentage'. Per-channel histogram."""
-        return self.figure(f"hist_{kind}_{wheel}_{signal}.png")
+        """kind = 'distance' | 'percentage'. Per-channel histogram.
+
+        The figure is named after the real channel, which is not always
+        ``{wheel}_{signal}`` — resolve it before building the filename.
+        """
+        channel = self.channel_for(wheel, signal) or f"{wheel}_{signal}"
+        return self.figure(f"hist_{kind}_{channel}.png")
 
     def histogram_combined(self, wheel: str, kind: str = "distance") -> Optional[Path]:
         return self.figure(f"hist_{kind}_{wheel}.png")
