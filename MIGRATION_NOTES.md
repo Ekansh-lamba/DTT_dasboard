@@ -266,3 +266,57 @@ run, a two-point exact-zero cluster sitting mid-way up a large real
 excursion, a pinned rail run inside a real dip, and the narrow-spike catch.
 In all four, the large genuine road-load swings on either side of the flag
 are untouched, and only the flagged samples themselves are smoothly bridged.
+
+---
+
+## Check 3 — raw reader vs. FAMOS's own raw column: **latent bug found** (2026-08-09)
+
+**No code change** (explicitly out of scope — "do not change the reader").
+Per the brief, read `data/WFT_Fx_fr.raw` directly with the project's current
+reader (`dtt/ingestion/imc_reader.py::read_raw`, fs=1000 Hz, the
+smoothness-heuristic data-start detector) and compared the 1000–1030 s
+window against `data/Fx_raw_cut.csv::Fx_raw_cut` (FAMOS's own physical-unit
+raw for that same window — the CSV's `x` column runs 1000.000–1030.000 s,
+so it's literally this window).
+
+**At the naive index alignment (`i = round(1000 * 1000) .. + 30001`):
+mismatch.** `corr = 0.854`, max abs err = 1178 N, mean abs err = 82 N —
+values are demonstrably the same shape and order of magnitude but not the
+same signal sample-for-sample.
+
+**Searching a +/-2000 sample lag window found the true alignment at a
++58 sample offset:** `corr = 0.9999999999992875`, max abs err = 0.0050 N,
+mean abs err = 0.000134 N — i.e. once shifted by 58 samples (58 ms at
+1 kHz), the reader's decoded values match FAMOS's own raw column to the
+CSV's export-rounding floor. This confirms the byte-level decode itself is
+correct (int16 parsing, the calibration factor `1.373291015625`, event-record
+stripping) — the reader is reading the right bytes and scaling them right.
+
+**The bug is in `read_raw`'s data-start detection.** `_find_data_start`
+picks the byte offset that locally looks "smoothest," and `read_raw`'s
+trailing trim (the `ref = samples[500:2500]` / robust-threshold walk,
+`imc_reader.py` lines ~152–170) then nudges that further — but the net
+result lands 58 samples early relative to where FAMOS itself considers
+sample 0. Because the heuristic always returns *something plausible* rather
+than failing loudly (a smooth, in-range signal either way), this offset is
+invisible without an external ground truth to check against — exactly the
+risk the brief flagged. It would silently misalign **every channel read via
+`read_raw`**, not just force channels, against wall-clock time, against
+other channels read with a different offset (if the offset varies per file —
+not established here), and against anything computed from **absolute
+sample position** (e.g. a fixed rainflow window, an event marker, or
+cross-referencing to GPS/video timestamps). It does **not** by itself
+corrupt derived per-channel statistics that don't depend on absolute
+alignment (mean/RMS/histograms of a single channel are shift-invariant), but
+it would corrupt anything that assumes two independently-read channels (or
+a channel and an external time reference) start at the same sample.
+
+**Left unfixed, as instructed** — this is a reader-internals question (why
+58, is it constant across files/channels, is it the `_find_data_start`
+window search or the post-hoc trim loop) that needs its own investigation,
+not a one-line change alongside a preprocessing migration. Flagging for
+follow-up: whoever owns `imc_reader.py` should scope how `_find_data_start`
+and the leading-trim heuristic land relative to a **known-correct**
+reference like this file (a repeatable regression check now exists: this
+exact comparison, `WFT_Fx_fr.raw` sample `[1000000+58 : 1030001+58]` vs.
+`Fx_raw_cut.csv`).
