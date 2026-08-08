@@ -94,3 +94,41 @@ unaffected by this change, as expected.
 `convolve1d(mode="nearest")`, same behaviour as the previous
 `uniform_filter1d(mode="nearest")`. Step 2b (next) replaces this with
 window-shrink renormalization at the true channel ends.
+
+---
+
+## Step 2b — smo edge handling: nearest-pad -> window-shrink (2026-08-09)
+
+**File:** `dtt/preprocessing.py::famos_smooth`.
+
+**Before:** the all-finite ("fast path") case used
+`convolve1d(arr, h, mode="nearest")` — the kernel effectively saw the edge
+value repeated past the array boundary. Window-shrink renormalization (via
+the filled/weight ratio) only kicked in for channels with an *interior* NaN
+gap, since that was the only branch that computed it, and even that branch
+used `mode="nearest"` for the boundary, not a true zero-weight shrink.
+**After:** both the true start/end of every channel and interior NaN gaps
+are treated the same way — as zero-weight regions — via
+`convolve1d(..., mode="constant", cval=0.0)` on both the value and the
+weight-mask arrays, then dividing. This is the "shrink" edge mode from the
+reference implementation (`famos_preprocess.py::famos_smooth`, `edge="shrink"`):
+the kernel is renormalised by the fraction of it that overlapped real data,
+so a straight ramp value at sample 0 stays close to the ramp instead of
+being pulled toward a repeated-edge plateau. The separate all-finite fast
+path is gone — every call now goes through the mask/weight computation, at
+negligible extra cost (one more `convolve1d` call on a float array of the
+same size).
+
+**Why:** the brief calls for window-shrink to be the default at the true
+ends of *every* channel, not only ones that happen to have an interior gap
+already exercising that code path. Affects roughly `width_s/2` seconds
+(~0.25 s for the 0.5 s accel width) at each channel end; the interior is
+identical either way.
+
+**Validation:** re-ran the Step 2 CSV checks (interior, skip=300/600) —
+identical to the numbers above (max err 5.557e-3 N / 5.112e-6, both
+r=1.000000000), confirming the edge-mode change does not touch the interior.
+Edge behaviour spot-checked with a synthetic ramp: `smo(ramp, 0.1s)[0]` now
+tracks the ramp's local value (~16.17 for `ramp=arange(200)`) instead of
+sitting near a flat, edge-padded plateau. NaN-gap handling re-checked and
+still preserves gaps exactly.

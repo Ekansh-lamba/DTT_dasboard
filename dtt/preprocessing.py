@@ -142,8 +142,12 @@ def famos_smooth(x: np.ndarray, fs: float, width_s: float) -> np.ndarray:
     single-kernel form matches FAMOS to max abs error 5.6e-3 N, r = 1.000000000.
     Zero-phase, so no lag is introduced.
 
-    NaN-safe: gaps are excluded from the average via normalised convolution
-    rather than poisoning the whole window, and re-blanked afterwards.
+    NaN-safe and edge-shrinking: both gaps and the true start/end of the
+    array are treated as zero-weight regions and the kernel is renormalised
+    by the fraction of it that overlapped real data, rather than padding
+    with the edge value repeated. This keeps the ~0.25 s at each channel end
+    unbiased, at a progressively shorter effective window; the interior is
+    unaffected either way.
     """
     if width_s <= 0:
         return x
@@ -155,15 +159,11 @@ def famos_smooth(x: np.ndarray, fs: float, width_s: float) -> np.ndarray:
     mask = np.isfinite(arr)
     if not mask.any():
         return arr.copy()
-    if mask.all():
-        # Fast path — nearest-edge padding, matching the previous edge
-        # behaviour (see famos_smooth_edge / Step 2b for the true-end shrink).
-        return convolve1d(arr, h, mode="nearest")
 
     filled = np.where(mask, arr, 0.0)
     w = mask.astype(float)
-    filled = convolve1d(filled, h, mode="nearest")
-    w = convolve1d(w, h, mode="nearest")
+    filled = convolve1d(filled, h, mode="constant", cval=0.0)
+    w = convolve1d(w, h, mode="constant", cval=0.0)
     with np.errstate(invalid="ignore", divide="ignore"):
         out = filled / w
     out[~np.isfinite(out)] = np.nan
