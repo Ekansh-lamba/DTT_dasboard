@@ -14,11 +14,12 @@ Both operators were reverse-engineered from a genuine 100 Hz FAMOS export
 (``csv/RLDA WFT PV data sample.csv``), which ships ``Latacc`` alongside its
 pre-smoothing twin ``Latacc_LPF`` — an exact, sample-wise ground truth:
 
-* ``smo(x, w)`` is a **triangular** kernel, not a single moving average: two
-  cascaded centred box-cars of ``N = round(w·fs/2)`` samples (total support
-  ``2N-1`` ≈ ``w`` seconds). Scored against the FAMOS column it reaches
-  **99.995 % match** (residual σ = 0.028 % of signal) versus 99.62 % for a
-  single-pass average and 96.66 % for no smoothing at all.
+* ``smo(x, w)`` is a **triangular** kernel, not a single moving average and
+  not a boxcar-of-boxcars: the exact kernel has half-width
+  ``a = (round(w·fs) - 1) / 2``, i.e. ``h[k] = max(0, 1 - |k|/a)``. Scored
+  against a matched raw-vs-processed FAMOS export (``data/Fx_raw_cut.csv``)
+  this reproduces FAMOS to max abs error 5.6e-3 N, r = 1.000000000 — a
+  boxcar-of-boxcars kernel is a coarser triangle and only reaches r = 0.996.
 * ``FiltLP`` is a **causal, single-pass** Butterworth filter (``lfilter``), not
   zero-phase. Scored against a matched raw-vs-processed FAMOS export
   (``data/Fx_raw_cut.csv``), a single ``lfilter`` pass reproduces FAMOS to
@@ -37,7 +38,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy.ndimage import uniform_filter1d, median_filter
+from scipy.ndimage import median_filter, convolve1d
 from scipy.signal import butter, filtfilt, lfilter, decimate
 
 # ---------------------------------------------------------------- FAMOS recipe
@@ -106,19 +107,40 @@ def famos_recipe(channel: str, decimate_factor: int = 1) -> PreprocessSettings:
 
 # ------------------------------------------------------------------ FAMOS smo
 
-def famos_smooth_window(fs: float, width_s: float) -> int:
-    """Box-car length ``N`` for one of the two ``smo`` passes."""
-    return max(1, int(round(width_s * fs / 2.0)))
+def famos_smooth_window(fs: float, width_s: float) -> np.ndarray:
+    """Triangular (Bartlett) kernel for one FAMOS ``smo`` pass.
+
+    ``W = round(width_s * fs)`` samples span the window; half-width
+    ``a = (W - 1) / 2``. The kernel is the exact triangle::
+
+        h[k] = max(0, 1 - |k| / a),   integer lags k with |k| < a
+        h    = h / sum(h)             (unit area)
+
+    For ``width_s = 0.1`` s at ``fs = 1000`` Hz this is ``W = 100``,
+    ``a = 49.5``, 99 taps, peak weight 0.020200 — matches the least-squares
+    kernel identified from a matched raw-vs-processed FAMOS export
+    (``data/Fx_raw_cut.csv``, peak 0.020201) and reproduces FAMOS ``Fx_smo``
+    to 0.0056 N (the CSV export's own rounding floor).
+    """
+    w = int(round(width_s * fs))
+    a = (w - 1) / 2.0
+    if a <= 0:
+        return np.array([1.0])
+    kmax = int(np.ceil(a)) - 1
+    k = np.arange(-kmax, kmax + 1)
+    h = np.maximum(0.0, 1.0 - np.abs(k) / a)
+    return h / h.sum()
 
 
 def famos_smooth(x: np.ndarray, fs: float, width_s: float) -> np.ndarray:
-    """FAMOS ``smo(x, width_s)`` — triangular smoothing over ``width_s`` seconds.
+    """FAMOS ``smo(x, width_s)`` — exact triangular weighted moving average.
 
-    Implemented as the two cascaded centred box-cars FAMOS uses (validated to
-    99.995 % against a real FAMOS export; see the module docstring). The
-    resulting triangular kernel is zero-phase and, unlike a single box-car, has
-    no sidelobe ringing — so a residual spike gets attenuated smoothly instead
-    of being smeared into a flat-topped bump.
+    A single pass with the triangular kernel from :func:`famos_smooth_window`
+    (not the previous two cascaded box-cars, which reached only 99.995 % match
+    against a real FAMOS export because a boxcar-of-boxcars kernel is a coarser
+    triangle than the true one). Scored against ``data/Fx_raw_cut.csv``, this
+    single-kernel form matches FAMOS to max abs error 5.6e-3 N, r = 1.000000000.
+    Zero-phase, so no lag is introduced.
 
     NaN-safe: gaps are excluded from the average via normalised convolution
     rather than poisoning the whole window, and re-blanked afterwards.
@@ -126,23 +148,22 @@ def famos_smooth(x: np.ndarray, fs: float, width_s: float) -> np.ndarray:
     if width_s <= 0:
         return x
     arr = np.asarray(x, dtype=float)
-    n = famos_smooth_window(fs, width_s)
-    if n <= 1 or arr.size < 2:
+    h = famos_smooth_window(fs, width_s)
+    if h.size <= 1 or arr.size < 2:
         return arr.copy()
 
     mask = np.isfinite(arr)
     if not mask.any():
         return arr.copy()
     if mask.all():
-        # Fast path — matches the validated uniform_filter1d(mode="nearest") form.
-        y = uniform_filter1d(arr, n, mode="nearest")
-        return uniform_filter1d(y, n, mode="nearest")
+        # Fast path — nearest-edge padding, matching the previous edge
+        # behaviour (see famos_smooth_edge / Step 2b for the true-end shrink).
+        return convolve1d(arr, h, mode="nearest")
 
     filled = np.where(mask, arr, 0.0)
     w = mask.astype(float)
-    for _ in range(2):
-        filled = uniform_filter1d(filled, n, mode="nearest")
-        w = uniform_filter1d(w, n, mode="nearest")
+    filled = convolve1d(filled, h, mode="nearest")
+    w = convolve1d(w, h, mode="nearest")
     with np.errstate(invalid="ignore", divide="ignore"):
         out = filled / w
     out[~np.isfinite(out)] = np.nan
