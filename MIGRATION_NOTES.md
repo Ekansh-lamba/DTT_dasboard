@@ -165,3 +165,104 @@ Traced every caller of `famos_smooth` / `butterworth_lpf` / `apply_famos_recipe`
 
 Conclusion: the codebase already respects smooth-before-cut everywhere smo/
 FiltLP is invoked. No fix needed for this step.
+
+---
+
+## Step 4 — new despike step (2026-08-09)
+
+**Files:** `dtt/preprocessing.py` (new functions + `apply_famos_recipe` kwargs),
+`dtt/config.py::RunConfig` (new fields), `dtt/processing/signal_processor.py::
+apply_filter` (CSV path), `dtt/ingestion/imc_reader.py::_assemble`/`read_folder`/
+`read_files` (raw path), `dtt/ingestion/loader.py::load_raw_folder`/
+`load_raw_files` (threads `RunConfig` through to the raw reader).
+
+**New functions in `preprocessing.py`:**
+
+* `detect_rail(x, min_run=3)` — rule 1, saturation: a run of `>= min_run`
+  samples pinned at the channel's own min or max value. By value, not raw
+  ADC counts, so it needs no factor plumbing and works the same for raw and
+  CSV sources.
+* `detect_dropout(x, max_run=5)` — rule 2, dropout: exact zeros/NaN (always
+  flagged) plus any run of an identical value repeated `>= max_run` samples
+  (a frozen sensor). Shares the same run-detection helper (`_flag_value_runs`)
+  as rule 1 — the brief calls these "nearly the same test."
+* `detect_narrow_spikes(x, fs, hw_cutoff_hz=200.0)` — rule 3, sub-hardware-
+  width spike: the raw channel was hardware low-pass filtered at
+  `hw_cutoff_hz` before being digitised at `fs`, so nothing narrower than
+  `fs / (2*hw_cutoff_hz)` samples (2 samples, by default) can be real. Flags
+  a same-signed excursion off a local median trend that is narrower than
+  that width, **regardless of its size** — so a genuine peak of any
+  amplitude survives as long as it's wide (see the correction below for why
+  a tiny noise floor was still needed).
+* `despike(x, fs, ...)` — runs all three rules, unions the flags, and
+  replaces them by reusing the existing `_interpolate_over` helper (never
+  drops samples). Optional `net=True` runs a very loose adaptive
+  `hampel_deglitch` pass afterwards for gross leftovers; off by default.
+  Returns `(despiked, pct_flagged)`.
+
+**Correction made during validation — rule 3 needed a noise floor.** The
+first cut of `detect_narrow_spikes` used a width test alone (median trend
+window `8*min_width+1`, flag any sign-consistent run shorter than
+`min_width`) and flagged **2.8%** of the real `Fx_raw_cut` channel — nowhere
+near "a small fraction of a percent." The reason: a bare structural width
+test can't distinguish a genuine artifact from the ordinary sample-to-sample
+chatter every noisy signal has around its own local median, and that
+chatter is *always* exactly 1 sample wide by construction, so it trips the
+test constantly. Added a light gate — the excursion's peak must clear `2x`
+the local high-frequency residual's robust scale (`1.4826 * MAD`) — which is
+far below any real spike or peak amplitude, so it still doesn't discriminate
+by size, only filters out deviations indistinguishable from measurement
+noise. After the fix, rule 3 alone flags **7 samples (0.023%)** on the same
+channel.
+
+**Config surface (`RunConfig`, mirrors the existing `deglitch` fields):**
+`despike` (on/off, default `False`), `despike_rail_min_run` (default 3),
+`despike_dropout_max_run` (default 5), `despike_hw_cutoff_hz` (default
+200.0), `despike_net` (default `False`), `despike_net_nsigma` (default 6.0),
+`despike_net_window_s` (default 0.011). All optional kwargs with defaults on
+`apply_famos_recipe`, `_assemble`, `read_folder`, `read_files` — existing
+callers are unaffected (confirmed: `apply_famos_recipe(df, fs,
+decimate_factor=10)` with despike omitted produces byte-identical `applied`
+output to before this step, `"smo(0.1s) -> red(10)"`, no `despike` step
+listed).
+
+**Scope note:** wired into `RunConfig` and both ingestion call sites per the
+brief; did **not** add a GUI checkbox or `--despike` CLI flag (the pattern
+`deglitch` uses in `pipeline.py`/`new_study_page.py`) since the brief scoped
+this step to `apply_famos_recipe` and its two call sites, not full UI parity,
+and despike has 6 parameters vs. deglitch's 1. Left as a natural follow-up if
+wanted — the config fields and wiring are already in place, so it's just
+argparse/GUI plumbing at that point.
+
+**Check 2 — despike runs on the CSV path too, not just raw:** built a
+`RunConfig(despike=True, famos_mode=True, famos_applied=False)` (the state a
+plain CSV study is in — ingestion didn't run FAMOS, so stage 4 must) and
+called `signal_processor.apply_filter` directly on `Fx_raw_cut` loaded as a
+DataFrame. Log output confirms the despike step actually ran:
+`FL_Fx  despike(0.617%) -> smo(0.1s)`. Confirmed.
+
+**Validation** (real channel, `data/Fx_raw_cut.csv::Fx_raw_cut`, n=30001,
+fs=1000 Hz, all default thresholds) — no FAMOS ground truth exists for this
+step, so validated by running on a real channel and inspecting the result:
+
+| rule | flagged | % |
+|---|---|---|
+| rail (saturation) | 3 | 0.010% |
+| dropout (zero/null/frozen) | 175 | 0.583% |
+| narrow-spike (sub-hardware-width) | 7 | 0.023% |
+| **total (union)** | **185** | **0.617%** |
+
+Well within "a small fraction of a percent." Spot-checked the dropout runs
+directly: 122 runs total, mostly single exact-`0.0` samples plus a handful
+of 5-6-sample runs of one exact repeated value (e.g. `-168.915` x5,
+`-177.155` x6) — patterns that essentially cannot occur from continuous
+sensor noise landing on the same float bit-for-bit, which is exactly what
+rule 2 is meant to catch.
+
+Before/after plots saved to
+`C:\Users\ekans\AppData\Local\Temp\claude\d--Apollo-Project-Main\85ae4cfe-2ec7-4f03-816e-3a7bcff1fc60\scratchpad\despike_validation.png`
+(session scratch dir, not committed) around four flagged points — a frozen
+run, a two-point exact-zero cluster sitting mid-way up a large real
+excursion, a pinned rail run inside a real dip, and the narrow-spike catch.
+In all four, the large genuine road-load swings on either side of the flag
+are untouched, and only the flagged samples themselves are smoothly bridged.

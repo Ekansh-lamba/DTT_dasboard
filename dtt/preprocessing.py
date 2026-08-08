@@ -402,6 +402,148 @@ def moderate_spikes(x: np.ndarray, fs: float = 1.0, window_s: float = 0.011,
     return hampel_deglitch(x, fs, window_s, n_sigmas, strength, max_frac)
 
 
+def _flag_value_runs(arr: np.ndarray, min_len: int) -> np.ndarray:
+    """Flag every sample in a run of ``>= min_len`` consecutive identical
+    finite values. A run never crosses a NaN (each NaN breaks it)."""
+    n = arr.size
+    flag = np.zeros(n, dtype=bool)
+    if n == 0 or min_len <= 1:
+        return flag
+    finite = np.isfinite(arr)
+    same_as_prev = np.zeros(n, dtype=bool)
+    same_as_prev[1:] = finite[1:] & finite[:-1] & (arr[1:] == arr[:-1])
+    starts = np.where(~same_as_prev)[0]
+    ends = np.append(starts[1:], n)
+    for s, e in zip(starts, ends):
+        if finite[s] and (e - s) >= min_len:
+            flag[s:e] = True
+    return flag
+
+
+def detect_dropout(x: np.ndarray, max_run: int = 5) -> np.ndarray:
+    """Despike rule 2 — dropout: exact zeros or nulls, and a run of any
+    identical value repeated ``>= max_run`` samples (a frozen sensor),
+    whatever that value is. Nearly the same test as :func:`detect_rail`,
+    just without the "at the channel's own extreme" restriction.
+    """
+    arr = np.asarray(x, dtype=float)
+    finite = np.isfinite(arr)
+    flag = ~finite | (finite & (arr == 0.0))
+    flag |= _flag_value_runs(arr, max_run)
+    return flag
+
+
+def detect_rail(x: np.ndarray, min_run: int = 3) -> np.ndarray:
+    """Despike rule 1 — saturation/rail: a run of ``>= min_run`` samples
+    pinned at the channel's own min or max value. Detected by value, not raw
+    ADC counts, so it is scale-independent and needs no factor plumbing for
+    either the raw or the CSV source.
+    """
+    arr = np.asarray(x, dtype=float)
+    finite = np.isfinite(arr)
+    if finite.sum() < min_run:
+        return np.zeros(arr.size, dtype=bool)
+    lo, hi = np.min(arr[finite]), np.max(arr[finite])
+    if lo == hi:
+        return np.zeros(arr.size, dtype=bool)     # constant channel, no rail to hit
+    at_rail = finite & ((arr == lo) | (arr == hi))
+    masked = np.where(at_rail, arr, np.nan)
+    return _flag_value_runs(masked, min_run) & at_rail
+
+
+def detect_narrow_spikes(x: np.ndarray, fs: float, hw_cutoff_hz: float = 200.0
+                        ) -> np.ndarray:
+    """Despike rule 3 — sub-hardware-width spike: the raw channel was
+    hardware low-pass filtered at ``hw_cutoff_hz`` before being digitised at
+    ``fs``, so no genuine feature can be narrower than roughly half a cycle
+    at that cutoff (``fs / (2 * hw_cutoff_hz)`` samples) — a real peak is
+    always several samples wide.
+
+    The primary criterion is **width**: a same-signed excursion off the
+    local trend that spans fewer than that physical minimum of samples is
+    non-physical regardless of its size, which is what lets a genuine
+    (wider) road-load peak of any size survive untouched — a real peak is
+    never removed for being big, only a real *glitch* is removed for being
+    too narrow to exist.
+
+    A structural width test alone cannot tell a genuine single-sample
+    artifact from the ordinary sample-to-sample chatter every noisy signal
+    has relative to its own local median — that chatter is *always* exactly
+    1 sample wide by construction, so a bare width test flags a few percent
+    of any channel. A light noise floor (``2x`` the local high-frequency
+    residual's robust scale) excludes that chatter; it is far below any real
+    spike or peak amplitude, so it still does not discriminate on size.
+    """
+    arr = np.asarray(x, dtype=float)
+    n = arr.size
+    finite = np.isfinite(arr)
+    min_width = max(1, int(round(fs / (2.0 * hw_cutoff_hz))))
+    if n < 5 or finite.sum() < 5:
+        return np.zeros(n, dtype=bool)
+
+    # The trend window has to be well wider than min_width, or the "trend"
+    # just tracks the raw signal and every ordinary sample-to-sample wiggle
+    # reads as a narrow excursion. 8x gives the median room to represent the
+    # slow-moving signal a hw_cutoff_hz-limited channel should show locally,
+    # while a real road-load peak (many min_width's wide) still stands clear
+    # of it for long enough not to trip the width test below.
+    win = max(3, 8 * min_width + 1)
+    if win % 2 == 0:
+        win += 1
+    probe = arr
+    if not finite.all():
+        idx = np.arange(n)
+        probe = np.interp(idx, idx[finite], arr[finite])
+    trend = median_filter(probe, size=win, mode="nearest")   # what a hw_cutoff_hz-limited signal should look like locally
+    resid = probe - trend
+    noise_floor = 2.0 * 1.4826 * np.median(np.abs(resid[finite]))
+    sign = np.sign(resid)
+
+    change = np.ones(n, dtype=bool)
+    change[1:] = sign[1:] != sign[:-1]
+    starts = np.where(change)[0]
+    ends = np.append(starts[1:], n)
+    flag = np.zeros(n, dtype=bool)
+    for s, e in zip(starts, ends):
+        if sign[s] != 0 and (e - s) < min_width and np.max(np.abs(resid[s:e])) >= noise_floor:
+            flag[s:e] = True
+    return flag & finite
+
+
+def despike(x: np.ndarray, fs: float,
+           rail_min_run: int = 3, dropout_max_run: int = 5,
+           hw_cutoff_hz: float = 200.0,
+           net: bool = False, net_nsigma: float = 6.0, net_window_s: float = 0.011,
+           strength: float = 1.0) -> Tuple[np.ndarray, float]:
+    """Physical-rule despike ahead of FiltLP/smo: rail, dropout, and
+    sub-hardware-width spikes, replaced by interpolation from good
+    neighbours — never dropped.
+
+    Deliberately not an amplitude threshold. This is spiky WFT road load
+    where a genuine peak can be as large as any artifact, so every primary
+    rule is structural (pinned at the rail, a frozen run, or narrower than
+    the hardware could produce) rather than "how big is it" — which is what
+    keeps real peaks intact for rainflow counting.
+
+    ``net``, off by default, optionally runs a very loose adaptive
+    :func:`hampel_deglitch` pass afterwards for gross leftovers the physical
+    rules miss.
+
+    Returns ``(despiked, pct_flagged)``.
+    """
+    arr = np.asarray(x, dtype=float)
+    finite = np.isfinite(arr)
+    flag = detect_dropout(arr, dropout_max_run)
+    flag |= detect_rail(arr, rail_min_run)
+    flag |= detect_narrow_spikes(arr, fs, hw_cutoff_hz)
+    out = _interpolate_over(arr, flag, finite, strength)
+    if net:
+        out = hampel_deglitch(out, fs, window_s=net_window_s,
+                              n_sigmas=net_nsigma, strength=strength)
+    pct_flagged = 100.0 * flag.sum() / max(1, arr.size)
+    return out, pct_flagged
+
+
 def bridge_gaps(t: np.ndarray, x: np.ndarray, fs: float, min_gap_s: float = 10.0
                 ) -> Tuple[np.ndarray, np.ndarray]:
     """Remove runs of NaN or (near-)flat/zero signal lasting >= ``min_gap_s``.
@@ -491,6 +633,13 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
                        decimate_factor: int = 1,
                        deglitch: bool = False,
                        deglitch_nsigma: float = 6.0,
+                       despike_enabled: bool = False,
+                       despike_rail_min_run: int = 3,
+                       despike_dropout_max_run: int = 5,
+                       despike_hw_cutoff_hz: float = 200.0,
+                       despike_net: bool = False,
+                       despike_net_nsigma: float = 6.0,
+                       despike_net_window_s: float = 0.011,
                        time_column: str = "Time",
                        emit_lpf_columns: bool = True,
                        ) -> Tuple[pd.DataFrame, float, Dict[str, str]]:
@@ -504,6 +653,11 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
     ``deglitch`` inserts a rolling-median de-glitch ahead of the FAMOS steps.
     It is off by default because a correctly-read imc file is already clean;
     turn it on for recordings with DAQ artifact spikes.
+
+    ``despike_enabled`` runs :func:`despike` (rail/dropout/sub-hardware-width
+    rules, see its docstring) ahead of ``deglitch`` and the FAMOS steps. Off
+    by default so existing callers are unaffected; the ``despike_*`` kwargs
+    tune its thresholds and its optional loose adaptive net.
 
     With ``emit_lpf_columns``, the pre-smoothing ``Latacc_LPF`` intermediate is
     exported too, matching the column set of a FAMOS CSV.
@@ -527,6 +681,15 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
         s = famos_recipe(col, decimate_factor=1)      # decimate once, below
         y = series
         steps: List[str] = []
+        if despike_enabled:
+            y, pct_flagged = despike(
+                y, fs,
+                rail_min_run=despike_rail_min_run,
+                dropout_max_run=despike_dropout_max_run,
+                hw_cutoff_hz=despike_hw_cutoff_hz,
+                net=despike_net, net_nsigma=despike_net_nsigma,
+                net_window_s=despike_net_window_s)
+            steps.append(f"despike({pct_flagged:.3g}%)")
         if deglitch:
             y = hampel_deglitch(y, fs, n_sigmas=deglitch_nsigma)
             steps.append("de-glitch")

@@ -238,6 +238,7 @@ def _finalize_raw(df, imeta, config, name) -> Tuple[pd.DataFrame, dict]:
         "famos_recipe":     imeta.get("famos_recipe") or {},
         "famos_decimate":   imeta.get("famos_decimate", 1),
         "deglitch":         imeta.get("deglitch", False),
+        "despike":          imeta.get("despike", False),
     }
     logger.info(
         "Loaded imc raw: %d rows, %d cols, raw %.0f Hz -> %.0f Hz, %d force channels",
@@ -254,7 +255,14 @@ def load_raw_folder(folder: Path, config: RunConfig) -> Tuple[pd.DataFrame, dict
     target = config.sampling_rate or DEFAULT_SAMPLING_RATE
     df, imeta = read_folder(folder, target_fs=target,
                             famos=getattr(config, "famos_mode", True),
-                            deglitch=getattr(config, "deglitch", False))
+                            deglitch=getattr(config, "deglitch", False),
+                            despike=getattr(config, "despike", False),
+                            despike_rail_min_run=getattr(config, "despike_rail_min_run", 3),
+                            despike_dropout_max_run=getattr(config, "despike_dropout_max_run", 5),
+                            despike_hw_cutoff_hz=getattr(config, "despike_hw_cutoff_hz", 200.0),
+                            despike_net=getattr(config, "despike_net", False),
+                            despike_net_nsigma=getattr(config, "despike_net_nsigma", 6.0),
+                            despike_net_window_s=getattr(config, "despike_net_window_s", 0.011))
     return _finalize_raw(df, imeta, config, folder.name)
 
 
@@ -266,5 +274,12 @@ def load_raw_files(files, config: RunConfig) -> Tuple[pd.DataFrame, dict]:
     target = config.sampling_rate or DEFAULT_SAMPLING_RATE
     df, imeta = read_files(files, target_fs=target,
                            famos=getattr(config, "famos_mode", True),
-                           deglitch=getattr(config, "deglitch", False))
+                           deglitch=getattr(config, "deglitch", False),
+                           despike=getattr(config, "despike", False),
+                           despike_rail_min_run=getattr(config, "despike_rail_min_run", 3),
+                           despike_dropout_max_run=getattr(config, "despike_dropout_max_run", 5),
+                           despike_hw_cutoff_hz=getattr(config, "despike_hw_cutoff_hz", 200.0),
+                           despike_net=getattr(config, "despike_net", False),
+                           despike_net_nsigma=getattr(config, "despike_net_nsigma", 6.0),
+                           despike_net_window_s=getattr(config, "despike_net_window_s", 0.011))
     return _finalize_raw(df, imeta, config, f"{len(files)} files")
