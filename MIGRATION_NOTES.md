@@ -132,3 +132,36 @@ Edge behaviour spot-checked with a synthetic ramp: `smo(ramp, 0.1s)[0]` now
 tracks the ramp's local value (~16.17 for `ramp=arange(200)`) instead of
 sitting near a flat, edge-padded plateau. NaN-gap handling re-checked and
 still preserves gaps exactly.
+
+---
+
+## Step 3 — audit: smooth-then-cut ordering (2026-08-09)
+
+**No code change** — audited every place that could violate "smooth the full
+channel first, then cut a sub-range out of it" and found nothing to fix.
+
+Traced every caller of `famos_smooth` / `butterworth_lpf` / `apply_famos_recipe`
+/ `apply_pipeline` in the repo:
+
+* `dtt/comparison_io.py::load_recording` — the brief's flagged suspect. It
+  calls `imc_reader.read_folder(folder, ...)` on the *whole* recording
+  folder, which runs `apply_famos_recipe` (smo/FiltLP at native rate, then
+  `red()`) before any comparison-level alignment or windowing happens in
+  `dtt/comparison.py`. `dtt/comparison.py` itself does no smoothing at all —
+  it only computes distribution statistics (RMS, P95, etc.) on already
+  band-limited, already-decimated channels. No violation.
+* `dtt/pipeline.py` — ingestion (stage 1, full recording) always runs before
+  signal processing (stage 4); there is no sub-range/time-window field
+  anywhere in `RunConfig` (`dtt/config.py`) that could cut the data first.
+* `gui/pages/preprocess_page.py::_load_channel` / `_update` — the interactive
+  preview page. `_load_channel` reads the *entire* channel column (all rows)
+  from `study.processed_csv`, and `_update` runs `apply_pipeline` over that
+  full column — never a user-selected sub-range. Confirmed by reading
+  `_load_channel`: `pd.read_csv(..., usecols=lambda c: c in cols)` with no
+  row slicing.
+* `dtt/validation/famos_validation.py` — calls `butterworth_lpf` /
+  `famos_smooth` directly on whatever DataFrame it's given, for fitting
+  against FAMOS ground-truth columns; callers pass full studies, not cuts.
+
+Conclusion: the codebase already respects smooth-before-cut everywhere smo/
+FiltLP is invoked. No fix needed for this step.
