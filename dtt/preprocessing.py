@@ -19,9 +19,12 @@ pre-smoothing twin ``Latacc_LPF`` — an exact, sample-wise ground truth:
   ``2N-1`` ≈ ``w`` seconds). Scored against the FAMOS column it reaches
   **99.995 % match** (residual σ = 0.028 % of signal) versus 99.62 % for a
   single-pass average and 96.66 % for no smoothing at all.
-* ``FiltLP`` is **zero-phase**: ``Latacc_LPF`` sits at exactly the same lag as
-  an unfiltered ``v·ψ̇`` reference, which a forward-only IIR would delay by
-  ~9 samples. So ``filtfilt``, not ``lfilter``.
+* ``FiltLP`` is a **causal, single-pass** Butterworth filter (``lfilter``), not
+  zero-phase. Scored against a matched raw-vs-processed FAMOS export
+  (``data/Fx_raw_cut.csv``), a single ``lfilter`` pass reproduces FAMOS to
+  5e-6 max abs error, r = 1.0; ``filtfilt`` misses it by 0.66 and drops r to
+  0.93. The filtered channel therefore carries a real lag relative to an
+  unfiltered reference — that is correct, not a bug.
 * ``red(x, n)`` is a plain every-n-th-sample reduction, applied *after* the
   smoothing has already band-limited the signal.
 """
@@ -35,7 +38,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 from scipy.ndimage import uniform_filter1d, median_filter
-from scipy.signal import butter, filtfilt, decimate
+from scipy.signal import butter, filtfilt, lfilter, decimate
 
 # ---------------------------------------------------------------- FAMOS recipe
 
@@ -216,11 +219,14 @@ def resample(x: np.ndarray, factor: int, fs: float, mode: str = "famos"
 # --------------------------------------------------------------- FAMOS FiltLP
 
 def butterworth_lpf(x: np.ndarray, cutoff: float, order: int, fs: float) -> np.ndarray:
-    """FAMOS ``FiltLP(x, 0, 0, order, cutoff)`` — zero-phase Butterworth low-pass.
+    """FAMOS ``FiltLP(x, 0, 0, order, cutoff)`` — causal Butterworth low-pass.
 
-    Zero-phase (``filtfilt``) is the verified FAMOS convention: in a real export
-    the filtered channel carries no lag relative to an unfiltered physical
-    reference. NaN-safe.
+    Causal, single-pass (``lfilter``) is the verified FAMOS convention: scored
+    against a matched raw-vs-processed FAMOS export (``data/Fx_raw_cut.csv``),
+    a single ``lfilter`` pass matches the FAMOS ``Lat_lpf`` column to 5e-6 max
+    abs error with r = 1.000000000. ``filtfilt`` (zero-phase, double filtering)
+    misses it by 0.66 and drops correlation to 0.93 — do not substitute it back
+    in. NaN-safe.
     """
     nyq = 0.5 * fs
     if cutoff >= nyq:
@@ -231,7 +237,7 @@ def butterworth_lpf(x: np.ndarray, cutoff: float, order: int, fs: float) -> np.n
         return arr
     arr[~mask] = np.nanmean(arr[mask])
     b, a = butter(order, cutoff / nyq, btype="low")
-    y = filtfilt(b, a, arr)
+    y = lfilter(b, a, arr)
     y[~mask] = np.nan
     return y
 

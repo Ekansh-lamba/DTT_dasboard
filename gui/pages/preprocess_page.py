@@ -218,8 +218,8 @@ class PreprocessPage(BasePage):
         self.filter_check = QCheckBox("Butterworth low-pass"); self.filter_check.setChecked(False)
         self.filter_check.setToolTip(
             "FAMOS FiltLP(...,4,5) — applied to accel/Latacc only, never to the "
-            "forces (those get smo).\nZero-phase, matching FAMOS: the filtered "
-            "channel carries no lag against an unfiltered reference.")
+            "forces (those get smo).\nCausal (single-pass), matching FAMOS: the "
+            "filtered channel carries a real lag against an unfiltered reference.")
         ctrl.layout().addWidget(self.filter_check)
         self.cutoff = QDoubleSpinBox(); self.cutoff.setRange(0.1, 1000); self.cutoff.setValue(5.0); self.cutoff.setSuffix(" Hz")
         self.order = QSpinBox(); self.order.setRange(1, 12); self.order.setValue(4)
