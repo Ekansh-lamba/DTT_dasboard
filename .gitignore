@@ -4,6 +4,7 @@
 # ============================================================
 
 # Raw measurement data (imc STUDIO / classic FAMOS)
+data/
 Raw data_no sanitisation/
 raw data in .dat format/
 *.raw
