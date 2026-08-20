@@ -1,7 +1,7 @@
 # Build the DTT WFT Automation Platform as a standalone Windows application.
 #
-#   .\build_exe.ps1                 # onedir  — fastest (ship the whole folder)
-#   .\build_exe.ps1 -OneFile        # onefile — ONE .exe you can just send
+#   .\build_exe.ps1                 # onedir  - fastest (ship the whole folder)
+#   .\build_exe.ps1 -OneFile        # onefile - ONE .exe you can just send
 #   .\build_exe.ps1 -Clean          # discard PyInstaller's cache first
 #   .\build_exe.ps1 -Console        # keep a console window (shows tracebacks)
 #
@@ -42,18 +42,26 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Fail early on a missing runtime dependency rather than after a 3-minute build.
+# The check goes through a temp file: PowerShell mangles quotes inside a
+# multi-line string handed to a native executable, so `python -c` is not safe here.
 Write-Host "Checking dependencies..." -ForegroundColor Cyan
-& $python -c @'
-import importlib, sys
-missing = [m for m in ("PySide6", "numpy", "scipy", "pandas", "matplotlib",
-                       "rainflow", "pptx", "openpyxl")
-           if not importlib.util.find_spec(m)]
+$checkPy = @'
+import importlib.util, sys
+need = ["PySide6", "numpy", "scipy", "pandas", "matplotlib",
+        "rainflow", "pptx", "openpyxl"]
+missing = [m for m in need if importlib.util.find_spec(m) is None]
 if missing:
-    sys.exit("Missing packages: " + ", ".join(missing) +
-             "\nRun: pip install -r dtt/requirements.txt -r gui/requirements.txt")
+    print("Missing packages: " + ", ".join(missing))
+    print("Run: pip install -r dtt/requirements.txt -r gui/requirements.txt")
+    sys.exit(1)
 print("  all present")
 '@
-if ($LASTEXITCODE -ne 0) { throw "Dependency check failed" }
+$checkFile = Join-Path ([System.IO.Path]::GetTempPath()) "dtt_depcheck.py"
+Set-Content -Path $checkFile -Value $checkPy -Encoding utf8
+& $python $checkFile
+$depRc = $LASTEXITCODE
+Remove-Item $checkFile -ErrorAction SilentlyContinue
+if ($depRc -ne 0) { throw "Dependency check failed" }
 
 $buildArgs = @("DTT-Platform.spec", "--noconfirm")
 if ($Clean)   { $buildArgs += "--clean" }
@@ -71,13 +79,13 @@ if ($OneFile) {
     $exe = "dist-onefile\DTT-Platform.exe"
     if (-not (Test-Path $exe)) { throw "Build reported success but $exe is missing" }
     $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
-    $ship = "this single file — nothing else needed"
+    $ship = "this single file - nothing else needed"
 } else {
     $exe = "dist\DTT-Platform\DTT-Platform.exe"
     if (-not (Test-Path $exe)) { throw "Build reported success but $exe is missing" }
     $mb = [math]::Round(((Get-ChildItem "dist\DTT-Platform" -Recurse -File |
                           Measure-Object Length -Sum).Sum / 1MB), 1)
-    $ship = "the WHOLE dist\DTT-Platform folder — the .exe alone will not run"
+    $ship = "the WHOLE dist\DTT-Platform folder - the .exe alone will not run"
 }
 
 Write-Host ""
