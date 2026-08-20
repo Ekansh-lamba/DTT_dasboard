@@ -14,14 +14,18 @@ Both operators were reverse-engineered from a genuine 100 Hz FAMOS export
 (``csv/RLDA WFT PV data sample.csv``), which ships ``Latacc`` alongside its
 pre-smoothing twin ``Latacc_LPF`` — an exact, sample-wise ground truth:
 
-* ``smo(x, w)`` is a **triangular** kernel, not a single moving average: two
-  cascaded centred box-cars of ``N = round(w·fs/2)`` samples (total support
-  ``2N-1`` ≈ ``w`` seconds). Scored against the FAMOS column it reaches
-  **99.995 % match** (residual σ = 0.028 % of signal) versus 99.62 % for a
-  single-pass average and 96.66 % for no smoothing at all.
-* ``FiltLP`` is **zero-phase**: ``Latacc_LPF`` sits at exactly the same lag as
-  an unfiltered ``v·ψ̇`` reference, which a forward-only IIR would delay by
-  ~9 samples. So ``filtfilt``, not ``lfilter``.
+* ``smo(x, w)`` is a **triangular** kernel, not a single moving average and
+  not a boxcar-of-boxcars: the exact kernel has half-width
+  ``a = (round(w·fs) - 1) / 2``, i.e. ``h[k] = max(0, 1 - |k|/a)``. Scored
+  against a matched raw-vs-processed FAMOS export (``data/Fx_raw_cut.csv``)
+  this reproduces FAMOS to max abs error 5.6e-3 N, r = 1.000000000 — a
+  boxcar-of-boxcars kernel is a coarser triangle and only reaches r = 0.996.
+* ``FiltLP`` is a **causal, single-pass** Butterworth filter (``lfilter``), not
+  zero-phase. Scored against a matched raw-vs-processed FAMOS export
+  (``data/Fx_raw_cut.csv``), a single ``lfilter`` pass reproduces FAMOS to
+  5e-6 max abs error, r = 1.0; ``filtfilt`` misses it by 0.66 and drops r to
+  0.93. The filtered channel therefore carries a real lag relative to an
+  unfiltered reference — that is correct, not a bug.
 * ``red(x, n)`` is a plain every-n-th-sample reduction, applied *after* the
   smoothing has already band-limited the signal.
 """
@@ -34,8 +38,8 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy.ndimage import uniform_filter1d, median_filter
-from scipy.signal import butter, filtfilt, decimate
+from scipy.ndimage import median_filter, convolve1d
+from scipy.signal import butter, filtfilt, lfilter, decimate
 
 from dtt.channels import COMPONENTS, parse_channel
 
@@ -119,43 +123,63 @@ def famos_recipe(channel: str, decimate_factor: int = 1) -> PreprocessSettings:
 
 # ------------------------------------------------------------------ FAMOS smo
 
-def famos_smooth_window(fs: float, width_s: float) -> int:
-    """Box-car length ``N`` for one of the two ``smo`` passes."""
-    return max(1, int(round(width_s * fs / 2.0)))
+def famos_smooth_window(fs: float, width_s: float) -> np.ndarray:
+    """Triangular (Bartlett) kernel for one FAMOS ``smo`` pass.
+
+    ``W = round(width_s * fs)`` samples span the window; half-width
+    ``a = (W - 1) / 2``. The kernel is the exact triangle::
+
+        h[k] = max(0, 1 - |k| / a),   integer lags k with |k| < a
+        h    = h / sum(h)             (unit area)
+
+    For ``width_s = 0.1`` s at ``fs = 1000`` Hz this is ``W = 100``,
+    ``a = 49.5``, 99 taps, peak weight 0.020200 — matches the least-squares
+    kernel identified from a matched raw-vs-processed FAMOS export
+    (``data/Fx_raw_cut.csv``, peak 0.020201) and reproduces FAMOS ``Fx_smo``
+    to 0.0056 N (the CSV export's own rounding floor).
+    """
+    w = int(round(width_s * fs))
+    a = (w - 1) / 2.0
+    if a <= 0:
+        return np.array([1.0])
+    kmax = int(np.ceil(a)) - 1
+    k = np.arange(-kmax, kmax + 1)
+    h = np.maximum(0.0, 1.0 - np.abs(k) / a)
+    return h / h.sum()
 
 
 def famos_smooth(x: np.ndarray, fs: float, width_s: float) -> np.ndarray:
-    """FAMOS ``smo(x, width_s)`` — triangular smoothing over ``width_s`` seconds.
+    """FAMOS ``smo(x, width_s)`` — exact triangular weighted moving average.
 
-    Implemented as the two cascaded centred box-cars FAMOS uses (validated to
-    99.995 % against a real FAMOS export; see the module docstring). The
-    resulting triangular kernel is zero-phase and, unlike a single box-car, has
-    no sidelobe ringing — so a residual spike gets attenuated smoothly instead
-    of being smeared into a flat-topped bump.
+    A single pass with the triangular kernel from :func:`famos_smooth_window`
+    (not the previous two cascaded box-cars, which reached only 99.995 % match
+    against a real FAMOS export because a boxcar-of-boxcars kernel is a coarser
+    triangle than the true one). Scored against ``data/Fx_raw_cut.csv``, this
+    single-kernel form matches FAMOS to max abs error 5.6e-3 N, r = 1.000000000.
+    Zero-phase, so no lag is introduced.
 
-    NaN-safe: gaps are excluded from the average via normalised convolution
-    rather than poisoning the whole window, and re-blanked afterwards.
+    NaN-safe and edge-shrinking: both gaps and the true start/end of the
+    array are treated as zero-weight regions and the kernel is renormalised
+    by the fraction of it that overlapped real data, rather than padding
+    with the edge value repeated. This keeps the ~0.25 s at each channel end
+    unbiased, at a progressively shorter effective window; the interior is
+    unaffected either way.
     """
     if width_s <= 0:
         return x
     arr = np.asarray(x, dtype=float)
-    n = famos_smooth_window(fs, width_s)
-    if n <= 1 or arr.size < 2:
+    h = famos_smooth_window(fs, width_s)
+    if h.size <= 1 or arr.size < 2:
         return arr.copy()
 
     mask = np.isfinite(arr)
     if not mask.any():
         return arr.copy()
-    if mask.all():
-        # Fast path — matches the validated uniform_filter1d(mode="nearest") form.
-        y = uniform_filter1d(arr, n, mode="nearest")
-        return uniform_filter1d(y, n, mode="nearest")
 
     filled = np.where(mask, arr, 0.0)
     w = mask.astype(float)
-    for _ in range(2):
-        filled = uniform_filter1d(filled, n, mode="nearest")
-        w = uniform_filter1d(w, n, mode="nearest")
+    filled = convolve1d(filled, h, mode="constant", cval=0.0)
+    w = convolve1d(w, h, mode="constant", cval=0.0)
     with np.errstate(invalid="ignore", divide="ignore"):
         out = filled / w
     out[~np.isfinite(out)] = np.nan
@@ -232,11 +256,14 @@ def resample(x: np.ndarray, factor: int, fs: float, mode: str = "famos"
 # --------------------------------------------------------------- FAMOS FiltLP
 
 def butterworth_lpf(x: np.ndarray, cutoff: float, order: int, fs: float) -> np.ndarray:
-    """FAMOS ``FiltLP(x, 0, 0, order, cutoff)`` — zero-phase Butterworth low-pass.
+    """FAMOS ``FiltLP(x, 0, 0, order, cutoff)`` — causal Butterworth low-pass.
 
-    Zero-phase (``filtfilt``) is the verified FAMOS convention: in a real export
-    the filtered channel carries no lag relative to an unfiltered physical
-    reference. NaN-safe.
+    Causal, single-pass (``lfilter``) is the verified FAMOS convention: scored
+    against a matched raw-vs-processed FAMOS export (``data/Fx_raw_cut.csv``),
+    a single ``lfilter`` pass matches the FAMOS ``Lat_lpf`` column to 5e-6 max
+    abs error with r = 1.000000000. ``filtfilt`` (zero-phase, double filtering)
+    misses it by 0.66 and drops correlation to 0.93 — do not substitute it back
+    in. NaN-safe.
     """
     nyq = 0.5 * fs
     if cutoff >= nyq:
@@ -247,7 +274,7 @@ def butterworth_lpf(x: np.ndarray, cutoff: float, order: int, fs: float) -> np.n
         return arr
     arr[~mask] = np.nanmean(arr[mask])
     b, a = butter(order, cutoff / nyq, btype="low")
-    y = filtfilt(b, a, arr)
+    y = lfilter(b, a, arr)
     y[~mask] = np.nan
     return y
 
@@ -427,6 +454,148 @@ def moderate_spikes(x: np.ndarray, fs: float = 1.0, window_s: float = 0.011,
     return hampel_deglitch(x, fs, window_s, n_sigmas, strength, max_frac)
 
 
+def _flag_value_runs(arr: np.ndarray, min_len: int) -> np.ndarray:
+    """Flag every sample in a run of ``>= min_len`` consecutive identical
+    finite values. A run never crosses a NaN (each NaN breaks it)."""
+    n = arr.size
+    flag = np.zeros(n, dtype=bool)
+    if n == 0 or min_len <= 1:
+        return flag
+    finite = np.isfinite(arr)
+    same_as_prev = np.zeros(n, dtype=bool)
+    same_as_prev[1:] = finite[1:] & finite[:-1] & (arr[1:] == arr[:-1])
+    starts = np.where(~same_as_prev)[0]
+    ends = np.append(starts[1:], n)
+    for s, e in zip(starts, ends):
+        if finite[s] and (e - s) >= min_len:
+            flag[s:e] = True
+    return flag
+
+
+def detect_dropout(x: np.ndarray, max_run: int = 5) -> np.ndarray:
+    """Despike rule 2 — dropout: exact zeros or nulls, and a run of any
+    identical value repeated ``>= max_run`` samples (a frozen sensor),
+    whatever that value is. Nearly the same test as :func:`detect_rail`,
+    just without the "at the channel's own extreme" restriction.
+    """
+    arr = np.asarray(x, dtype=float)
+    finite = np.isfinite(arr)
+    flag = ~finite | (finite & (arr == 0.0))
+    flag |= _flag_value_runs(arr, max_run)
+    return flag
+
+
+def detect_rail(x: np.ndarray, min_run: int = 3) -> np.ndarray:
+    """Despike rule 1 — saturation/rail: a run of ``>= min_run`` samples
+    pinned at the channel's own min or max value. Detected by value, not raw
+    ADC counts, so it is scale-independent and needs no factor plumbing for
+    either the raw or the CSV source.
+    """
+    arr = np.asarray(x, dtype=float)
+    finite = np.isfinite(arr)
+    if finite.sum() < min_run:
+        return np.zeros(arr.size, dtype=bool)
+    lo, hi = np.min(arr[finite]), np.max(arr[finite])
+    if lo == hi:
+        return np.zeros(arr.size, dtype=bool)     # constant channel, no rail to hit
+    at_rail = finite & ((arr == lo) | (arr == hi))
+    masked = np.where(at_rail, arr, np.nan)
+    return _flag_value_runs(masked, min_run) & at_rail
+
+
+def detect_narrow_spikes(x: np.ndarray, fs: float, hw_cutoff_hz: float = 200.0
+                        ) -> np.ndarray:
+    """Despike rule 3 — sub-hardware-width spike: the raw channel was
+    hardware low-pass filtered at ``hw_cutoff_hz`` before being digitised at
+    ``fs``, so no genuine feature can be narrower than roughly half a cycle
+    at that cutoff (``fs / (2 * hw_cutoff_hz)`` samples) — a real peak is
+    always several samples wide.
+
+    The primary criterion is **width**: a same-signed excursion off the
+    local trend that spans fewer than that physical minimum of samples is
+    non-physical regardless of its size, which is what lets a genuine
+    (wider) road-load peak of any size survive untouched — a real peak is
+    never removed for being big, only a real *glitch* is removed for being
+    too narrow to exist.
+
+    A structural width test alone cannot tell a genuine single-sample
+    artifact from the ordinary sample-to-sample chatter every noisy signal
+    has relative to its own local median — that chatter is *always* exactly
+    1 sample wide by construction, so a bare width test flags a few percent
+    of any channel. A light noise floor (``2x`` the local high-frequency
+    residual's robust scale) excludes that chatter; it is far below any real
+    spike or peak amplitude, so it still does not discriminate on size.
+    """
+    arr = np.asarray(x, dtype=float)
+    n = arr.size
+    finite = np.isfinite(arr)
+    min_width = max(1, int(round(fs / (2.0 * hw_cutoff_hz))))
+    if n < 5 or finite.sum() < 5:
+        return np.zeros(n, dtype=bool)
+
+    # The trend window has to be well wider than min_width, or the "trend"
+    # just tracks the raw signal and every ordinary sample-to-sample wiggle
+    # reads as a narrow excursion. 8x gives the median room to represent the
+    # slow-moving signal a hw_cutoff_hz-limited channel should show locally,
+    # while a real road-load peak (many min_width's wide) still stands clear
+    # of it for long enough not to trip the width test below.
+    win = max(3, 8 * min_width + 1)
+    if win % 2 == 0:
+        win += 1
+    probe = arr
+    if not finite.all():
+        idx = np.arange(n)
+        probe = np.interp(idx, idx[finite], arr[finite])
+    trend = median_filter(probe, size=win, mode="nearest")   # what a hw_cutoff_hz-limited signal should look like locally
+    resid = probe - trend
+    noise_floor = 2.0 * 1.4826 * np.median(np.abs(resid[finite]))
+    sign = np.sign(resid)
+
+    change = np.ones(n, dtype=bool)
+    change[1:] = sign[1:] != sign[:-1]
+    starts = np.where(change)[0]
+    ends = np.append(starts[1:], n)
+    flag = np.zeros(n, dtype=bool)
+    for s, e in zip(starts, ends):
+        if sign[s] != 0 and (e - s) < min_width and np.max(np.abs(resid[s:e])) >= noise_floor:
+            flag[s:e] = True
+    return flag & finite
+
+
+def despike(x: np.ndarray, fs: float,
+           rail_min_run: int = 3, dropout_max_run: int = 5,
+           hw_cutoff_hz: float = 200.0,
+           net: bool = False, net_nsigma: float = 6.0, net_window_s: float = 0.011,
+           strength: float = 1.0) -> Tuple[np.ndarray, float]:
+    """Physical-rule despike ahead of FiltLP/smo: rail, dropout, and
+    sub-hardware-width spikes, replaced by interpolation from good
+    neighbours — never dropped.
+
+    Deliberately not an amplitude threshold. This is spiky WFT road load
+    where a genuine peak can be as large as any artifact, so every primary
+    rule is structural (pinned at the rail, a frozen run, or narrower than
+    the hardware could produce) rather than "how big is it" — which is what
+    keeps real peaks intact for rainflow counting.
+
+    ``net``, off by default, optionally runs a very loose adaptive
+    :func:`hampel_deglitch` pass afterwards for gross leftovers the physical
+    rules miss.
+
+    Returns ``(despiked, pct_flagged)``.
+    """
+    arr = np.asarray(x, dtype=float)
+    finite = np.isfinite(arr)
+    flag = detect_dropout(arr, dropout_max_run)
+    flag |= detect_rail(arr, rail_min_run)
+    flag |= detect_narrow_spikes(arr, fs, hw_cutoff_hz)
+    out = _interpolate_over(arr, flag, finite, strength)
+    if net:
+        out = hampel_deglitch(out, fs, window_s=net_window_s,
+                              n_sigmas=net_nsigma, strength=strength)
+    pct_flagged = 100.0 * flag.sum() / max(1, arr.size)
+    return out, pct_flagged
+
+
 def bridge_gaps(t: np.ndarray, x: np.ndarray, fs: float, min_gap_s: float = 10.0
                 ) -> Tuple[np.ndarray, np.ndarray]:
     """Remove runs of NaN or (near-)flat/zero signal lasting >= ``min_gap_s``.
@@ -516,6 +685,13 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
                        decimate_factor: int = 1,
                        deglitch: bool = False,
                        deglitch_nsigma: float = 6.0,
+                       despike_enabled: bool = False,
+                       despike_rail_min_run: int = 3,
+                       despike_dropout_max_run: int = 5,
+                       despike_hw_cutoff_hz: float = 200.0,
+                       despike_net: bool = False,
+                       despike_net_nsigma: float = 6.0,
+                       despike_net_window_s: float = 0.011,
                        time_column: str = "Time",
                        emit_lpf_columns: bool = True,
                        blank_dead_s: float = 1.0,
@@ -534,6 +710,11 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
     ``deglitch`` inserts a rolling-median de-glitch ahead of the FAMOS steps.
     It is off by default because a correctly-read imc file is already clean;
     turn it on for recordings with DAQ artifact spikes.
+
+    ``despike_enabled`` runs :func:`despike` (rail/dropout/sub-hardware-width
+    rules, see its docstring) ahead of ``deglitch`` and the FAMOS steps. Off
+    by default so existing callers are unaffected; the ``despike_*`` kwargs
+    tune its thresholds and its optional loose adaptive net.
 
     With ``emit_lpf_columns``, the pre-smoothing ``Latacc_LPF`` intermediate is
     exported too, matching the column set of a FAMOS CSV.
@@ -558,13 +739,26 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
         y = series
         steps: List[str] = []
         if blank_dead_s > 0 and is_wft_channel(col):
-            # Ahead of everything else: a frozen-value dropout must not be
-            # smeared into the live samples either side of it by smo().
+            # Ahead of everything else, despike included. A long frozen run is
+            # the absence of a measurement, and `despike` would interpolate
+            # straight across it — fabricating the 174 s a dead WFT leaves in
+            # the reference recording. Marking it NaN first is what stops that:
+            # `_interpolate_over` masks its flags with `& finite`, so the gap
+            # survives the despike pass instead of being filled in.
             blanked = blank_dead_runs(y, fs, blank_dead_s)
             n_dead = int(np.isfinite(y).sum() - np.isfinite(blanked).sum())
             if n_dead and np.isfinite(blanked).any():
                 y = blanked
                 steps.append(f"blank dropout({n_dead / fs:.1f}s)")
+        if despike_enabled:
+            y, pct_flagged = despike(
+                y, fs,
+                rail_min_run=despike_rail_min_run,
+                dropout_max_run=despike_dropout_max_run,
+                hw_cutoff_hz=despike_hw_cutoff_hz,
+                net=despike_net, net_nsigma=despike_net_nsigma,
+                net_window_s=despike_net_window_s)
+            steps.append(f"despike({pct_flagged:.3g}%)")
         if deglitch:
             y = hampel_deglitch(y, fs, n_sigmas=deglitch_nsigma)
             steps.append("de-glitch")

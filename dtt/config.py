@@ -144,6 +144,13 @@ class RunConfig:
     famos_applied:  bool  = False      # set once ingestion has run the recipe
     deglitch:       bool  = False      # rolling-median de-glitch of DAQ artifacts
     deglitch_nsigma: float = 6.0
+    despike:        bool  = False      # physical-rule despike (rail/dropout/narrow-spike) ahead of smo/FiltLP
+    despike_rail_min_run:    int   = 3     # samples pinned at channel min/max -> saturation
+    despike_dropout_max_run: int   = 5     # samples of any repeated value -> frozen sensor
+    despike_hw_cutoff_hz:    float = 200.0 # hardware anti-alias cutoff; sets the min physical feature width
+    despike_net:             bool  = False # optional loose adaptive hampel net for gross leftovers
+    despike_net_nsigma:      float = 6.0
+    despike_net_window_s:    float = 0.011
     miner_exponent: float = RAINFLOW_MINER
     output_dir:     Path  = field(default_factory=lambda: OUTPUTS_DIR)
     run_channels:   object = None      # ChannelSet-derived config, built at run time

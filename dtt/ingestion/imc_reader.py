@@ -381,7 +381,11 @@ def _read_channels(files, spans) -> List[ImcChannel]:
 
 
 def _assemble(channels, target_fs, source, famos: bool = True,
-              deglitch: bool = False) -> tuple[pd.DataFrame, dict]:
+              deglitch: bool = False, despike: bool = False,
+              despike_rail_min_run: int = 3, despike_dropout_max_run: int = 5,
+              despike_hw_cutoff_hz: float = 200.0, despike_net: bool = False,
+              despike_net_nsigma: float = 6.0, despike_net_window_s: float = 0.011
+              ) -> tuple[pd.DataFrame, dict]:
     if not channels:
         return pd.DataFrame(), {"error": "no imc channels found"}
 
@@ -425,6 +429,13 @@ def _assemble(channels, target_fs, source, famos: bool = True,
         # is what produces phantom spikes in a 1000 Hz WFT recording.
         df, fs_out, applied = apply_famos_recipe(
             df, fs, decimate_factor=step, deglitch=deglitch,
+            despike_enabled=despike,
+            despike_rail_min_run=despike_rail_min_run,
+            despike_dropout_max_run=despike_dropout_max_run,
+            despike_hw_cutoff_hz=despike_hw_cutoff_hz,
+            despike_net=despike_net,
+            despike_net_nsigma=despike_net_nsigma,
+            despike_net_window_s=despike_net_window_s,
             emit_lpf_columns=False)
     elif step > 1:
         df = df.iloc[::step].reset_index(drop=True)
@@ -443,32 +454,53 @@ def _assemble(channels, target_fs, source, famos: bool = True,
         "famos_recipe": applied,
         "famos_decimate": step,
         "deglitch": bool(deglitch),
+        "despike": bool(despike),
         "raw_frame": raw_frame,
     }
     return df, meta
 
 
 def read_folder(folder: Path, target_fs: Optional[float] = None,
-                famos: bool = True, deglitch: bool = False
+                famos: bool = True, deglitch: bool = False,
+                despike: bool = False, despike_rail_min_run: int = 3,
+                despike_dropout_max_run: int = 5, despike_hw_cutoff_hz: float = 200.0,
+                despike_net: bool = False, despike_net_nsigma: float = 6.0,
+                despike_net_window_s: float = 0.011
                 ) -> tuple[pd.DataFrame, dict]:
     """Read every channel in an imc raw folder into one time-aligned DataFrame.
 
     With ``famos`` (default) the imc/FAMOS recipe — ``smo`` / ``FiltLP`` at the
     native rate followed by ``red()`` — is applied as the data is assembled, so
     the frame matches a FAMOS export rather than a raw stride-decimation.
+    ``despike`` (off by default) runs the physical-rule despike ahead of it;
+    see :func:`dtt.preprocessing.despike`.
     """
     folder = resolve_raw_folder(folder)
     spans = read_imcdbc(folder)
     files = sorted(folder.glob("*.raw"))
     return _assemble(_read_channels(files, spans), target_fs, folder,
-                     famos=famos, deglitch=deglitch)
+                     famos=famos, deglitch=deglitch, despike=despike,
+                     despike_rail_min_run=despike_rail_min_run,
+                     despike_dropout_max_run=despike_dropout_max_run,
+                     despike_hw_cutoff_hz=despike_hw_cutoff_hz,
+                     despike_net=despike_net, despike_net_nsigma=despike_net_nsigma,
+                     despike_net_window_s=despike_net_window_s)
 
 
 def read_files(files, target_fs: Optional[float] = None,
-               famos: bool = True, deglitch: bool = False
+               famos: bool = True, deglitch: bool = False,
+               despike: bool = False, despike_rail_min_run: int = 3,
+               despike_dropout_max_run: int = 5, despike_hw_cutoff_hz: float = 200.0,
+               despike_net: bool = False, despike_net_nsigma: float = 6.0,
+               despike_net_window_s: float = 0.011
                ) -> tuple[pd.DataFrame, dict]:
     """Read a specific list of imc ``.raw`` files (a subset of a recording)."""
     files = [Path(f) for f in files]
     spans = read_imcdbc(files[0].parent) if files else {}
     return _assemble(_read_channels(files, spans), target_fs, "selected files",
-                     famos=famos, deglitch=deglitch)
+                     famos=famos, deglitch=deglitch, despike=despike,
+                     despike_rail_min_run=despike_rail_min_run,
+                     despike_dropout_max_run=despike_dropout_max_run,
+                     despike_hw_cutoff_hz=despike_hw_cutoff_hz,
+                     despike_net=despike_net, despike_net_nsigma=despike_net_nsigma,
+                     despike_net_window_s=despike_net_window_s)

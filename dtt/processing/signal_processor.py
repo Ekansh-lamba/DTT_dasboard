@@ -81,6 +81,13 @@ def apply_filter(df: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
         decimate_factor=1,                     # rate is fixed by ingestion
         deglitch=getattr(config, "deglitch", False),
         deglitch_nsigma=getattr(config, "deglitch_nsigma", 6.0),
+        despike_enabled=getattr(config, "despike", False),
+        despike_rail_min_run=getattr(config, "despike_rail_min_run", 3),
+        despike_dropout_max_run=getattr(config, "despike_dropout_max_run", 5),
+        despike_hw_cutoff_hz=getattr(config, "despike_hw_cutoff_hz", 200.0),
+        despike_net=getattr(config, "despike_net", False),
+        despike_net_nsigma=getattr(config, "despike_net_nsigma", 6.0),
+        despike_net_window_s=getattr(config, "despike_net_window_s", 0.011),
         emit_lpf_columns=False,
     )
     treated = count_conditioned(applied)
