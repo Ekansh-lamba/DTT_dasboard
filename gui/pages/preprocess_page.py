@@ -3,6 +3,7 @@ live before/after preview on the active study's data (aims B, 5, 6)."""
 
 from __future__ import annotations
 
+import re
 import warnings
 
 import numpy as np
@@ -21,7 +22,28 @@ from dtt.preprocessing import (
     PreprocessSettings, apply_pipeline, summary_stats, famos_recipe,
 )
 
-_MAX_PLOT_POINTS = 6000
+_MAX_PLOT_POINTS = 1400        # fallback before the canvas has been laid out
+
+# FAMOS convention, used across the screen: blue is the raw channel, red is the
+# conditioned one. The Comparison screen uses the same two for previous/current.
+_RAW_COLOR = "#4a9eff"
+_PROC_COLOR = "#ff4d4f"
+
+
+def _plot_points(canvas) -> int:
+    """How many buckets to reduce to: about one per horizontal pixel.
+
+    Reducing to a fixed 6000 was the reason the band read as a solid smear —
+    the canvas is nearer 1000 px wide, so six buckets stacked on every pixel and
+    a min→max envelope collapsed into featureless hash. One bucket per pixel is
+    the most detail the screen can actually resolve; past that, extra buckets add
+    ink, not information. Zooming re-draws, so detail comes back on demand.
+    """
+    try:
+        px = int(canvas.width())
+    except (AttributeError, TypeError):
+        return _MAX_PLOT_POINTS
+    return int(np.clip(px, 600, 4000)) if px > 0 else _MAX_PLOT_POINTS
 
 
 def _buckets(t: np.ndarray, y: np.ndarray, max_points: int):
@@ -35,49 +57,91 @@ def _buckets(t: np.ndarray, y: np.ndarray, max_points: int):
     return tp, yp
 
 
-def _median_line(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POINTS):
-    """Reduce to a smooth, representative line: the **median** of each bucket.
+def _reduce(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POINTS):
+    """Reduce to ``(t, lo, mid, hi)`` — each bucket's min, median and max.
 
-    Stride-decimating instead (keeping every N-th sample and discarding the
-    rest) is what makes a full-range trace look erratic: at 400k+ samples over
-    6000 pixels it keeps one sample in ~70 and aliases everything else back into
-    the picture, so isolated samples masquerade as spikes and the line jitters
-    differently at every zoom level. Taking each bucket's median uses all the
-    samples and is robust — one outlier in a bucket cannot move it — so the
-    result is the centre-line of the data, which is what the trace physically is.
+    Every sample lands in exactly one bucket, so nothing is thrown away and no
+    sample can alias into or out of view (which is what stride-decimating to
+    screen width does: at 555k samples over 6000 pixels it keeps one in ~90 and
+    lets isolated samples masquerade as spikes).
+
+    Returning all three from one reduction is the point. Drawing a **band** from
+    one signal and a **median line** from another is not a comparison — the band
+    spans the local min→max (roughly ±2.5 σ of whatever is inside the bucket)
+    while the line sits at the centre, so the two look wildly different even
+    when the signals are identical. Both traces get the same treatment here, so
+    the visible gap between them is the conditioning and nothing else.
+
+    Empty buckets keep a finite time and a NaN value, so matplotlib breaks the
+    line over a dropout instead of ruling a straight segment across it.
     """
     if y.size <= max_points:
-        return t, y
+        return t, y, y, y
     tp, yp = _buckets(t, y, max_points)
     with warnings.catch_warnings():
-        # the tail bucket is NaN padding by construction, and any all-NaN
-        # bucket is dropped below — an empty-slice warning here is expected
+        # all-NaN buckets are intentional (padding at the tail, dropouts in the
+        # middle) and become NaN in the output — the empty-slice warning is not
+        # news, and the gaps are what we want on screen
         warnings.simplefilter("ignore", RuntimeWarning)
-        ym = np.nanmedian(yp, axis=1)
-        tm = np.nanmean(tp, axis=1)
-    ok = np.isfinite(tm) & np.isfinite(ym)
-    return tm[ok], ym[ok]
-
-
-def _envelope_line(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POINTS):
-    """Reduce to the true min/max envelope, drawn as one continuous line.
-
-    Each bucket contributes a min→max stroke, so nothing is thrown away and no
-    sample can alias into or out of view. Rendered as strokes rather than a
-    filled band, which reads as a solid block at this density.
-    """
-    if y.size <= max_points:
-        return t, y
-    tp, yp = _buckets(t, y, max_points)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)   # see _median_line
         lo = np.nanmin(yp, axis=1)
+        mid = np.nanmedian(yp, axis=1)
         hi = np.nanmax(yp, axis=1)
         tm = np.nanmean(tp, axis=1)
-    ok = np.isfinite(tm) & np.isfinite(lo) & np.isfinite(hi)
-    lo, hi, tm = lo[ok], hi[ok], tm[ok]
+    ok = np.isfinite(tm)
+    return tm[ok], lo[ok], mid[ok], hi[ok]
+
+
+def _spikes(t: np.ndarray, raw: np.ndarray, proc: np.ndarray, n_sigmas: float,
+            max_marks: int = 400):
+    """Locate the raw samples the conditioning flattened, biggest first.
+
+    The residual ``raw - processed`` is what the filtering removed, so scoring it
+    against its own robust σ finds the excursions that stand out from the ripple
+    the filter takes off everywhere. Marking these is the only way the operator
+    can see *what* was removed — a smoothed trace on its own looks equally
+    plausible whether it swallowed a genuine 900 daN pothole strike or nothing
+    at all.
+
+    Only the largest ``max_marks`` are returned: scattering ten thousand points
+    over a 5,000 s trace paints a solid bar and hides the very outliers it is
+    supposed to call out.
+    """
+    n = min(t.size, raw.size, proc.size)
+    if n == 0:
+        return np.empty(0), np.empty(0), 0
+    t, raw, proc = t[:n], raw[:n], proc[:n]
+    resid = raw - proc
+    ok = np.isfinite(resid)
+    if ok.sum() < 8:
+        return np.empty(0), np.empty(0), 0
+    sigma = 1.4826 * np.median(np.abs(resid[ok] - np.median(resid[ok])))
+    if not np.isfinite(sigma) or sigma <= 0:
+        return np.empty(0), np.empty(0), 0
+    hit = ok & (np.abs(resid) > n_sigmas * sigma)
+    idx = np.flatnonzero(hit)
+    total = int(idx.size)
+    if total > max_marks:
+        idx = idx[np.argsort(np.abs(resid[idx]))[-max_marks:]]
+    return t[idx], raw[idx], total
+
+
+def _trace(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POINTS):
+    """Reduce to a plain continuous polyline — the FAMOS view of a channel.
+
+    Pixel-identical to plotting every sample, at a fraction of the cost: within
+    one bucket a full-resolution line plot can only paint the column between
+    that bucket's min and max, so emitting exactly those two points in time
+    order reproduces the same ink. What it is *not* is a summary — no averaging,
+    no envelope, no shaded band; every extreme in the recording still reaches
+    the screen, which is why a spike stays visible as a spike.
+    """
+    if y.size <= max_points:
+        return t, y
+    tm, lo, _, hi = _reduce(t, y, max_points)
     tt = np.repeat(tm, 2)
     yy = np.empty(tt.size, dtype=float)
+    # min then max within each bucket; the join between buckets is the same
+    # vertical stroke a dense line plot would draw anyway
     yy[0::2], yy[1::2] = lo, hi
     return tt, yy
 
@@ -250,6 +314,28 @@ class PreprocessPage(BasePage):
         self.range_label = QLabel("Full recording — use the toolbar to zoom/pan.")
         self.range_label.setStyleSheet(f"color:{theme.TEXT_MUTED}; font-size:11px;")
         foot.addWidget(self.range_label, 1)
+        self.mark_spikes = QCheckBox("Mark raw spikes")
+        self.mark_spikes.setChecked(False)
+        self.mark_spikes.setToolTip(
+            "Ring the raw samples the conditioning flattened — the excursions "
+            "that stand out from the ripple the filter removes everywhere.\n"
+            "Scored on the raw-minus-processed residual against its own robust σ, "
+            "so it follows whatever stages are enabled.\n"
+            "The legend reports the full count; only the largest 400 are drawn, "
+            "since more than that paints a solid bar and hides the outliers.")
+        self.mark_spikes.toggled.connect(self._schedule)
+        foot.addWidget(self.mark_spikes)
+        self.spike_mark_nsigma = QDoubleSpinBox()
+        self.spike_mark_nsigma.setRange(1.0, 20.0)
+        self.spike_mark_nsigma.setSingleStep(0.5)
+        self.spike_mark_nsigma.setValue(4.0)
+        self.spike_mark_nsigma.setPrefix("σ ")
+        self.spike_mark_nsigma.setToolTip("How far outside the residual's robust σ "
+                                          "a sample must sit to be ringed.")
+        self.spike_mark_nsigma.setMaximumWidth(80)
+        self.spike_mark_nsigma.valueChanged.connect(self._schedule)
+        foot.addWidget(self.spike_mark_nsigma)
+
         self.show_raw = QCheckBox("Show raw overlay")
         self.show_raw.setChecked(True)
         self.show_raw.setToolTip(
@@ -277,6 +363,8 @@ class PreprocessPage(BasePage):
         self.smooth_check.toggled.connect(self._schedule)
         self._time = np.array([])
         self._data = np.array([])
+        self._raw = None                 # true unconditioned channel, if kept
+        self._raw_time = None
         self._fs = 100.0
         self._syncing = False
         self._conditioned = False
@@ -304,20 +392,48 @@ class PreprocessPage(BasePage):
 
         The pipeline log records it; that is the only place the fact survives,
         and it decides whether re-applying the recipe here would double-smooth.
+
+        Both conditioning paths have to be recognised. imc raw ingestion logs
+        "applied at ingestion"; a CSV study is conditioned at stage 4 instead and
+        logs "applied at <rate> Hz". Matching only the first made every CSV study
+        look unconditioned, so the page labelled already-smoothed data "raw" and
+        ran a second smo(0.1) over it.
         """
         try:
             if not (self.study and self.study.has_log):
                 return False
-            return "FAMOS recipe applied at ingestion" in self.study.log_file.read_text(
-                encoding="utf-8", errors="replace")
+            log = self.study.log_file.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return False
+        if "FAMOS recipe applied at ingestion" in log:
+            return True
+        # stage 4: "FAMOS recipe applied at 100 Hz: 19/21 channels conditioned"
+        return bool(re.search(r"FAMOS recipe applied at [\d.]+ Hz: (\d+)/", log)
+                    and not re.search(r"FAMOS recipe applied at [\d.]+ Hz: 0/", log))
 
     def _recipe_note(self, channel: str) -> str:
         r = famos_recipe(channel)
         if not self.famos_auto.isChecked():
+            extra = []
+            if self.filter_check.isChecked():
+                extra.append(f"FiltLP({self.order.value()}, {self.cutoff.value():g} Hz)")
+            if self.smooth_check.isChecked():
+                extra.append(f"smo({self.smooth_width.value():g} s)")
+            # Name the manual stages: the trace is only the study's own data
+            # when nothing further is running on top of it.
+            suffix = f"  +  {' → '.join(extra)}" if extra else ""
+            if self._raw is not None:
+                if extra:
+                    return ("Raw vs live preview:  " + " → ".join(extra)
+                            + "   (blue = raw, red = preview)")
+                # Not "at ingestion": a CSV study is conditioned at stage 4
+                # instead, and both paths land here.
+                return ("Raw vs sanitized — imc/FAMOS recipe applied"
+                        "   (blue = raw, red = sanitized)")
             if self._conditioned:
-                return "Study data — imc/FAMOS recipe applied at ingestion"
+                return ("Study data — imc/FAMOS recipe applied at ingestion" + suffix)
+            if extra:
+                return "Manual: " + " → ".join(extra)
             return "No FAMOS recipe applied (enable “FAMOS recipe” above)"
         if r.apply_filter:
             return (f"FAMOS: FiltLP({r.filter_order}, {r.filter_cutoff:g} Hz) "
@@ -337,9 +453,19 @@ class PreprocessPage(BasePage):
     def refresh(self) -> None:
         self._conditioned = self._study_is_conditioned()
         # Re-applying the recipe on top of an already-conditioned study would
-        # smooth it twice, so only default it on when nothing has run yet.
+        # smooth it twice, so only default it on when nothing has run yet — and
+        # the manual smo has to come off with it. Left checked it ran a second
+        # smo(0.1) over data the title was simultaneously calling untouched
+        # "study data", so the red trace was never what the label claimed.
         self._syncing = True
         self.famos_auto.setChecked(not self._conditioned)
+        if self._conditioned:
+            # Every stage off by default. With raw_data.csv stored the screen
+            # already has a genuine before/after — raw against the pipeline's own
+            # output — so adding a display smoothing pass would only re-filter an
+            # already-filtered trace and shrink the very difference on show.
+            self.smooth_check.setChecked(False)
+            self.filter_check.setChecked(False)
         self._syncing = False
         self.channel_combo.blockSignals(True)
         self.channel_combo.clear()
@@ -351,24 +477,48 @@ class PreprocessPage(BasePage):
         else:
             self.canvas.clear(); self.canvas.draw()
             self.stats_label.setText("No processed data for this study.")
+    @staticmethod
+    def _read_channel(path, ch: str):
+        """``(time, values)`` for one channel, or ``(None, None)``."""
+        try:
+            cols = ("Time", ch)
+            df = pd.read_csv(path, usecols=lambda c: c in cols)
+        except (ValueError, OSError):
+            return None, None
+        if ch not in df.columns:
+            return None, None
+        y = pd.to_numeric(df[ch], errors="coerce").to_numpy(dtype=float)
+        t = (pd.to_numeric(df["Time"], errors="coerce").to_numpy(dtype=float)
+             if "Time" in df.columns else None)
+        return t, y
+
     def _load_channel(self, ch: str) -> None:
         if not ch or not self.study or not self.study.processed_csv.exists():
             return
-        try:
-            cols = ["Time", ch]
-            df = pd.read_csv(self.study.processed_csv, usecols=lambda c: c in cols)
-        except (ValueError, OSError):
+        t, y = self._read_channel(self.study.processed_csv, ch)
+        if y is None:
             return
-        if ch not in df.columns:
-            return
-        self._data = pd.to_numeric(df[ch], errors="coerce").to_numpy(dtype=float)
-        if "Time" in df.columns:
-            t = pd.to_numeric(df["Time"], errors="coerce").to_numpy(dtype=float)
+        # Red is the pipeline's own sanitized output, not a second pass over it.
+        self._data = y
+        if t is not None:
             self._time = t
             dt = np.nanmedian(np.diff(t[:1000])) if t.size > 2 else 0.01
             self._fs = 1.0 / dt if dt and dt > 0 else 100.0
         else:
-            self._time = np.arange(self._data.size) / self._fs
+            self._time = np.arange(y.size) / self._fs
+
+        # Blue is the genuine unconditioned channel when the study kept one.
+        # Each trace is plotted against its own Time column: sanitisation can
+        # drop rows, so the two frames are not guaranteed to be the same length
+        # and index-aligning them would slide one against the other.
+        self._raw = self._raw_time = None
+        if getattr(self.study, "has_raw", False):
+            tr, yr = self._read_channel(self.study.raw_csv, ch)
+            if yr is not None:
+                self._raw = yr
+                self._raw_time = (tr if tr is not None
+                                  else np.arange(yr.size) / self._fs)
+
         if self.famos_auto.isChecked():
             self._apply_recipe_to_controls(ch)
         self._update()
@@ -434,28 +584,71 @@ class PreprocessPage(BasePage):
         s.min_gap_s = self.gap_seconds.value()
         s.resample_factor = self.resample.value()
         return s
+
+    @staticmethod
+    def _stages_active(s: PreprocessSettings) -> bool:
+        """True if ``s`` would change the signal at all."""
+        return bool(s.smooth_width_s > 0 or s.apply_filter or s.lower_threshold > 0
+                    or s.remove_outliers or s.moderate_spikes or s.bridge_gaps
+                    or s.resample_factor > 1)
+
     def _update(self, *_) -> None:
         if self._data.size == 0:
             return
-        raw = self._data
-        t = self._time
         s = self._settings()
-        t_proc, proc, new_fs = apply_pipeline(t, raw, self._fs, s)
+        active = self._stages_active(s)
+        have_raw = self._raw is not None and self._raw.size > 0
+
+        if have_raw:
+            # Blue is the real unconditioned channel; red is the pipeline's own
+            # sanitized output. Enabling a stage switches red to a live preview
+            # of that recipe run on the raw, which is the only combination where
+            # the two traces mean what the legend says.
+            raw, t = self._raw, self._raw_time
+            if active:
+                t_proc, proc, new_fs = apply_pipeline(t, raw, self._fs, s)
+            else:
+                t_proc, proc, new_fs = self._time, self._data, self._fs
+        else:
+            raw = self._data
+            t = self._time
+            t_proc, proc, new_fs = apply_pipeline(t, raw, self._fs, s)
 
         ax = self.canvas.ax
         self.canvas.clear()
-        # Blue = the raw channel's true min/max envelope; red = the processed
-        # trace as a bucket median. Both reductions use every sample, so the red
-        # line genuinely runs through the middle of the blue band instead of
-        # wandering with whichever samples a stride happened to land on.
-        src = "study data" if self._conditioned else "raw"
-        if self.show_raw.isChecked():
-            tr, yr = _envelope_line(t, raw)
-            ax.plot(tr, yr, color="#4a9eff", linewidth=0.4, alpha=0.45,
-                    label=f"{src} (min/max envelope)")
-        tp, yp = _median_line(t_proc, proc)
-        ax.plot(tp, yp, color="#ff4d4f", linewidth=1.1,
-                label="processed" + (" (FAMOS)" if self.famos_auto.isChecked() else ""))
+        npts = _plot_points(self.canvas)
+        src = "raw" if have_raw else ("study data" if self._conditioned else "raw")
+
+        # The FAMOS view: two plain traces, blue raw underneath and red sanitized
+        # over it. The raw's spikes need no marker of their own — they *are* the
+        # blue excursions standing outside the red, which is exactly how FAMOS
+        # shows what the conditioning took off.
+        if not active and not have_raw:
+            # Without a stored raw, "before" and "after" are the same array.
+            # Drawing it twice in two colours is not an empty comparison, it is
+            # a misleading one. One trace, named for what it is.
+            tp, yp = _trace(t_proc, proc, npts)
+            ax.plot(tp, yp, color=_RAW_COLOR, linewidth=0.7, label=src)
+        else:
+            if self.show_raw.isChecked():
+                tr, yr = _trace(t, raw, npts)
+                ax.plot(tr, yr, color=_RAW_COLOR, linewidth=0.7, label=src)
+            tp, yp = _trace(t_proc, proc, npts)
+            # Red goes on top, thinner and semi-transparent: at full-run zoom both
+            # traces are dense min/max strokes, so an opaque red drawn second
+            # simply paints the blue out.
+            ax.plot(tp, yp, color=_PROC_COLOR, linewidth=0.55, alpha=0.7,
+                    label="sanitized" + (" (FAMOS)" if self.famos_auto.isChecked() else ""))
+            # Optional, off by default: ring the removed excursions. FAMOS does
+            # not do this, so it stays opt-in for when the blue-vs-red reading is
+            # too dense to pick them out by eye.
+            if self.mark_spikes.isChecked() and proc.size == raw.size:
+                ts, ys, n_spikes = _spikes(t, raw, proc, self.spike_mark_nsigma.value())
+                if ts.size:
+                    ax.plot(ts, ys, linestyle="none", marker="o", markersize=3.0,
+                            markerfacecolor="none", markeredgecolor="#ffd166",
+                            markeredgewidth=0.8, alpha=0.9,
+                            label=f"raw spikes removed ({n_spikes:,})")
 
         ax.set_title(self._recipe_note(self.channel_combo.currentText()),
                      fontsize=9, color=theme.TEXT_MUTED, loc="left")
@@ -464,17 +657,18 @@ class PreprocessPage(BasePage):
             ax.set_xlim(float(t[0]), float(t[-1]))     # show the entire timeline
         ax.margins(x=0)
 
-        # Scale to the processed trace so its detail stays readable, widened to
-        # the raw's robust band when shown. Both use percentiles, so a rare
-        # artifact clips off-view rather than squashing the whole trace flat.
+        # Frame the raw band's robust extent — the same percentiles on both
+        # signals, so a rare artifact clips off-view rather than squashing the
+        # whole trace flat, and the processed band is never cropped by a scale
+        # chosen from the raw alone.
         fp = proc[np.isfinite(proc)]
         if fp.size:
             lo, hi = np.percentile(fp, 0.2), np.percentile(fp, 99.8)
             if self.show_raw.isChecked():
                 fr = raw[np.isfinite(raw)]
                 if fr.size:
-                    lo = min(lo, float(np.percentile(fr, 0.5)))
-                    hi = max(hi, float(np.percentile(fr, 99.5)))
+                    lo = min(lo, float(np.percentile(fr, 0.2)))
+                    hi = max(hi, float(np.percentile(fr, 99.8)))
             pad = 0.15 * (hi - lo) if hi > lo else 1.0
             ax.set_ylim(lo - pad, hi + pad)
         ax.legend(fontsize=8, facecolor=theme.SURFACE, labelcolor=theme.TEXT, framealpha=0.9)

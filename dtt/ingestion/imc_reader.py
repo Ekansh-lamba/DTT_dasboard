@@ -185,6 +185,26 @@ def _map_name(raw_name: str) -> str:
     return _AUX_MAP.get(raw_name, raw_name)
 
 
+# Windows leaves these behind when a channel file is duplicated; the reader
+# already collapses them because it keys on the name *inside* the file, so a
+# listing built from filenames has to collapse them the same way or it reports
+# channels that will never appear in the output.
+# A bare "(n)" needs the space Windows always puts there, so a channel legitimately
+# named e.g. "Ch(1)" is left intact.
+_COPY_SUFFIX_RE = re.compile(r"(?:\s*-\s*Copy(?:\s*\(\d+\))?|\s+\(\d+\))$", re.I)
+
+
+def pipeline_channel_name(raw_name: str) -> str:
+    """The column name a raw file's channel will carry once ingested.
+
+    ``AccelY`` becomes ``Latacc``, ``WFT_Fx_fl`` becomes ``FL_Fx``, and a
+    ``… - Copy`` duplicate resolves to the same name as its original. Lets the
+    GUI list a source's channels under the names every later screen will use,
+    without opening the (multi-megabyte) files.
+    """
+    return _map_name(_COPY_SUFFIX_RE.sub("", raw_name.strip()))
+
+
 def resolve_raw_folder(folder: Path) -> Path:
     """Return the folder that actually holds the ``.raw`` channels.
 
@@ -382,12 +402,27 @@ def _assemble(channels, target_fs, source, famos: bool = True,
 
     fs_out = fs
     applied = {}
+    raw_frame = None
     step = max(1, int(round(fs / target_fs))) if (target_fs and fs > target_fs) else 1
     if famos:
+        # Keep an unconditioned copy of the force channels before smo/FiltLP run.
+        # Conditioning at the native rate is correct but it is also destructive,
+        # and nothing downstream can reconstruct what was removed — so a study
+        # ingested this way has no "before" at all unless it is captured here.
+        # Decimated with red() alone so it shares the output time base; that is
+        # the genuine raw signal at 100 Hz, aliasing and spikes included.
+        from dtt.preprocessing import apply_famos_recipe, is_wft_channel
+        from dtt.channels import parse_channel, FORCE_COMPONENTS
+        force_cols = [c for c in df.columns
+                      if is_wft_channel(c)
+                      and (parse_channel(c) or (None, None))[1] in FORCE_COMPONENTS]
+        if force_cols:
+            raw_frame = df[force_cols].iloc[::step].reset_index(drop=True)
+            raw_frame.insert(0, "Time", np.arange(len(raw_frame)) / (fs / step))
+
         # FAMOS order: smo/FiltLP at the native rate, *then* red(). Decimating
         # first would alias the whole 50-500 Hz band back over the signal, which
         # is what produces phantom spikes in a 1000 Hz WFT recording.
-        from dtt.preprocessing import apply_famos_recipe
         df, fs_out, applied = apply_famos_recipe(
             df, fs, decimate_factor=step, deglitch=deglitch,
             emit_lpf_columns=False)
@@ -408,6 +443,7 @@ def _assemble(channels, target_fs, source, famos: bool = True,
         "famos_recipe": applied,
         "famos_decimate": step,
         "deglitch": bool(deglitch),
+        "raw_frame": raw_frame,
     }
     return df, meta
 

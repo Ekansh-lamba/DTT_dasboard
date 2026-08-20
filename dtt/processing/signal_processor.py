@@ -19,7 +19,7 @@ import pandas as pd
 from scipy.signal import butter, filtfilt
 
 from dtt.config import RunConfig, MANDATORY_CHANNELS
-from dtt.preprocessing import apply_famos_recipe
+from dtt.preprocessing import apply_famos_recipe, count_conditioned
 
 logger = logging.getLogger(__name__)
 
@@ -83,9 +83,11 @@ def apply_filter(df: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
         deglitch_nsigma=getattr(config, "deglitch_nsigma", 6.0),
         emit_lpf_columns=False,
     )
-    treated = sum(1 for v in applied.values() if v not in ("passthrough", "rebuilt time base"))
+    treated = count_conditioned(applied)
     logger.info("FAMOS recipe applied at %.0f Hz: %d/%d channels conditioned",
                 config.sampling_rate, treated, len(applied))
+    if not treated:
+        logger.warning("No channel matched the FAMOS recipe — check the channel names")
     for ch, op in applied.items():
         logger.debug("  %-16s %s", ch, op)
     return out

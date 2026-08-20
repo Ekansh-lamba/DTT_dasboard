@@ -4,7 +4,7 @@ import sys
 import time
 from pathlib import Path
 
-from dtt.config import RunConfig
+from dtt.config import RunConfig, TIME_COLUMN, N_TO_DAN_FACTOR
 from dtt.ingestion.loader import load_csv
 from dtt.validation.validator import validate
 from dtt.sanitization.sanitizer import sanitize
@@ -15,6 +15,8 @@ from dtt.analysis.heatmaps import generate_heatmaps
 from dtt.analysis.boxplots import generate_boxplots
 from dtt.analysis.rainflow import generate_rainflow
 from dtt.reporting.report_builder import build_report
+
+logger = logging.getLogger("pipeline")
 
 
 def _setup_logging(config: RunConfig) -> None:
@@ -37,6 +39,40 @@ def _setup_logging(config: RunConfig) -> None:
             logging.StreamHandler(sys.stdout),
         ],
     )
+
+
+
+def _force_frame(df, config):
+    """Time plus the force channels only — all the before/after view can plot."""
+    rc = getattr(config, "run_channels", None)
+    if rc is None:
+        return None
+    cols = [c for c in rc.mandatory_channels if c in df.columns]
+    if not cols:
+        return None
+    keep = ([TIME_COLUMN] if TIME_COLUMN in df.columns else []) + cols
+    return df[keep].copy()
+
+
+def _write_raw_csv(raw_frame, config, metadata, scale_meta) -> None:
+    """Save the unconditioned force channels as the study's `raw_data.csv`."""
+    import pandas as _pd
+
+    divisor = 1.0
+    if metadata.get("n_to_dan_applied"):
+        divisor *= N_TO_DAN_FACTOR
+    divisor *= float(scale_meta.get("force_scale_divisor", 1.0) or 1.0)
+
+    out = raw_frame.copy()
+    if divisor != 1.0:
+        for c in out.columns:
+            if c != TIME_COLUMN:
+                out[c] = _pd.to_numeric(out[c], errors="coerce") / divisor
+
+    path = config.run_output_dir / "raw_data.csv"
+    out.to_csv(path, index=False)
+    logger.info("Raw (unconditioned) data saved: %s  (%d rows, %d channels, "
+                "scaled by 1/%g)", path, len(out), len(out.columns) - 1, divisor)
 
 
 def run(
@@ -106,11 +142,22 @@ def run(
         config.sampling_rate = metadata["sampling_rate_hz"]
     # imc raw ingestion runs smo/FiltLP at the native rate (before red()), which
     # is the only correct place for it; tell stage 4 not to condition twice.
+    # A DataFrame must not travel in metadata: that dict is handed to validation
+    # and the report builder, both of which treat it as plain descriptive values.
+    raw_frame = metadata.pop("raw_frame", None)
     config.famos_applied = bool(metadata.get("famos_recipe"))
     if config.famos_applied:
-        logger.info("FAMOS recipe applied at ingestion (red x%s): %d channels",
-                    metadata.get("famos_decimate", 1),
-                    len(metadata["famos_recipe"]))
+        # Report how many channels were actually *conditioned*, not how many the
+        # recipe looked at. The old count included every passthrough column, so a
+        # run in which no force channel was recognised still logged "38 channels".
+        from dtt.preprocessing import count_conditioned
+        recipe = metadata["famos_recipe"]
+        treated = count_conditioned(recipe)
+        logger.info("FAMOS recipe applied at ingestion (red x%s): %d/%d channels conditioned",
+                    metadata.get("famos_decimate", 1), treated, len(recipe))
+        if not treated:
+            logger.warning("No channel matched the FAMOS recipe — the data is "
+                           "unconditioned and red() will have aliased it")
 
     # Build the axle-dynamic channel configuration from the actual columns
     # BEFORE validation so every stage (incl. validation) is axle-aware.
@@ -123,6 +170,13 @@ def run(
     config.tyre = preset.tyre
     logger.info("Vehicle preset: %s  (tyre %s)", preset.name, preset.tyre.tyre_type)
 
+    # Units before anything reads a number: validation thresholds, histogram
+    # ranges and every statistic are all quoted in daN, so a decade error here
+    # silently invalidates all of them.
+    from dtt.ingestion.loader import normalise_force_units
+    df, scale_meta = normalise_force_units(df, config)
+    metadata.update(scale_meta)
+
     logger.info("[2/9]  Channel Validation")
     validation_report = validate(df, metadata, config)
 
@@ -131,10 +185,34 @@ def run(
 
     logger.info("[4/9]  Signal Processing (%s)",
                 "imc/FAMOS recipe" if config.famos_mode else "Butterworth LPF")
+    if raw_frame is None and not config.famos_applied:
+        # A CSV study is still unconditioned here — stage 4 is what conditions
+        # it — so its "before" is simply the frame on the way in.
+        raw_frame = _force_frame(df, config)
     df = apply_filter(df, config)
+
+    # The raw copy is only useful if it is on the same scale as the conditioned
+    # data. It bypassed both unit corrections (it is not in `df`), so re-apply
+    # exactly what `df` received, or the before/after traces sit a decade apart.
+    if raw_frame is not None:
+        _write_raw_csv(raw_frame, config, metadata, scale_meta)
+
+    # Publish the frame every later stage actually analyses — and that the GUI
+    # re-reads as "study data". Saving before stage 4 shipped the raw frame.
+    processed_csv = config.run_output_dir / "processed_data.csv"
+    df.to_csv(processed_csv, index=False)
+    logger.info("Processed data saved: %s  (%d rows)", processed_csv, len(df))
 
     logger.info("[5/9]  Statistical Analysis")
     stats = compute_statistics(df, config)
+
+    logger.info("[5b/9] Load Severity  (Gx, Gy, Gxy, DLC)")
+    try:
+        from dtt.analysis.severity import compute_severity, generate_severity_figure
+        severity = compute_severity(df, config)
+        generate_severity_figure(severity, config)
+    except Exception as exc:
+        logger.error("Severity analysis failed: %s", exc, exc_info=True)
 
     logger.info("[6/9]  Histogram Generation")
     try:

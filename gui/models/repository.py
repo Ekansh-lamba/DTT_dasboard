@@ -11,7 +11,8 @@ Backend output contract (one folder per study under ``dtt/outputs/``)::
     outputs/{study_name}/
         validation_report.json
         stats_summary.json
-        processed_data.csv
+        severity_summary.json
+        processed_data.csv      raw_data.csv
         figures/
             hist_distance_*.png      hist_percentage_*.png
             heatmap_*.png            heatmap_hexbin_*.png
@@ -120,6 +121,20 @@ class Study:
     @property
     def processed_csv(self) -> Path:
         return self.path / "processed_data.csv"
+
+    @property
+    def raw_csv(self) -> Path:
+        """The unconditioned force channels, written alongside the processed set.
+
+        Conditioning is destructive and runs at the native rate during ingestion,
+        so without this file a study has no recoverable "before" to compare
+        against. Absent for studies produced before it was added.
+        """
+        return self.path / "raw_data.csv"
+
+    @property
+    def has_raw(self) -> bool:
+        return self.raw_csv.exists()
 
     # Existence flags
     @property

@@ -10,7 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout, QFormLayout, QLineEdit, QComboBox, QPushButton, QDoubleSpinBox,
-    QSpinBox, QCheckBox, QLabel, QFileDialog, QGridLayout, QWidget,
+    QSpinBox, QCheckBox, QLabel, QFileDialog, QGridLayout, QWidget, QScrollArea,
 )
 
 from gui import theme
@@ -20,7 +20,7 @@ from gui.workers.pipeline_worker import RunRequest
 
 from dtt.channels import discover
 from dtt.vehicles import preset_names, match_preset
-from dtt.ingestion.imc_reader import resolve_raw_folder
+from dtt.ingestion.imc_reader import resolve_raw_folder, pipeline_channel_name
 
 
 class NewStudyPage(BasePage):
@@ -95,13 +95,6 @@ class NewStudyPage(BasePage):
             f"color:{theme.ACCENT}; font-size:12px; font-weight:600;")
         form.addRow("Detected", self.detect_label)
 
-        # All WFT channels found in the source, listed before the run starts.
-        self.channels_label = QLabel("")
-        self.channels_label.setWordWrap(True)
-        self.channels_label.setStyleSheet(
-            f"color:{theme.TEXT_MUTED}; font-family:monospace; font-size:11px;")
-        form.addRow("Channels", self.channels_label)
-
         self.vehicle_edit = QLineEdit("RLDA_PV")
         form.addRow("Vehicle name", self.vehicle_edit)
 
@@ -115,6 +108,30 @@ class NewStudyPage(BasePage):
         self.study_edit.setPlaceholderText("Leave blank → timestamp")
         form.addRow("Study name", self.study_edit)
         left.layout().addLayout(form)
+
+        # Every channel in the source, under the names the pipeline will give
+        # them — listed before the run so the source can be checked at a glance.
+        # A raw folder carries 40-odd channels, so this gets real room and its
+        # own scrollbar rather than being squeezed into a form row.
+        self.channels_title = _card_title("Channels in source")
+        left.layout().addWidget(self.channels_title)
+        self.channels_label = QLabel("")
+        self.channels_label.setWordWrap(True)
+        self.channels_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.channels_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        # The panel background goes on the label, not the QScrollArea: the app
+        # stylesheet paints every QScrollArea transparent, and styling the area
+        # would not reach the viewport the label is drawn on anyway.
+        self.channels_label.setStyleSheet(
+            f"color:{theme.TEXT}; font-family:Consolas,monospace; font-size:13px;"
+            f"background:{theme.ENTRY_BG}; border-radius:8px; padding:12px;")
+        self.channels_scroll = QScrollArea()
+        self.channels_scroll.setWidgetResizable(True)
+        self.channels_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.channels_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.channels_scroll.setWidget(self.channels_label)
+        self.channels_scroll.setMinimumHeight(280)
+        left.layout().addWidget(self.channels_scroll, 1)
         columns.addWidget(left, 1)
 
         # Right: filtering + modules
@@ -263,11 +280,18 @@ class NewStudyPage(BasePage):
     def _current_columns(self) -> list[str]:
         if self.source_type.currentIndex() == 1:      # raw source
             if self._raw_files:
-                return [f.stem for f in self._raw_files]
-            if self._raw_folder and self._raw_folder.exists():
+                stems = [f.stem for f in self._raw_files]
+            elif self._raw_folder and self._raw_folder.exists():
                 found = resolve_raw_folder(self._raw_folder)
-                return [f.stem for f in found.glob("*.raw")]
-            return []
+                stems = [f.stem for f in sorted(found.glob("*.raw"))]
+            else:
+                return []
+            # Report the names ingestion will produce, not the filenames, and
+            # collapse "… - Copy" duplicates the reader would merge anyway.
+            seen: dict[str, None] = {}
+            for s in stems:
+                seen.setdefault(pipeline_channel_name(s), None)
+            return list(seen)
         data = self.csv_combo.currentData()
         if not data or not Path(data).exists():
             return []
@@ -291,31 +315,57 @@ class NewStudyPage(BasePage):
         cols = self._current_columns()
         if not cols:
             self.detect_label.setText("—")
-            self.channels_label.setText("")
+            self.channels_label.setText("Select a source to list its channels.")
             return
         cs = discover(cols)
         if cs.n_positions == 0:
             self.detect_label.setText("No wheel-force channels detected")
             self.detect_label.setStyleSheet(f"color:{theme.WARNING}; font-size:12px;")
-            self.channels_label.setText("")
+            # Still list what *is* there — seeing the names is how you work out
+            # why nothing matched.
+            self.channels_label.setText(self._channel_listing(cols, cs))
             return
         preset = match_preset(cs)
         self.detect_label.setStyleSheet(
             f"color:{theme.ACCENT}; font-size:12px; font-weight:600;")
         self.detect_label.setText(f"{cs.summary()}   →  suggests: {preset.name}")
 
-        # List every discovered WFT channel, grouped by wheel position.
-        by_pos: dict[str, list[str]] = {}
-        for _orig, (pos, comp) in cs.source_map.items():
-            by_pos.setdefault(pos.label, []).append(comp)
-        n_ch = sum(len(v) for v in by_pos.values())
-        lines = [f"{n_ch} WFT channels across {cs.n_positions} positions:"]
-        for lbl in sorted(by_pos):
-            comps = sorted(by_pos[lbl],
-                           key=lambda c: ("Fx", "Fy", "Fz", "Mx", "My", "Mz").index(c)
-                           if c in ("Fx", "Fy", "Fz", "Mx", "My", "Mz") else 99)
-            lines.append(f"  {lbl}: {'  '.join(comps)}")
-        self.channels_label.setText("\n".join(lines))
+        self.channels_label.setText(self._channel_listing(cols, cs))
+
+    @staticmethod
+    def _channel_listing(cols: list[str], cs) -> str:
+        """Every channel in the source: the WFT ones by position, then the rest.
+
+        The non-WFT channels are the point of listing at all — accel, speed, GPS
+        and yaw decide whether histograms can be distance-weighted and whether
+        Latacc gets its FiltLP pass, and they were the ones the old listing
+        dropped entirely.
+        """
+        order = ("Fx", "Fy", "Fz", "Mx", "My", "Mz")
+        by_pos: dict[str, list[tuple[int, str]]] = {}
+        for orig, (pos, comp) in cs.source_map.items():
+            rank = order.index(comp) if comp in order else 99
+            by_pos.setdefault(pos.display, []).append((rank, orig))
+
+        n_wft = sum(len(v) for v in by_pos.values())
+        out: list[str] = []
+        if n_wft:
+            out.append(f"WFT force & moment — {n_wft} channels, "
+                       f"{cs.n_positions} positions")
+            for lbl in sorted(by_pos):
+                out.append(f"  {lbl}")
+                names = [n for _, n in sorted(by_pos[lbl])]
+                for i in range(0, len(names), 3):
+                    out.append("    " + "".join(f"{n:<14}" for n in names[i:i + 3]).rstrip())
+
+        rest = [c for c in cols if c not in cs.source_map]
+        if rest:
+            if out:
+                out.append("")
+            out.append(f"Other channels — {len(rest)}")
+            for i in range(0, len(rest), 3):
+                out.append("  " + "".join(f"{c:<16}" for c in rest[i:i + 3]).rstrip())
+        return "\n".join(out)
 
     # Launch
     def _on_start(self) -> None:

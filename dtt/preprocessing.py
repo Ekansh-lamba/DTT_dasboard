@@ -37,6 +37,8 @@ import pandas as pd
 from scipy.ndimage import uniform_filter1d, median_filter
 from scipy.signal import butter, filtfilt, decimate
 
+from dtt.channels import COMPONENTS, parse_channel
+
 # ---------------------------------------------------------------- FAMOS recipe
 
 FAMOS_FORCE_SMOOTH_S = 0.1      # smo(FL_Fx1, 0.1)  — WFT forces & moments
@@ -53,8 +55,22 @@ _PASSTHROUGH_CHANNELS = {"time", "dist", "latitude", "longitude", "altitude",
 
 
 def is_wft_channel(name: str) -> bool:
-    """True for a WFT force/moment channel (``FL_Fx`` … ``RR_Mz``)."""
-    return bool(_WFT_CHANNEL_RE.match(name.strip()))
+    """True for a WFT force/moment channel, in **any** of the naming schemes.
+
+    The imc config file names its channels ``FL_Fx`` … ``RR_Mz``, but a real
+    export carries the axle-dynamic form the recording used — ``FR_Fx_2``,
+    ``RR_Mz_1``, ``A3RO_My``, ``WFT_Fx_fl``. Matching only the two-axle literal
+    silently leaves every one of those unconditioned: ``smo`` never runs, and
+    ``red(10)`` then folds the whole 50–500 Hz band back over the signal as
+    phantom spikes. :func:`dtt.channels.parse_channel` is the project's single
+    authority on which names are wheel force/moment channels, so defer to it and
+    keep the literal only as a fast path.
+    """
+    n = name.strip()
+    if _WFT_CHANNEL_RE.match(n):
+        return True
+    parsed = parse_channel(n)
+    return parsed is not None and parsed[1] in COMPONENTS
 
 
 @dataclass
@@ -248,6 +264,42 @@ def apply_lower_threshold(x: np.ndarray, threshold: float) -> np.ndarray:
     out = x.astype(float).copy()
     out[np.abs(out) < threshold] = np.nan
     return out
+
+
+def blank_dead_runs(x: np.ndarray, fs: float, min_s: float = 1.0) -> np.ndarray:
+    """Blank stretches where the signal is *exactly* constant for ``min_s`` or more.
+
+    When a WFT stops streaming mid-recording the DAQ keeps writing samples at a
+    frozen value — almost always a hard 0. Those samples are not a measurement of
+    zero load, they are the absence of a measurement, and carrying them as data
+    is what puts a phantom step at the end of a trace and drags the channel's
+    mean and σ with it (in the reference recording ``RR_Fz_1`` dies 174 s early:
+    mean 7104 vs median 7336, σ 1526 against 803 for the live front channel).
+
+    The test is *bit-exact* constancy, which is the one thing a live sensor never
+    does — even a stationary vehicle dithers by an ADC count — so a genuine
+    quiet stretch is never mistaken for a dropout. Blanked samples become NaN,
+    the gap marker every operator downstream already honours.
+    """
+    arr = np.asarray(x, dtype=float).copy()
+    if arr.size < 2 or min_s <= 0 or not np.isfinite(fs) or fs <= 0:
+        return arr
+    min_len = max(2, int(round(min_s * fs)))
+    if arr.size < min_len:
+        return arr
+
+    # Runs of bit-exact repeats: same[i] means sample i+1 equals sample i.
+    same = np.zeros(arr.size, dtype=bool)
+    np.equal(arr[1:], arr[:-1], out=same[1:])
+    same &= np.isfinite(arr)
+    if not same.any():
+        return arr
+
+    edges = np.flatnonzero(np.diff(np.r_[False, same, False]))
+    for start, stop in zip(edges[0::2], edges[1::2]):
+        if (stop - start) + 1 >= min_len:       # +1: the run's first sample
+            arr[start - 1:stop] = np.nan
+    return arr
 
 
 def remove_outliers(x: np.ndarray, low_pct: float, high_pct: float) -> np.ndarray:
@@ -466,6 +518,7 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
                        deglitch_nsigma: float = 6.0,
                        time_column: str = "Time",
                        emit_lpf_columns: bool = True,
+                       blank_dead_s: float = 1.0,
                        ) -> Tuple[pd.DataFrame, float, Dict[str, str]]:
     """Apply the full imc/FAMOS recipe to every column of ``df``.
 
@@ -473,6 +526,10 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
     ``smo(0.1)`` for WFT forces/moments, ``FiltLP(4,5)`` + ``smo(0.5)`` for
     ``Latacc``, ``smo(0.5)`` for ``Longacc``/``Vehicle_Speed``, passthrough for
     GPS/yaw — then ``red(n)`` across the board so all channels stay aligned.
+
+    ``blank_dead_s`` first marks frozen-value sensor dropouts on the force and
+    moment channels as gaps (see :func:`blank_dead_runs`) so they are neither
+    smoothed into the live signal nor counted as measurements downstream.
 
     ``deglitch`` inserts a rolling-median de-glitch ahead of the FAMOS steps.
     It is off by default because a correctly-read imc file is already clean;
@@ -500,6 +557,14 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
         s = famos_recipe(col, decimate_factor=1)      # decimate once, below
         y = series
         steps: List[str] = []
+        if blank_dead_s > 0 and is_wft_channel(col):
+            # Ahead of everything else: a frozen-value dropout must not be
+            # smeared into the live samples either side of it by smo().
+            blanked = blank_dead_runs(y, fs, blank_dead_s)
+            n_dead = int(np.isfinite(y).sum() - np.isfinite(blanked).sum())
+            if n_dead and np.isfinite(blanked).any():
+                y = blanked
+                steps.append(f"blank dropout({n_dead / fs:.1f}s)")
         if deglitch:
             y = hampel_deglitch(y, fs, n_sigmas=deglitch_nsigma)
             steps.append("de-glitch")
@@ -529,6 +594,18 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
             ordered.append(f"{col}_LPF")
     result = result[[c for c in ordered if c in result.columns]]
     return result, new_fs, applied
+
+
+def count_conditioned(applied: Dict[str, str]) -> int:
+    """How many channels in an :func:`apply_famos_recipe` report were *filtered*.
+
+    ``red(n)`` is applied to every column so the channels stay aligned, so its
+    presence says nothing about whether a channel was recognised — counting any
+    non-passthrough entry reports "37/38 conditioned" for a run in which only 15
+    channels actually matched the recipe, which is exactly the kind of reassuring
+    number that hides an unmatched-channel bug. Only ``smo`` and ``FiltLP`` count.
+    """
+    return sum(1 for v in applied.values() if "smo(" in v or "FiltLP(" in v)
 
 
 def summary_stats(x: np.ndarray) -> dict:

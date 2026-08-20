@@ -104,9 +104,7 @@ def sanitize(df: pd.DataFrame, config: RunConfig) -> tuple:
                     total_flags, len(report.outlier_flags_per_channel))
 
     report.rows_output = len(df)
-
-    out_path = config.run_output_dir / "processed_data.csv"
-    df.to_csv(out_path, index=False)
-    logger.info("Processed data saved: %s  (%d rows)", out_path, len(df))
-
+    # processed_data.csv is written by the pipeline *after* signal conditioning
+    # (stage 4). Writing it here published the un-filtered frame while every
+    # statistic, histogram and plot was computed from the filtered one.
     return df, report

@@ -26,6 +26,7 @@ from gui.widgets.common import Card, KpiCard, ScrollPage, SectionTitle
 from gui.widgets.mpl_canvas import PlotPanel
 
 from dtt.comparison import ComparisonResult, align_channel
+from dtt.analysis.auc import auc_grid, compare_distributions
 
 _PREV_COLOR = "#4a9eff"
 _CURR_COLOR = "#ff4d4f"
@@ -359,6 +360,9 @@ class ComparisonPage(BasePage):
         self.overlay.canvas.fig.tight_layout()
         self.overlay.draw()
 
+        # Distribution: shaded KDE area-under-curve, with the previous run as the
+        # reference band. The histogram alone showed the shapes; the P5/P95
+        # markers and the exceedance figure say whether the change matters.
         ax2 = self.dist.ax
         self.dist.clear()
         fa, fb = a[np.isfinite(a)], b[np.isfinite(b)]
@@ -367,15 +371,33 @@ class ComparisonPage(BasePage):
             hi = max(np.percentile(fa, 99.5), np.percentile(fb, 99.5))
             if hi > lo:
                 bins = np.linspace(lo, hi, 60)
-                ax2.hist(fa, bins=bins, alpha=0.55, color=_PREV_COLOR,
-                         label="previous", density=True)
-                ax2.hist(fb, bins=bins, alpha=0.55, color=_CURR_COLOR,
-                         label="current", density=True)
+                ax2.hist(fa, bins=bins, alpha=0.30, color=_PREV_COLOR, density=True)
+                ax2.hist(fb, bins=bins, alpha=0.30, color=_CURR_COLOR, density=True)
+
+                x, k_prev, k_curr = auc_grid(fa, fb, xlim=(lo, hi))
+                ax2.fill_between(x, k_prev, alpha=0.28, color=_PREV_COLOR)
+                ax2.fill_between(x, k_curr, alpha=0.28, color=_CURR_COLOR)
+                ax2.plot(x, k_prev, color=_PREV_COLOR, lw=1.8, label="previous")
+                ax2.plot(x, k_curr, color=_CURR_COLOR, lw=1.8, ls="--", label="current")
+
+                cmp = compare_distributions(fa, fb)
+                if cmp is not None:
+                    ax2.axvline(cmp.p5_ref, color=_PREV_COLOR, lw=1.2, ls=":")
+                    ax2.axvline(cmp.p95_ref, color=_PREV_COLOR, lw=1.6, ls="--",
+                                label=f"prev P95 {cmp.p95_ref:.0f}")
+                    ax2.axvline(cmp.p95_cur, color=_CURR_COLOR, lw=1.4, ls="--",
+                                label=f"curr P95 {cmp.p95_cur:.0f} "
+                                      f"({cmp.delta_p95:+.0f})")
+                    ax2.set_title(
+                        f"Distribution — {cmp.pct_exceed_ref_p95:.1f}% of current "
+                        f"beyond previous P95, {cmp.pct_normal_cur:.1f}% within band",
+                        fontsize=9)
                 ax2.legend(fontsize=8, facecolor=theme.SURFACE,
                            labelcolor=theme.TEXT, framealpha=0.9)
         ax2.set_xlabel(f"{label} (daN)")
         ax2.set_ylabel("density")
-        ax2.set_title("Distribution", fontsize=9)
+        if not ax2.get_title():
+            ax2.set_title("Distribution", fontsize=9)
         self.dist.canvas.fig.tight_layout()
         self.dist.draw()
 

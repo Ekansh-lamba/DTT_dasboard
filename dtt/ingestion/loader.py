@@ -161,6 +161,71 @@ def _apply_n_to_dan(df: pd.DataFrame, channels: list) -> Tuple[pd.DataFrame, boo
     return df, False
 
 
+def normalise_force_units(df: pd.DataFrame, config: RunConfig) -> Tuple[pd.DataFrame, dict]:
+    """Correct a whole-decade unit error on the force channels, anchored on Fz.
+
+    ``_apply_n_to_dan`` is a magnitude heuristic with a single fixed threshold,
+    so it cannot tell N from decanewtons when the source has *also* scaled the
+    data — an imc FAMOS ``CR`` block that multiplies the stored counts by 10
+    leaves the frame exactly one decade high, the heuristic's one division
+    brings it back only to newtons, and the result gets labelled daN. On the
+    reference recording that reported a 6841 kg static front wheel and a 24.4 t
+    passenger car.
+
+    Static Fz is the one channel with a known answer: it is the corner weight,
+    so it must land inside the vehicle preset's ``fz_range_dan``. Comparing the
+    two gives the error as a power of ten. Only clean decades are corrected —
+    anything else is a real mismatch between the recording and the chosen
+    preset, which is the operator's call, not something to paper over.
+
+    Moments are deliberately left alone: they carry their own ``CR`` factor and
+    their own unit (Nm), and the ``My/Fx`` ratio comes out at a correct 0.27 m
+    loaded radius once the *forces* alone are fixed.
+    """
+    rc = getattr(config, "run_channels", None)
+    tyre = getattr(config, "tyre", None)
+    if rc is None or tyre is None:
+        return df, {}
+
+    fz_cols = [orig for orig, (_, comp) in rc.channel_set.source_map.items()
+               if comp == "Fz" and orig in df.columns]
+    force_cols = [orig for orig, (_, comp) in rc.channel_set.source_map.items()
+                  if comp in ("Fx", "Fy", "Fz") and orig in df.columns]
+    if not fz_cols or not force_cols:
+        return df, {}
+
+    mags = []
+    for ch in fz_cols:
+        v = pd.to_numeric(df[ch], errors="coerce").abs()
+        v = v[np.isfinite(v) & (v > 0)]
+        if len(v):
+            mags.append(float(v.median()))
+    hi = float(tyre.fz_range_dan[1])
+    if not mags or hi <= 0:
+        return df, {}
+    med = float(np.median(mags))
+
+    # A static wheel load sits inside the preset band, not at its very edge;
+    # 0.5 * hi is the reference point, so the ratio is a clean decade only when
+    # the data really is a decade out.
+    decades = int(round(np.log10(med / (0.5 * hi)))) if med > 0 else 0
+    if decades == 0:
+        return df, {}
+
+    factor = 10.0 ** decades
+    df = df.copy()
+    for ch in force_cols:
+        df[ch] = pd.to_numeric(df[ch], errors="coerce") / factor
+    logger.warning(
+        "Force channels were 10^%d out against the '%s' preset (median |Fz| "
+        "%.0f vs expected band 0-%.0f daN) - divided %d force channels by %g",
+        decades, tyre.tyre_type, med, hi, len(force_cols), factor)
+    logger.info("Static |Fz| now %.1f daN (%.0f kg per wheel)",
+                med / factor, med / factor * 10 / 9.81)
+    return df, {"force_scale_divisor": factor, "force_scale_decades": decades,
+                "force_channels_scaled": len(force_cols)}
+
+
 def load_csv(path: Path, config: RunConfig) -> Tuple[pd.DataFrame, dict]:
     path_str = str(path)
     logger.info("Loading CSV: %s", path_str)
@@ -238,6 +303,8 @@ def _finalize_raw(df, imeta, config, name) -> Tuple[pd.DataFrame, dict]:
         "famos_recipe":     imeta.get("famos_recipe") or {},
         "famos_decimate":   imeta.get("famos_decimate", 1),
         "deglitch":         imeta.get("deglitch", False),
+        # Carried through so the pipeline can publish the study's "before".
+        "raw_frame":        imeta.get("raw_frame"),
     }
     logger.info(
         "Loaded imc raw: %d rows, %d cols, raw %.0f Hz -> %.0f Hz, %d force channels",
