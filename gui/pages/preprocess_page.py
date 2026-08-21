@@ -8,10 +8,11 @@ import warnings
 
 import numpy as np
 import pandas as pd
-from PySide6.QtCore import Qt, QTimer, QThread, Signal
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QObject, QEvent
 from PySide6.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QFormLayout, QComboBox, QDoubleSpinBox, QSpinBox,
     QCheckBox, QLabel, QPushButton, QScrollArea, QFileDialog, QMessageBox,
+    QApplication, QAbstractSpinBox,
 )
 
 from gui import theme
@@ -20,12 +21,15 @@ from gui.widgets.common import SectionTitle, Card
 from gui.widgets.mpl_canvas import PlotPanel
 from dtt.preprocessing import (
     PreprocessSettings, apply_pipeline, summary_stats, famos_recipe,
+    is_wft_channel, blank_dead_runs,
 )
 
 _MAX_PLOT_POINTS = 1400        # fallback before the canvas has been laid out
 
 # FAMOS convention, used across the screen: blue is the raw channel, red is the
 # conditioned one. The Comparison screen uses the same two for previous/current.
+_MOMENT_RE = re.compile(r"(?:^|[_\W])M[xyz](?:$|[_\W])", re.I)
+
 _RAW_COLOR = "#4a9eff"
 _PROC_COLOR = "#ff4d4f"
 
@@ -169,6 +173,36 @@ def _median_line(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POINT
     return tm, mid
 
 
+def _channel_unit(channel: str) -> str:
+    """Axis unit for ``channel``, following the imc config file's YUNIT lines.
+
+    The screen used to hard-code "daN" because the channel list only ever held
+    forces. It now lists every column in the processed CSV, so a hard-coded
+    force unit would label Latacc in daN and Vehicle_Speed in daN — a plot that
+    states the wrong unit is worse than one that states none.
+    """
+    key = channel.strip().lower()
+    if key in ("latacc", "lat_acc", "longacc", "long_acc", "latacc_lpf",
+               "acceleration", "accelz"):
+        return "m/s²"
+    if key in ("velforward", "vellateral"):
+        return "m/s"                       # velocities, not accelerations
+    if key in ("vehicle_speed", "speed_kmph", "speed2d", "gps.speed"):
+        return "km/h"
+    if key in ("yawrate", "angratex", "angratey") or "anglespeed" in key:
+        return "°/s"
+    if key.startswith("angle") or key.endswith("_angle") or "_angle_" in key:
+        return "°"
+    if key in ("distance", "dist", "altitude"):
+        return "m"
+    if key in ("latitude", "longitude"):
+        return "°"
+    if is_wft_channel(channel):
+        # forces daN, moments daN·m — both smo(0.1) in the recipe
+        return "daN·m" if _MOMENT_RE.search(channel) else "daN"
+    return ""
+
+
 def _famos_op(channel: str) -> str:
     """The operator the imc config file specifies for ``channel``.
 
@@ -191,6 +225,36 @@ def _famos_op(channel: str) -> str:
     if r.smooth_width_s > 0:
         return f"smo({r.smooth_width_s:g} s)"
     return "passthrough"
+
+
+class _WheelGuard(QObject):
+    """Stops the mouse wheel from silently rewriting the processing settings.
+
+    The controls live in a scrollable panel, and every spin box and combo in it
+    accepts wheel events by default. Rolling the wheel to reach a lower section
+    therefore decrements whatever sits under the pointer on the way past — and
+    each change fires ``_schedule`` and re-plots, so the trace quietly becomes
+    a picture of settings nobody chose. Observed in the wild: ``smo`` width
+    driven to its 0.01 s floor, min gap to 1 s, the high percentile to 100 %,
+    all three pinned at a range end, with the panel itself never scrolling
+    because the spin boxes consumed the events.
+
+    A focused widget still takes the wheel, which is the one case where the
+    user is deliberately dialling that control. Otherwise the event is handed
+    to the scroll area so the wheel does the only thing it looked like it was
+    doing: scroll.
+    """
+
+    def __init__(self, area: QScrollArea, parent=None):
+        super().__init__(parent)
+        self._area = area
+
+    def eventFilter(self, obj, ev):                    # noqa: N802
+        if ev.type() != QEvent.Type.Wheel or obj.hasFocus():
+            return False
+        if self._area is not None:
+            QApplication.sendEvent(self._area.viewport(), ev)
+        return True                                    # never reaches the widget
 
 
 class _FamosCheckWorker(QThread):
@@ -419,6 +483,18 @@ class PreprocessPage(BasePage):
         self.spike_check.toggled.connect(self._schedule)
         self.gap_check.toggled.connect(self._schedule)
         self.smooth_check.toggled.connect(self._schedule)
+        # Wheel-proof every value control on the screen, including the header's
+        # channel combo and the footer's sigma box — the pointer crosses those
+        # too. Focus policy comes down to StrongFocus so a control can only be
+        # reached by click or Tab: with the default WheelFocus a spin box takes
+        # focus *from* the wheel, which would let the very first notch through
+        # and defeat the guard's hasFocus() exemption.
+        self._wheel_guard = _WheelGuard(self.ctrl_scroll, self)
+        for w in (self.findChildren(QAbstractSpinBox)
+                  + self.findChildren(QComboBox)):
+            w.setFocusPolicy(Qt.StrongFocus)
+            w.installEventFilter(self._wheel_guard)
+
         self._time = np.array([])
         self._data = np.array([])
         self._raw = None                 # true unconditioned channel, if kept
@@ -469,36 +545,24 @@ class PreprocessPage(BasePage):
         return bool(re.search(r"FAMOS recipe applied at [\d.]+ Hz: (\d+)/", log)
                     and not re.search(r"FAMOS recipe applied at [\d.]+ Hz: 0/", log))
 
-    def _recipe_note(self, channel: str) -> str:
-        r = famos_recipe(channel)
-        if not self.famos_auto.isChecked():
-            extra = []
-            if self.filter_check.isChecked():
-                extra.append(f"FiltLP({self.order.value()}, {self.cutoff.value():g} Hz)")
-            if self.smooth_check.isChecked():
-                extra.append(f"smo({self.smooth_width.value():g} s)")
-            # Name the manual stages: the trace is only the study's own data
-            # when nothing further is running on top of it.
-            suffix = f"  +  {' → '.join(extra)}" if extra else ""
-            if self._raw is not None:
-                if extra:
-                    return ("Raw vs live preview:  " + " → ".join(extra)
-                            + "   (blue = raw, red = preview)")
-                # Not "at ingestion": a CSV study is conditioned at stage 4
-                # instead, and both paths land here.
-                return ("Raw vs sanitized — imc/FAMOS recipe applied"
-                        "   (blue = raw, red = sanitized)")
-            if self._conditioned:
-                return ("Study data — imc/FAMOS recipe applied at ingestion" + suffix)
-            if extra:
-                return "Manual: " + " → ".join(extra)
-            return "No FAMOS recipe applied (enable “FAMOS recipe” above)"
-        if r.apply_filter:
-            return (f"FAMOS: FiltLP({r.filter_order}, {r.filter_cutoff:g} Hz) "
-                    f"→ smo({r.smooth_width_s:g} s)")
-        if r.smooth_width_s > 0:
-            return f"FAMOS: smo({r.smooth_width_s:g} s)"
-        return "FAMOS: passthrough (no filtering in the imc recipe)"
+    def _recipe_note(self, s: PreprocessSettings, ch: str,
+                     have_raw: bool, sanitizing: bool) -> str:
+        """Title line — what the two colours are, stated from the same facts
+        the legend uses so the two can never disagree.
+
+        It also has to say when there is only one trace. Only the channels
+        stored in raw_data.csv can be shown as a before/after pair; for the
+        rest the study kept the conditioned result alone, and a title that
+        still promised "blue = raw, red = sanitized" over a single line would
+        be describing a plot that is not on screen.
+        """
+        proc = self._proc_label(s, ch, have_raw, sanitizing)
+        if have_raw:
+            return f"Raw vs sanitized   (blue = raw, red = {proc.split('— ', 1)[-1]})"
+        if self._conditioned:
+            return ("Study data — imc/FAMOS recipe applied at ingestion   "
+                    "(no raw stored for this channel, so no before/after pair)")
+        return f"Study data — {proc.split('— ', 1)[-1]}"
 
     def _on_famos_auto(self, on: bool) -> None:
         for w in (self.smooth_check, self.smooth_width, self.filter_check,
@@ -511,30 +575,51 @@ class PreprocessPage(BasePage):
     def refresh(self) -> None:
         self._conditioned = self._study_is_conditioned()
         # Re-applying the recipe on top of an already-conditioned study would
-        # smooth it twice, so only default it on when nothing has run yet — and
-        # the manual smo has to come off with it. Left checked it ran a second
-        # smo(0.1) over data the title was simultaneously calling untouched
-        # "study data", so the red trace was never what the label claimed.
+        # smooth it twice, so the auto checkbox only defaults on when nothing
+        # has run yet. The per-channel recipe controls are *not* cleared with
+        # it any more: `_load_channel` sets them from `famos_recipe`, so the
+        # panel states the conditioning the data actually carries, and any
+        # sanitisation previewed on top of it keeps that conditioning instead
+        # of silently reverting the red trace to unsmoothed raw.
         self._syncing = True
         self.famos_auto.setChecked(not self._conditioned)
-        if self._conditioned:
-            # Every stage off by default. With raw_data.csv stored the screen
-            # already has a genuine before/after — raw against the pipeline's own
-            # output — so adding a display smoothing pass would only re-filter an
-            # already-filtered trace and shrink the very difference on show.
-            self.smooth_check.setChecked(False)
-            self.filter_check.setChecked(False)
         self._syncing = False
         self.channel_combo.blockSignals(True)
         self.channel_combo.clear()
-        if self.study and self.study.has_stats:
-            self.channel_combo.addItems(list(self.study.stats().keys()))
+        self.channel_combo.addItems(self._channel_names())
         self.channel_combo.blockSignals(False)
         if self.channel_combo.count():
             self._load_channel(self.channel_combo.currentText())
         else:
             self.canvas.clear(); self.canvas.draw()
             self.stats_label.setText("No processed data for this study.")
+    def _channel_names(self) -> list:
+        """Every channel this screen can preprocess — the processed CSV's own
+        columns.
+
+        This used to come from ``stats_summary.json``, which is built from the
+        run's *mandatory* channels only — the Fx/Fy/Fz forces the severity
+        analysis needs. On a two-position study that is six entries, so the
+        moments, Latacc, Longacc, Vehicle_Speed and the GPS channels were all
+        missing from the dropdown even though they sit in processed_data.csv and
+        the imc recipe names every one of them. Preprocessing applies to the
+        whole file, so the file is what the list has to come from.
+
+        Falls back to the stats keys if the CSV cannot be read, so a study with
+        a damaged export still offers whatever it can.
+        """
+        if not self.study:
+            return []
+        try:
+            if self.study.processed_csv.exists():
+                head = pd.read_csv(self.study.processed_csv, nrows=0)
+                names = [c for c in head.columns if c != "Time"]
+                if names:
+                    return names
+        except (ValueError, OSError):
+            pass
+        return list(self.study.stats().keys()) if self.study.has_stats else []
+
     @staticmethod
     def _read_channel(path, ch: str):
         """``(time, values)`` for one channel, or ``(None, None)``."""
@@ -577,8 +662,11 @@ class PreprocessPage(BasePage):
                 self._raw_time = (tr if tr is not None
                                   else np.arange(yr.size) / self._fs)
 
-        if self.famos_auto.isChecked():
-            self._apply_recipe_to_controls(ch)
+        # The recipe is per-channel (smo 0.1 for forces, FiltLP+smo 0.5 for
+        # Latacc, passthrough for GPS), so the controls have to follow the
+        # selection whether the recipe is re-applied here or was baked in at
+        # ingestion — otherwise the panel describes the previous channel.
+        self._apply_recipe_to_controls(ch)
         self._update()
     def _schedule(self, *_) -> None:
         if self._syncing:
@@ -650,50 +738,127 @@ class PreprocessPage(BasePage):
                     or s.remove_outliers or s.moderate_spikes or s.bridge_gaps
                     or s.resample_factor > 1)
 
-    def _proc_label(self, s: PreprocessSettings, active: bool) -> str:
-        """Legend text for the red trace — the step that actually produced it.
+    @staticmethod
+    def _sanitize_active(s: PreprocessSettings) -> bool:
+        """True if any *sanitisation* stage runs — conditioning excluded.
 
-        Three cases, and they are not interchangeable: the FAMOS recipe from the
-        imc config file (either re-applied here or already baked in by the
-        pipeline), a manual preview the operator dialled in, or sanitisation
-        with no smoothing at all. Labelling the last two "FAMOS" is how a plot
-        starts lying about what it shows.
+        Sanitisation and conditioning are different jobs and the screen has to
+        tell them apart. Ticking "remove DAQ artifact spikes" used to flip the
+        one combined flag, which re-derived the red trace from raw — carrying
+        whatever the smoothing controls happened to say, which for an
+        already-conditioned study was *nothing*. So asking for de-glitching
+        silently threw away smo(0.1) and the red trace fell back to unsmoothed
+        raw, labelled "sanitized — no smoothing".
         """
-        ch = self.channel_combo.currentText()
-        if not active or self.famos_auto.isChecked():
-            # Either the recipe is re-applied live, or the study data on screen
-            # is the pipeline's own FAMOS output. Same operator either way.
-            return f"sanitized — FAMOS {_famos_op(ch)}"
-        manual = []
-        if s.apply_filter:
-            manual.append(f"FiltLP({s.filter_order}, {s.filter_cutoff:g} Hz)")
-        if s.smooth_width_s > 0:
-            manual.append(f"smo({s.smooth_width_s:g} s)")
-        if manual:
-            return "preview — " + " → ".join(manual)
-        return "sanitized — no smoothing"
+        return bool(s.lower_threshold > 0 or s.remove_outliers
+                    or s.moderate_spikes or s.bridge_gaps
+                    or s.resample_factor > 1)
+
+    def _recipe_matches(self, s: PreprocessSettings, channel: str) -> bool:
+        """True if ``s``'s conditioning is exactly the channel's FAMOS recipe.
+
+        When it is, and no sanitisation is asked for, the study's stored output
+        already *is* the requested result — so show that rather than recomputing
+        an approximation of it (the stored one also carries the pipeline's
+        dead-run blanking and decimation).
+        """
+        r = famos_recipe(channel)
+        if s.apply_filter != r.apply_filter:
+            return False
+        if abs(s.smooth_width_s - r.smooth_width_s) > 1e-9:
+            return False
+        return not r.apply_filter or (
+            abs(s.filter_cutoff - r.filter_cutoff) < 1e-9
+            and s.filter_order == r.filter_order)
+
+    def _proc_label(self, s: PreprocessSettings, ch: str,
+                    have_raw: bool, sanitizing: bool) -> str:
+        """Legend text for the red trace — every step that actually produced it.
+
+        Built from what ran, not from which checkbox is ticked, so the three
+        cases stay distinguishable: the FAMOS recipe out of the imc config file,
+        a manual override the operator dialled in, and sanitisation stages on
+        top of either. Naming a manual smo "FAMOS", or dropping the de-glitch
+        from the label, is how a plot starts lying about what it shows.
+        """
+        op = _famos_op(ch)
+        if have_raw or not self._conditioned:
+            # The conditioning on screen is whatever `s` specifies.
+            if self._recipe_matches(s, ch):
+                cond = "" if op == "passthrough" else f"FAMOS {op}"
+            else:
+                manual = []
+                if s.apply_filter:
+                    manual.append(f"FiltLP({s.filter_order}, {s.filter_cutoff:g} Hz)")
+                if s.smooth_width_s > 0:
+                    manual.append(f"smo({s.smooth_width_s:g} s)")
+                cond = " → ".join(manual)
+        else:
+            # No stored raw, but ingestion ran the recipe: that is what the
+            # trace carries, whatever the (neutralised) controls now say.
+            cond = "" if op == "passthrough" else f"FAMOS {op}"
+
+        steps = []
+        if s.lower_threshold > 0:
+            steps.append(f"threshold {s.lower_threshold:g}")
+        if s.remove_outliers:
+            steps.append(f"outliers {s.outlier_low_pct:g}–{s.outlier_high_pct:g}%")
+        if s.moderate_spikes:
+            steps.append("de-glitch")
+        if s.bridge_gaps:
+            steps.append("gap bridge")
+        if s.resample_factor > 1:
+            steps.append(f"red({s.resample_factor})")
+        if cond:
+            steps.append(cond)
+
+        if not steps:
+            return ("unchanged — FAMOS passthrough" if op == "passthrough"
+                    else "sanitized — no conditioning")
+        return "sanitized — " + " → ".join(steps)
 
     def _update(self, *_) -> None:
         if self._data.size == 0:
             return
         s = self._settings()
-        active = self._stages_active(s)
+        ch = self.channel_combo.currentText()
         have_raw = self._raw is not None and self._raw.size > 0
+        sanitizing = self._sanitize_active(s)
 
         if have_raw:
-            # Blue is the real unconditioned channel; red is the pipeline's own
-            # sanitized output. Enabling a stage switches red to a live preview
-            # of that recipe run on the raw, which is the only combination where
-            # the two traces mean what the legend says.
+            # Blue is the real unconditioned channel. Red is the conditioned
+            # one — the pipeline's stored output when that already is exactly
+            # what the controls ask for, otherwise the same recipe re-run on
+            # the raw with the extra sanitisation folded in. Either way the
+            # conditioning survives, which is the whole point of the pair.
             raw, t = self._raw, self._raw_time
-            if active:
-                t_proc, proc, new_fs = apply_pipeline(t, raw, self._fs, s)
-            else:
+            if self._conditioned and not sanitizing and self._recipe_matches(s, ch):
                 t_proc, proc, new_fs = self._time, self._data, self._fs
+            else:
+                base = raw
+                if is_wft_channel(ch):
+                    # The pipeline blanks frozen-value dropouts before it
+                    # conditions anything (a dead WFT keeps streaming a hard
+                    # constant, which is the absence of a measurement, not a
+                    # reading of zero). A preview that skips that step smooths
+                    # the dead run into the trace and disagrees with the
+                    # study's own output — visible as the red line diving to
+                    # the frozen value at t=0 while the stored result does not.
+                    base = blank_dead_runs(raw, self._fs, 1.0)
+                t_proc, proc, new_fs = apply_pipeline(t, base, self._fs, s)
         else:
+            # No stored raw: `self._data` is all there is, and on a conditioned
+            # study it has already been through the recipe. Running the recipe
+            # again here would smooth twice and quietly narrow the trace, so
+            # only the sanitisation the operator explicitly asked for may run.
             raw = self._data
             t = self._time
-            t_proc, proc, new_fs = apply_pipeline(t, raw, self._fs, s)
+            if self._conditioned:
+                s.smooth_width_s = 0.0
+                s.apply_filter = False
+            t_proc, proc, new_fs = (apply_pipeline(t, raw, self._fs, s)
+                                    if self._stages_active(s) else (t, raw, self._fs))
+        active = self._stages_active(s)
 
         ax = self.canvas.ax
         self.canvas.clear()
@@ -725,7 +890,7 @@ class PreprocessPage(BasePage):
             # blue visible — and transparency would only wash it out.
             ax.plot(tp, yp, color=_PROC_COLOR, linewidth=1.0, zorder=3,
                     solid_joinstyle="round", solid_capstyle="round",
-                    label=self._proc_label(s, active))
+                    label=self._proc_label(s, ch, have_raw, sanitizing))
             # Optional, off by default: ring the removed excursions. FAMOS does
             # not do this, so it stays opt-in for when the blue-vs-red reading is
             # too dense to pick them out by eye.
@@ -738,9 +903,11 @@ class PreprocessPage(BasePage):
                             markeredgewidth=0.8, alpha=0.9, zorder=4,
                             label=f"raw spikes removed ({n_spikes:,})")
 
-        ax.set_title(self._recipe_note(self.channel_combo.currentText()),
+        ax.set_title(self._recipe_note(s, ch, have_raw, sanitizing),
                      fontsize=9, color=theme.TEXT_MUTED, loc="left")
-        ax.set_xlabel("Time (s)"); ax.set_ylabel(f"{self.channel_combo.currentText()} (daN)")
+        unit = _channel_unit(ch)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel(f"{ch} ({unit})" if unit else ch)
         if t.size:
             ax.set_xlim(float(t[0]), float(t[-1]))     # show the entire timeline
         ax.margins(x=0)
@@ -783,12 +950,12 @@ class PreprocessPage(BasePage):
 
         a, b = summary_stats(raw), summary_stats(proc)
         self.stats_label.setText(
-            f"{self._recipe_note(self.channel_combo.currentText())}\n"
+            f"{self._recipe_note(s, ch, have_raw, sanitizing)}\n"
             f"fs: {self._fs:.1f} → {new_fs:.1f} Hz\n"
             f"samples: {a['n']} → {b['n']}  (removed {b['removed']})\n"
-            f"mean: {a['mean']:.1f} → {b['mean']:.1f} daN\n"
-            f"std:  {a['std']:.1f} → {b['std']:.1f} daN\n"
-            f"min/max: {b['min']:.0f} / {b['max']:.0f} daN")
+            f"mean: {a['mean']:.1f} → {b['mean']:.1f} {unit}\n"
+            f"std:  {a['std']:.1f} → {b['std']:.1f} {unit}\n"
+            f"min/max: {b['min']:.0f} / {b['max']:.0f} {unit}")
 
 
 def _title(text: str) -> QLabel:
