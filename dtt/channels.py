@@ -1,20 +1,4 @@
-"""
-Generalized wheel-position + channel model.
 
-Replaces the hardcoded ``FL/FR/RL/RR`` assumption so the platform works for any
-axle configuration (2-axle car → 8x4 truck → multi-axle trailer). Positions are
-**discovered** from the data and normalised to a canonical id.
-
-Canonical position id::
-
-    A{axle}{side}[{I|O}]
-        A1L   axle 1 left            (a car's front-left)
-        A1R   axle 1 right
-        A2LO  axle 2 left-outer      (dual wheel)
-        A2LI  axle 2 left-inner
-
-A channel is ``{position}_{component}`` e.g. ``A2R_Fz``.
-"""
 
 from __future__ import annotations
 
@@ -46,15 +30,11 @@ class Position:
         if self.sub is None:
             return _AXLE_TO_LEGACY.get((self.axle, self.side))
         return None
-
     @property
     def display(self) -> str:
         """Verbose human label, e.g. 'Axle 3 Left outer'."""
         io = {"I": " inner", "O": " outer"}.get(self.sub or "", "")
         return f"Axle {self.axle} {'Left' if self.side == 'L' else 'Right'}{io}"
-
-    # Filename-safe key used by the pipeline (overridden to FL/FR/RL/RR only for
-    # a genuine 2-axle car — decided in build_run_channels).
     @property
     def label(self) -> str:
         return self.id
@@ -82,8 +62,6 @@ _POS_PATTERNS = [
 
 _COMP_RE = re.compile(r"(?:^|[_\W])(F[xyz]|M[xyz])(?:$|[_\W])", re.I)
 
-# Derived / auxiliary channels that carry a force-like token but are NOT the
-# primary WFT force (e.g. WFT_rot_fx_fl, WFT_MxCorr_fl, angle/rpm/speed).
 _DERIVED_RE = re.compile(r"(rot|corr|anglespeed|angle|rpm|speed|accel|_vel|_ws\d)", re.I)
 
 

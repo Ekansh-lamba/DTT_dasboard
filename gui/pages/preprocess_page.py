@@ -65,12 +65,14 @@ def _reduce(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POINTS):
     screen width does: at 555k samples over 6000 pixels it keeps one in ~90 and
     lets isolated samples masquerade as spikes).
 
-    Returning all three from one reduction is the point. Drawing a **band** from
-    one signal and a **median line** from another is not a comparison — the band
-    spans the local min→max (roughly ±2.5 σ of whatever is inside the bucket)
-    while the line sits at the centre, so the two look wildly different even
-    when the signals are identical. Both traces get the same treatment here, so
-    the visible gap between them is the conditioning and nothing else.
+    Returning all three from one reduction is the point: the two traces want
+    different halves of it. The raw is drawn from ``lo``/``hi`` so every
+    excursion in the recording still reaches the screen, and the conditioned
+    trace from ``mid`` so it reads as the single smooth line FAMOS shows. Read
+    the pair the way FAMOS is read — the blue is the channel's full reach, the
+    red is where the conditioned signal sits — and note that at full-run zoom
+    part of the gap between them is the reduction itself, not only the filter.
+    Zoom in past ``max_points`` samples and both become the true samples.
 
     Empty buckets keep a finite time and a NaN value, so matplotlib breaks the
     line over a dropout instead of ruling a straight segment across it.
@@ -125,15 +127,18 @@ def _spikes(t: np.ndarray, raw: np.ndarray, proc: np.ndarray, n_sigmas: float,
     return t[idx], raw[idx], total
 
 
-def _trace(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POINTS):
-    """Reduce to a plain continuous polyline — the FAMOS view of a channel.
+def _envelope_line(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POINTS):
+    """The raw channel as FAMOS draws it — min→max strokes, nothing dropped.
 
     Pixel-identical to plotting every sample, at a fraction of the cost: within
     one bucket a full-resolution line plot can only paint the column between
     that bucket's min and max, so emitting exactly those two points in time
     order reproduces the same ink. What it is *not* is a summary — no averaging,
-    no envelope, no shaded band; every extreme in the recording still reaches
-    the screen, which is why a spike stays visible as a spike.
+    no shaded band; every extreme in the recording still reaches the screen,
+    which is why a spike stays visible as a spike.
+
+    Strokes, never a filled band: a fill reads as a solid block and buries the
+    red line that has to be legible through it.
     """
     if y.size <= max_points:
         return t, y
@@ -144,6 +149,48 @@ def _trace(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POINTS):
     # vertical stroke a dense line plot would draw anyway
     yy[0::2], yy[1::2] = lo, hi
     return tt, yy
+
+
+def _median_line(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POINTS):
+    """The conditioned channel as FAMOS draws it — one clean centre line.
+
+    This is the half of the FAMOS look a min/max envelope cannot give. Reducing
+    the sanitized trace to *its* min/max paints it as a second band the same
+    height as the raw, so the two colours simply overprint and smoothing that
+    demonstrably removed the ripple arrives on screen as an identical smear.
+    The bucket median is immune to the lone sample that sets a bucket's min or
+    max, so the red comes through as the smooth line it actually is — running
+    down the middle of the blue, with the raw's excursions standing outside it,
+    which is exactly how FAMOS shows what the conditioning took off.
+    """
+    if y.size <= max_points:
+        return t, y
+    tm, _, mid, _ = _reduce(t, y, max_points)
+    return tm, mid
+
+
+def _famos_op(channel: str) -> str:
+    """The operator the imc config file specifies for ``channel``.
+
+    Read straight off ``famos_recipe`` — which is the transcription of
+    "imc coding_filtering_Channel mapping.txt" — so the red trace's legend
+    names the exact FAMOS step that produced it:
+
+        WFT forces / moments    smo(x, 0.1)
+        Latacc                  FiltLP(x, 0, 0, 4, 5) then smo(x, 0.5)
+        Long_acc, Vehicle_Speed smo(x, 0.5)
+        GPS / yaw               passthrough
+
+    A red line the operator cannot trace back to a line in that file is just a
+    smooth curve; naming it is what makes the plot checkable against FAMOS.
+    """
+    r = famos_recipe(channel)
+    if r.apply_filter:
+        return (f"FiltLP({r.filter_order}, {r.filter_cutoff:g} Hz) "
+                f"→ smo({r.smooth_width_s:g} s)")
+    if r.smooth_width_s > 0:
+        return f"smo({r.smooth_width_s:g} s)"
+    return "passthrough"
 
 
 class _FamosCheckWorker(QThread):
@@ -312,9 +359,16 @@ class PreprocessPage(BasePage):
         preview.layout().addWidget(self.plot, 1)
         foot = QHBoxLayout()
         self.range_label = QLabel("Full recording — use the toolbar to zoom/pan.")
+        # Word wrap is what lets this shrink. A QLabel with wrapping off reports
+        # its whole text width as its *minimum*, so this one status line was
+        # pinning the footer row — and with it the window — to 1342 px, forcing
+        # a minimum width no 1920 px display could satisfy once the sidebar and
+        # the other footer controls were added on.
+        self.range_label.setWordWrap(True)
+        self.range_label.setMinimumWidth(140)
         self.range_label.setStyleSheet(f"color:{theme.TEXT_MUTED}; font-size:11px;")
         foot.addWidget(self.range_label, 1)
-        self.mark_spikes = QCheckBox("Mark raw spikes")
+        self.mark_spikes = QCheckBox("Mark spikes")
         self.mark_spikes.setChecked(False)
         self.mark_spikes.setToolTip(
             "Ring the raw samples the conditioning flattened — the excursions "
@@ -336,12 +390,16 @@ class PreprocessPage(BasePage):
         self.spike_mark_nsigma.valueChanged.connect(self._schedule)
         foot.addWidget(self.spike_mark_nsigma)
 
-        self.show_raw = QCheckBox("Show raw overlay")
+        self.show_raw = QCheckBox("Raw overlay")
         self.show_raw.setChecked(True)
         self.show_raw.setToolTip(
             "Draw the unprocessed channel behind the result, as its true "
-            "min/max envelope — every sample is represented, so the processed "
-            "line can be seen sitting through the middle of the raw band.")
+            "min/max envelope — every sample is represented, so the red "
+            "median line can be seen sitting through the middle of the raw "
+            "band, the FAMOS way.\n"
+            "Blue = raw reach, red = sanitized centre line. At full-run zoom "
+            "some of the gap is the on-screen reduction; zoom in and both "
+            "converge on the true samples.")
         self.show_raw.toggled.connect(self._schedule)
         foot.addWidget(self.show_raw)
         self.famos_btn = QPushButton("Validate vs FAMOS…")
@@ -592,6 +650,29 @@ class PreprocessPage(BasePage):
                     or s.remove_outliers or s.moderate_spikes or s.bridge_gaps
                     or s.resample_factor > 1)
 
+    def _proc_label(self, s: PreprocessSettings, active: bool) -> str:
+        """Legend text for the red trace — the step that actually produced it.
+
+        Three cases, and they are not interchangeable: the FAMOS recipe from the
+        imc config file (either re-applied here or already baked in by the
+        pipeline), a manual preview the operator dialled in, or sanitisation
+        with no smoothing at all. Labelling the last two "FAMOS" is how a plot
+        starts lying about what it shows.
+        """
+        ch = self.channel_combo.currentText()
+        if not active or self.famos_auto.isChecked():
+            # Either the recipe is re-applied live, or the study data on screen
+            # is the pipeline's own FAMOS output. Same operator either way.
+            return f"sanitized — FAMOS {_famos_op(ch)}"
+        manual = []
+        if s.apply_filter:
+            manual.append(f"FiltLP({s.filter_order}, {s.filter_cutoff:g} Hz)")
+        if s.smooth_width_s > 0:
+            manual.append(f"smo({s.smooth_width_s:g} s)")
+        if manual:
+            return "preview — " + " → ".join(manual)
+        return "sanitized — no smoothing"
+
     def _update(self, *_) -> None:
         if self._data.size == 0:
             return
@@ -619,35 +700,42 @@ class PreprocessPage(BasePage):
         npts = _plot_points(self.canvas)
         src = "raw" if have_raw else ("study data" if self._conditioned else "raw")
 
-        # The FAMOS view: two plain traces, blue raw underneath and red sanitized
-        # over it. The raw's spikes need no marker of their own — they *are* the
-        # blue excursions standing outside the red, which is exactly how FAMOS
-        # shows what the conditioning took off.
+        # The FAMOS view: the raw as its full min→max reach in blue, and the
+        # conditioned channel as a single median centre line in red over it.
+        # The raw's spikes need no marker of their own — they *are* the blue
+        # excursions standing outside the red, which is how FAMOS shows what
+        # the conditioning took off.
+        yr = ymark = None
         if not active and not have_raw:
             # Without a stored raw, "before" and "after" are the same array.
             # Drawing it twice in two colours is not an empty comparison, it is
             # a misleading one. One trace, named for what it is.
-            tp, yp = _trace(t_proc, proc, npts)
+            tp, yp = _envelope_line(t_proc, proc, npts)
             ax.plot(tp, yp, color=_RAW_COLOR, linewidth=0.7, label=src)
         else:
             if self.show_raw.isChecked():
-                tr, yr = _trace(t, raw, npts)
-                ax.plot(tr, yr, color=_RAW_COLOR, linewidth=0.7, label=src)
-            tp, yp = _trace(t_proc, proc, npts)
-            # Red goes on top, thinner and semi-transparent: at full-run zoom both
-            # traces are dense min/max strokes, so an opaque red drawn second
-            # simply paints the blue out.
-            ax.plot(tp, yp, color=_PROC_COLOR, linewidth=0.55, alpha=0.7,
-                    label="sanitized" + (" (FAMOS)" if self.famos_auto.isChecked() else ""))
+                tr, yr = _envelope_line(t, raw, npts)
+                # Underneath and slightly held back, so the red stays readable
+                # through the densest stretches of the band.
+                ax.plot(tr, yr, color=_RAW_COLOR, linewidth=0.6, alpha=0.55,
+                        zorder=1, label=src)
+            tp, yp = _median_line(t_proc, proc, npts)
+            # Red on top, opaque and a touch heavier: it is one thin line now,
+            # not a second band, so it no longer needs transparency to keep the
+            # blue visible — and transparency would only wash it out.
+            ax.plot(tp, yp, color=_PROC_COLOR, linewidth=1.0, zorder=3,
+                    solid_joinstyle="round", solid_capstyle="round",
+                    label=self._proc_label(s, active))
             # Optional, off by default: ring the removed excursions. FAMOS does
             # not do this, so it stays opt-in for when the blue-vs-red reading is
             # too dense to pick them out by eye.
             if self.mark_spikes.isChecked() and proc.size == raw.size:
                 ts, ys, n_spikes = _spikes(t, raw, proc, self.spike_mark_nsigma.value())
                 if ts.size:
+                    ymark = ys
                     ax.plot(ts, ys, linestyle="none", marker="o", markersize=3.0,
                             markerfacecolor="none", markeredgecolor="#ffd166",
-                            markeredgewidth=0.8, alpha=0.9,
+                            markeredgewidth=0.8, alpha=0.9, zorder=4,
                             label=f"raw spikes removed ({n_spikes:,})")
 
         ax.set_title(self._recipe_note(self.channel_combo.currentText()),
@@ -657,18 +745,29 @@ class PreprocessPage(BasePage):
             ax.set_xlim(float(t[0]), float(t[-1]))     # show the entire timeline
         ax.margins(x=0)
 
-        # Frame the raw band's robust extent — the same percentiles on both
-        # signals, so a rare artifact clips off-view rather than squashing the
-        # whole trace flat, and the processed band is never cropped by a scale
-        # chosen from the raw alone.
-        fp = proc[np.isfinite(proc)]
+        # Frame what is actually on screen: the red centre line, widened to the
+        # raw envelope when the overlay is on. Framing on the full-resolution
+        # processed array instead would leave the median line floating in a band
+        # of empty space, since the extremes that set those percentiles are
+        # precisely what the median drops. Robust percentiles either way, so a
+        # rare artifact clips off-view rather than squashing the trace flat.
+        fp = yp[np.isfinite(yp)]
         if fp.size:
             lo, hi = np.percentile(fp, 0.2), np.percentile(fp, 99.8)
-            if self.show_raw.isChecked():
-                fr = raw[np.isfinite(raw)]
+            if yr is not None:
+                fr = yr[np.isfinite(yr)]
                 if fr.size:
-                    lo = min(lo, float(np.percentile(fr, 0.2)))
-                    hi = max(hi, float(np.percentile(fr, 99.8)))
+                    lo = min(lo, float(np.percentile(fr, 0.5)))
+                    hi = max(hi, float(np.percentile(fr, 99.5)))
+            if ymark is not None:
+                # With the overlay off the red line is the only thing setting the
+                # scale, and the rings sit by definition outside it — every one
+                # of them would clip off-view. Same robust percentiles, so one
+                # freak artifact still cannot flatten the trace.
+                fm = ymark[np.isfinite(ymark)]
+                if fm.size:
+                    lo = min(lo, float(np.percentile(fm, 1.0)))
+                    hi = max(hi, float(np.percentile(fm, 99.0)))
             pad = 0.15 * (hi - lo) if hi > lo else 1.0
             ax.set_ylim(lo - pad, hi + pad)
         ax.legend(fontsize=8, facecolor=theme.SURFACE, labelcolor=theme.TEXT, framealpha=0.9)
