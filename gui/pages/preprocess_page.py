@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt, QTimer, QThread, Signal, QObject, QEvent
 from PySide6.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QFormLayout, QComboBox, QDoubleSpinBox, QSpinBox,
     QCheckBox, QLabel, QPushButton, QScrollArea, QFileDialog, QMessageBox,
-    QApplication, QAbstractSpinBox,
+    QApplication, QAbstractSpinBox, QSlider,
 )
 
 from gui import theme
@@ -155,6 +155,29 @@ def _envelope_line(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POI
     return tt, yy
 
 
+def _density_style(n_samples: int, npts: int) -> tuple:
+    """``(raw_alpha, raw_lw, proc_lw)`` scaled by how many samples share a pixel.
+
+    A min→max stroke means something different at 13 samples per pixel than at
+    600. In the first case it is a resolvable event and deserves full ink; in
+    the second it is a density smear whose height is set by the two rarest
+    samples in the bucket, and drawn at the same weight it fills the axes and
+    buries the conditioned line underneath it — which is exactly what makes the
+    full-recording view look vague.
+
+    So the raw's weight falls as the crowd grows and the conditioned line gains
+    a little, keeping the pair legible at every span. Nothing is hidden: the
+    envelope still spans the true min and max, it is just quieter when a single
+    stroke is standing in for hundreds of samples.
+    """
+    per_px = max(1.0, n_samples / max(1, npts))
+    # log scale: the interesting range spans 1 -> ~1000 samples per pixel
+    f = float(np.clip(np.log10(per_px) / 3.0, 0.0, 1.0))
+    raw_alpha = 0.75 - 0.55 * f          # 0.75 sparse -> 0.20 dense
+    raw_lw = 0.70 - 0.30 * f             # 0.70       -> 0.40
+    proc_lw = 0.95 + 0.35 * f            # 0.95       -> 1.30
+    return raw_alpha, raw_lw, proc_lw
+
 def _median_line(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POINTS):
     """The conditioned channel as FAMOS draws it — one clean centre line.
 
@@ -255,6 +278,31 @@ class _WheelGuard(QObject):
         if self._area is not None:
             QApplication.sendEvent(self._area.viewport(), ev)
         return True                                    # never reaches the widget
+
+
+class _ChannelLoadWorker(QThread):
+    """Reads one channel's raw and sanitized columns off the UI thread.
+
+    processed_data.csv is tens to hundreds of MB and pandas has to scan all of
+    it to pull a single column, so doing this inline froze the whole window for
+    seconds on every channel change. The read itself is not much faster here —
+    it just stops being the user's problem.
+    """
+    done = Signal(str, object, object, object, object)   # ch, t, y, t_raw, y_raw
+
+    def __init__(self, proc_path, raw_path, ch: str):
+        super().__init__()
+        self.proc_path, self.raw_path, self.ch = proc_path, raw_path, ch
+
+    def run(self):
+        t = y = t_raw = y_raw = None
+        try:
+            t, y = PreprocessPage._read_channel(self.proc_path, self.ch)
+            if self.raw_path is not None:
+                t_raw, y_raw = PreprocessPage._read_channel(self.raw_path, self.ch)
+        except Exception:                                  # noqa: BLE001
+            pass
+        self.done.emit(self.ch, t, y, t_raw, y_raw)
 
 
 class _FamosCheckWorker(QThread):
@@ -421,6 +469,35 @@ class PreprocessPage(BasePage):
         self.plot = PlotPanel(height=3.6)
         self.canvas = self.plot.canvas
         preview.layout().addWidget(self.plot, 1)
+
+        # Span control. A 5,552 s recording across ~950 px is 585 samples per
+        # pixel: every faithful reduction of it is a dense block, so the trace
+        # reads as vague no matter how it is drawn. That is a resolution limit,
+        # not a drawing bug, and the only real fix is to stop showing the whole
+        # recording at once. A 120 s span puts ~12 samples on each pixel, where
+        # individual events are actually resolvable.
+        span_row = QHBoxLayout()
+        span_row.addWidget(QLabel("Span:"))
+        self.window_combo = QComboBox()
+        for label, secs in (("30 s", 30.0), ("120 s", 120.0), ("600 s", 600.0),
+                            ("Full recording", 0.0)):
+            self.window_combo.addItem(label, secs)
+        self.window_combo.setCurrentIndex(1)              # 120 s
+        self.window_combo.setToolTip(
+            "How much of the recording to show at once.\n"
+            "The full run puts hundreds of samples on every pixel, so detail is "
+            "unresolvable however it is drawn; a shorter span is what makes the "
+            "raw-vs-sanitized difference legible.")
+        self.window_combo.currentIndexChanged.connect(self._on_window_changed)
+        span_row.addWidget(self.window_combo)
+        self.window_slider = QSlider(Qt.Horizontal)
+        self.window_slider.setRange(0, 1000)
+        self.window_slider.setValue(0)
+        self.window_slider.setToolTip("Scroll the span through the recording.")
+        self.window_slider.valueChanged.connect(self._schedule)
+        span_row.addWidget(self.window_slider, 1)
+        preview.layout().addLayout(span_row)
+
         foot = QHBoxLayout()
         self.range_label = QLabel("Full recording — use the toolbar to zoom/pan.")
         # Word wrap is what lets this shrink. A QLabel with wrapping off reports
@@ -499,6 +576,10 @@ class PreprocessPage(BasePage):
         self._data = np.array([])
         self._raw = None                 # true unconditioned channel, if kept
         self._raw_time = None
+        self._cache = {}                 # (study, channel) -> loaded arrays
+        self._workers = set()            # keep QThreads alive while running
+        self._pending_channel = None
+        self._full_span = 0.0            # length of the loaded recording (s)
         self._fs = 100.0
         self._syncing = False
         self._conditioned = False
@@ -591,7 +672,7 @@ class PreprocessPage(BasePage):
         if self.channel_combo.count():
             self._load_channel(self.channel_combo.currentText())
         else:
-            self.canvas.clear(); self.canvas.draw()
+            self.canvas.clear(); self.canvas.draw_idle()
             self.stats_label.setText("No processed data for this study.")
     def _channel_names(self) -> list:
         """Every channel this screen can preprocess — the processed CSV's own
@@ -638,11 +719,44 @@ class PreprocessPage(BasePage):
     def _load_channel(self, ch: str) -> None:
         if not ch or not self.study or not self.study.processed_csv.exists():
             return
-        t, y = self._read_channel(self.study.processed_csv, ch)
-        if y is None:
+        key = (str(self.study.path), ch)
+        hit = self._cache.get(key)
+        if hit is not None:
+            self._apply_loaded(ch, *hit)
             return
+        # Off the UI thread. Reading a single column still costs seconds on a
+        # multi-hundred-MB export, so the window has to stay live through it.
+        self.range_label.setText(f"Loading {ch}…")
+        raw_path = (self.study.raw_csv
+                    if getattr(self.study, "has_raw", False) else None)
+        self._pending_channel = ch
+        worker = _ChannelLoadWorker(self.study.processed_csv, raw_path, ch)
+        worker.done.connect(self._on_channel_loaded)
+        worker.finished.connect(lambda w=worker: self._workers.discard(w))
+        self._workers.add(worker)          # a GC'd QThread would kill the read
+        worker.start()
+
+    def _on_channel_loaded(self, ch, t, y, t_raw, y_raw) -> None:
+        if y is None:
+            self.range_label.setText(f"Could not read {ch}.")
+            return
+        # A slow read for a channel the user has already navigated away from
+        # must not overwrite what is now on screen.
+        if ch != self._pending_channel:
+            return
+        self._cache[(str(self.study.path), ch)] = (t, y, t_raw, y_raw)
+        if len(self._cache) > 12:                       # bounded, ~12 channels
+            self._cache.pop(next(iter(self._cache)))
+        self._apply_loaded(ch, t, y, t_raw, y_raw)
+
+    def _apply_loaded(self, ch, t, y, t_raw, y_raw) -> None:
         # Red is the pipeline's own sanitized output, not a second pass over it.
         self._data = y
+        # Longest of the two: sanitisation drops rows, so the processed array
+        # ends earlier than the raw and would under-report the recording length.
+        self._full_span = max(
+            float(t[-1]) if t is not None and t.size else 0.0,
+            float(t_raw[-1]) if t_raw is not None and t_raw.size else 0.0)
         if t is not None:
             self._time = t
             dt = np.nanmedian(np.diff(t[:1000])) if t.size > 2 else 0.01
@@ -655,12 +769,10 @@ class PreprocessPage(BasePage):
         # drop rows, so the two frames are not guaranteed to be the same length
         # and index-aligning them would slide one against the other.
         self._raw = self._raw_time = None
-        if getattr(self.study, "has_raw", False):
-            tr, yr = self._read_channel(self.study.raw_csv, ch)
-            if yr is not None:
-                self._raw = yr
-                self._raw_time = (tr if tr is not None
-                                  else np.arange(yr.size) / self._fs)
+        if y_raw is not None:
+            self._raw = y_raw
+            self._raw_time = (t_raw if t_raw is not None
+                              else np.arange(y_raw.size) / self._fs)
 
         # The recipe is per-channel (smo 0.1 for forces, FiltLP+smo 0.5 for
         # Latacc, passthrough for GPS), so the controls have to follow the
@@ -668,6 +780,46 @@ class PreprocessPage(BasePage):
         # ingestion — otherwise the panel describes the previous channel.
         self._apply_recipe_to_controls(ch)
         self._update()
+    def _on_window_changed(self, *_) -> None:
+        """Span changed — the slider only matters when the span is a window."""
+        full = not self.window_combo.currentData()
+        self.window_slider.setEnabled(not full)
+        self._schedule()
+
+    def _view_span(self) -> float:
+        """Seconds to display, or 0 for the whole recording."""
+        try:
+            return float(self.window_combo.currentData() or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _view_range(self, t_full: np.ndarray) -> tuple:
+        """``(t0, t1)`` of the visible window, from the span and slider."""
+        if t_full is None or t_full.size == 0:
+            return 0.0, 0.0
+        start, end = float(t_full[0]), float(t_full[-1])
+        span = self._view_span()
+        if span <= 0 or span >= (end - start):
+            return start, end
+        frac = self.window_slider.value() / 1000.0
+        t0 = start + frac * ((end - start) - span)
+        return t0, t0 + span
+
+    @staticmethod
+    def _clip(t: np.ndarray, y: np.ndarray, t0: float, t1: float):
+        """Slice a trace to the visible window, keeping the two in step.
+
+        Clipping before the screen-width reduction is the point: reducing the
+        whole recording and *then* zooming the axes would still average hundreds
+        of samples into each plotted point and show the same smear, just wider.
+        """
+        if t is None or y is None or t.size == 0:
+            return t, y
+        i0, i1 = np.searchsorted(t, (t0, t1))
+        i0 = max(0, int(i0) - 1)
+        i1 = min(t.size, int(i1) + 1)
+        return t[i0:i1], y[i0:i1]
+
     def _schedule(self, *_) -> None:
         if self._syncing:
             return
@@ -860,6 +1012,14 @@ class PreprocessPage(BasePage):
                                     if self._stages_active(s) else (t, raw, self._fs))
         active = self._stages_active(s)
 
+        # Clip to the visible span before reducing, so the reduction spends its
+        # ~950 buckets on what is actually on screen.
+        t_view0, t_view1 = self._view_range(t if t is not None else t_proc)
+        t, raw = self._clip(t, raw, t_view0, t_view1)
+        t_proc, proc = self._clip(t_proc, proc, t_view0, t_view1)
+        if proc is None or proc.size == 0:
+            return
+
         ax = self.canvas.ax
         self.canvas.clear()
         npts = _plot_points(self.canvas)
@@ -875,20 +1035,23 @@ class PreprocessPage(BasePage):
             # Without a stored raw, "before" and "after" are the same array.
             # Drawing it twice in two colours is not an empty comparison, it is
             # a misleading one. One trace, named for what it is.
+            _a, _lw, _ = _density_style(proc.size, npts)
             tp, yp = _envelope_line(t_proc, proc, npts)
-            ax.plot(tp, yp, color=_RAW_COLOR, linewidth=0.7, label=src)
+            ax.plot(tp, yp, color=_RAW_COLOR, linewidth=_lw, alpha=_a, label=src)
         else:
+            raw_alpha, raw_lw, proc_lw = _density_style(
+                raw.size if raw is not None else proc.size, npts)
             if self.show_raw.isChecked():
                 tr, yr = _envelope_line(t, raw, npts)
-                # Underneath and slightly held back, so the red stays readable
-                # through the densest stretches of the band.
-                ax.plot(tr, yr, color=_RAW_COLOR, linewidth=0.6, alpha=0.55,
-                        zorder=1, label=src)
+                # Underneath, and held back in proportion to how many samples
+                # each stroke is standing in for.
+                ax.plot(tr, yr, color=_RAW_COLOR, linewidth=raw_lw,
+                        alpha=raw_alpha, zorder=1, label=src)
             tp, yp = _median_line(t_proc, proc, npts)
             # Red on top, opaque and a touch heavier: it is one thin line now,
             # not a second band, so it no longer needs transparency to keep the
             # blue visible — and transparency would only wash it out.
-            ax.plot(tp, yp, color=_PROC_COLOR, linewidth=1.0, zorder=3,
+            ax.plot(tp, yp, color=_PROC_COLOR, linewidth=proc_lw, zorder=3,
                     solid_joinstyle="round", solid_capstyle="round",
                     label=self._proc_label(s, ch, have_raw, sanitizing))
             # Optional, off by default: ring the removed excursions. FAMOS does
@@ -908,8 +1071,9 @@ class PreprocessPage(BasePage):
         unit = _channel_unit(ch)
         ax.set_xlabel("Time (s)")
         ax.set_ylabel(f"{ch} ({unit})" if unit else ch)
-        if t.size:
-            ax.set_xlim(float(t[0]), float(t[-1]))     # show the entire timeline
+        # The span, not the clipped array's own ends — _clip keeps a sample
+        # either side so the trace runs to the edges rather than stopping short.
+        ax.set_xlim(t_view0, t_view1)
         ax.margins(x=0)
 
         # Frame what is actually on screen: the red centre line, widened to the
@@ -939,14 +1103,19 @@ class PreprocessPage(BasePage):
             ax.set_ylim(lo - pad, hi + pad)
         ax.legend(fontsize=8, facecolor=theme.SURFACE, labelcolor=theme.TEXT, framealpha=0.9)
         self.canvas.fig.tight_layout()
-        self.canvas.draw()
+        # draw_idle coalesces repaints: dragging a spinbox queues one
+        # repaint instead of one full 83 ms render per tick.
+        self.canvas.draw_idle()
 
         if t.size:
             note = ("  ·  already FAMOS-conditioned at ingestion"
                     if self._conditioned else "")
+            # Samples-per-pixel is the number that decides whether the trace can
+            # be read at all, so state it rather than leaving it to be guessed.
+            per_px = max(1.0, raw.size / max(1, npts))
             self.range_label.setText(
-                f"Full recording: 0 – {t[-1]:.0f} s  ·  {raw.size:,} samples"
-                f"{note}  ·  use the toolbar to zoom/pan.")
+                f"Showing {t_view0:.0f} – {t_view1:.0f} s of {self._full_span:.0f} s"
+                f"  ·  {raw.size:,} samples  ·  ~{per_px:.0f} per pixel{note}")
 
         a, b = summary_stats(raw), summary_stats(proc)
         self.stats_label.setText(

@@ -18,6 +18,13 @@ from dtt.reporting.report_builder import build_report
 
 logger = logging.getLogger("pipeline")
 
+# Full float repr writes ~18 characters for a value the WFT resolved to about
+# five: processed_data.csv came to 269 MB, and pandas has to scan every one of
+# those bytes to pull a single column, so the GUI paid 2.5 s per channel switch.
+# Six significant figures halves the file and the read time, and costs 5e-3 daN
+# on values around 800 - four orders below the sensor's own noise floor.
+CSV_FLOAT_FORMAT = "%.6g"
+
 
 def _setup_logging(config: RunConfig) -> None:
     log_path = config.logs_dir / "pipeline.log"
@@ -70,7 +77,7 @@ def _write_raw_csv(raw_frame, config, metadata, scale_meta) -> None:
                 out[c] = _pd.to_numeric(out[c], errors="coerce") / divisor
 
     path = config.run_output_dir / "raw_data.csv"
-    out.to_csv(path, index=False)
+    out.to_csv(path, index=False, float_format=CSV_FLOAT_FORMAT)
     logger.info("Raw (unconditioned) data saved: %s  (%d rows, %d channels, "
                 "scaled by 1/%g)", path, len(out), len(out.columns) - 1, divisor)
 
@@ -200,7 +207,7 @@ def run(
     # Publish the frame every later stage actually analyses — and that the GUI
     # re-reads as "study data". Saving before stage 4 shipped the raw frame.
     processed_csv = config.run_output_dir / "processed_data.csv"
-    df.to_csv(processed_csv, index=False)
+    df.to_csv(processed_csv, index=False, float_format=CSV_FLOAT_FORMAT)
     logger.info("Processed data saved: %s  (%d rows)", processed_csv, len(df))
 
     logger.info("[5/9]  Statistical Analysis")
