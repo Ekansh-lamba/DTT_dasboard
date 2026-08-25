@@ -18,6 +18,7 @@ from dtt.config import (
     FIGURE_DPI,
     RunConfig,
 )
+from dtt.analysis.plot_style import draw_histogram
 
 logger = logging.getLogger(__name__)
 
@@ -175,14 +176,7 @@ def _plot_single_histogram(ax, vals, weights, bins, xlim, ch, mode, total_m, col
             ylabel = "% Samples (no speed data)"
         total_label = f"{np.nansum(w_plot):.1f} %"
 
-    ax.bar(
-        (bins[:-1] + bins[1:]) / 2.0,
-        np.histogram(vals, bins=bins, weights=w_plot)[0],
-        width=(bins[1] - bins[0]),
-        color=col,
-        edgecolor="none",
-        alpha=0.82,
-    )
+    draw_histogram(ax, vals, bins, weights=w_plot, color=col)
     if xlim:
         ax.set_xlim(xlim)
     ax.set_xlabel("Force (daN)", fontsize=8)

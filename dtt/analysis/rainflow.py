@@ -21,6 +21,7 @@ from dtt.config import (
     FIGURE_DPI,
     RunConfig,
 )
+from dtt.analysis.plot_style import draw_histogram
 
 logger = logging.getLogger(__name__)
 
@@ -180,8 +181,11 @@ def generate_rainflow(df: pd.DataFrame, config: RunConfig) -> None:
             _style_ax(ax2)
             if len(rng_rep) > 0:
                 bin_edges = np.linspace(0, float(np.percentile(rng_rep, 99)), 35)
-                ax2.hist(rng_rep, bins=bin_edges, density=True, alpha=0.72,
-                         color=col, edgecolor="none")
+                # Range is |from - to|, never negative by construction, so this
+                # is always the one-sided case: no forced symmetric bell, a
+                # boundary-reflected KDE anchored at 0.
+                draw_histogram(ax2, rng_rep, bin_edges, color=col,
+                               bar_is_density=True, boundary=0.0)
                 ax2.axvline(p95_val, color="#FFFFFF", linewidth=1.8, linestyle="--",
                             label=f"P95: {p95_val:.0f} daN")
             ax2.set_title(f"{ch}  –  Range Distribution", color=col, fontsize=8, fontweight="bold")

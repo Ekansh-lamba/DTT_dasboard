@@ -343,3 +343,77 @@ band-limited, which is the FAMOS-correct order. `resample()`'s
 `mode="antialias"` (scipy `decimate`) path exists in `preprocessing.py` but
 grepping the whole tree found no caller that ever sets `resample_mode` to
 anything but the default `"famos"` (plain stride). No code change needed.
+
+## Step 2 — Histogram restyle (2026-08-25)
+
+**New file** `dtt/analysis/plot_style.py`: `detect_shape`, `banded_colors`,
+`draw_histogram` — one shared helper for every histogram in the app.
+**Extended** `dtt/analysis/auc.py::kde_curve` with optional `weights` (so the
+curve matches a distance-/percentage-weighted histogram, not a plain sample
+count) and `reflect_boundary` (the standard reflection method: mirror data
+about the boundary, fit on the pooled set, fold back and double — a
+boundary-corrected KDE that doesn't droop toward zero right at a hard bound).
+Backward compatible: default args reproduce the old unweighted, unreflected
+curve exactly, so `auc_grid`'s existing callers (the comparison-page charts)
+are unaffected.
+
+**Wired into** `dtt/analysis/histograms.py::_plot_single_histogram` (replaced
+the flat `ax.bar` call) and `dtt/analysis/rainflow.py::generate_rainflow`'s
+range-distribution panel (replaced `ax2.hist(..., density=True)`, passing
+`bar_is_density=True, boundary=0.0` since a rainflow range is `|from-to|`
+and can never be negative — always the one-sided case with a genuine bound).
+**Left out of scope, per your call**: the two-series overlay comparison
+charts in `dtt/comparison_io.py` / `gui/pages/comparison_page.py` — they
+already have their own purpose-built KDE-fill comparison style and the
+single-distribution bands/bell don't have a natural two-series extension.
+
+**Design, condensed:**
+- `detect_shape`: `"one_sided"` if the data's low edge sits within 10% of its
+  own range from 0 (a hard bound, like rainflow range), **or** if
+  `|weighted skew| > 1.0` (a skewed-but-not-bounded force channel) —
+  otherwise `"symmetric"`.
+- `banded_colors`: 5 bands from a darkened to a lightened version of the
+  channel's *own* colour (not a fixed palette), so the restyle doesn't
+  break the existing wheel-colour coding used throughout the app. Symmetric
+  bands by `|z|` at the brief's edges (0.5/1/1.5/2 sigma); one-sided bands
+  by quantile position instead (distance-from-centre isn't meaningful for a
+  distribution that only goes one way).
+- Mean line: drawn (white, `axvline`) only for `"symmetric"`.
+- KDE curve (red, `PLOT_COLORS["danger"]`): scaled to the bars' own units —
+  a density integrates to 1 against the weights (or the sample count when
+  unweighted), so `density * bin_width * total_weight` matches "weighted
+  sum per bin" bars (the force histograms) and a raw `density` matches
+  bars that are already `density=True` (rainflow).
+
+**Bug found and fixed during validation, not in the original design**: my
+first cut always reflected the one-sided curve around the plotted axis's
+left edge when the caller didn't pass an explicit `boundary`. That's correct
+for rainflow (0 is a real physical bound) but wrong for a force channel that
+tests one-sided purely from **skew** — there the axis edge is just wherever
+percentile-trimming happened to start the plot, not a real boundary, and
+reflecting around it invents density that isn't there. Fixed: reflection
+only happens when the caller passes an explicit `boundary` (rainflow does,
+`histograms.py` doesn't); a skewed-but-unbounded channel gets a **plain**
+(unreflected) KDE instead, which still follows the actual skewed shape with
+no symmetry assumption, it just skips the edge correction there's no real
+edge to correct.
+
+**Validation**: a synthetic normal + exponential smoke test confirmed both
+branches render as intended (scratch dir, not committed) before wiring into
+the real draw sites. Then ran `generate_histograms` + `generate_rainflow`
+end to end on a synthetic multi-channel frame built from
+`data/Fx_raw_cut.csv`'s real (noisy, genuinely bimodal) Fx trace:
+- `hist_distance_FL_Fx.png` (skewed/bimodal, real data) — bands and a
+  plain KDE follow the actual double-hump shape rather than forcing a bell
+  onto it; classified `one_sided` by skew even though it isn't hard-bounded,
+  confirming the skew path works, not just the boundary path.
+- `hist_distance_FL_Fz.png` (same skew-by-construction in this synthetic
+  test, since Fz was derived from the same Fx trace) — confirmed the
+  boundary-reflection fix: no droop/distortion at the plotted left edge
+  after switching to a plain KDE for this case.
+- `rainflow_FL.png` bottom row (`FL_Fx/Fy/Fz` range distributions) — genuine
+  one-sided-with-a-real-bound case: curve correctly peaks at/near x=0
+  without drooping toward zero, matching the true density right at the
+  boundary. P95 line and damage annotation (untouched by the restyle) still
+  render correctly alongside.
+Both target archetypes confirmed against real data before moving on.

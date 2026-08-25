@@ -44,7 +44,9 @@ class AucComparison:
                 f"{self.pct_normal_cur:.1f}% within band")
 
 
-def kde_curve(data: np.ndarray, x_grid: np.ndarray) -> np.ndarray:
+def kde_curve(data: np.ndarray, x_grid: np.ndarray,
+             weights: Optional[np.ndarray] = None,
+             reflect_boundary: Optional[float] = None) -> np.ndarray:
     """Gaussian KDE over ``x_grid``, evaluated from **all** of ``data``.
 
     A direct ``scipy.gaussian_kde`` is O(n_samples x n_grid), which is unusable
@@ -57,28 +59,65 @@ def kde_curve(data: np.ndarray, x_grid: np.ndarray) -> np.ndarray:
     O(n) in the samples and independent of the grid, while keeping the bandwidth
     computed from the true ``n``. It agrees with the exact full-data KDE to ~1e-6
     and runs in milliseconds.
+
+    ``weights``, if given, makes this a *weighted* density (e.g. per-sample
+    distance) — the result is normalised so it integrates to 1 against the
+    weights, not the sample count, which is what lets it sit over a
+    distance-weighted histogram rather than a plain sample-count one.
+
+    ``reflect_boundary``, if given, applies the standard reflection method for
+    a one-sided distribution bounded at that value (mirror the data about the
+    boundary, fit on the pooled original+mirror set, fold back and double).
+    Without it a hard-bounded distribution (range >= 0, say) gets a curve that
+    droops toward zero density right at the boundary, which is wrong — the
+    true density does not have to vanish there.
     """
     from scipy.ndimage import gaussian_filter1d
 
     data = np.asarray(data, dtype=float)
-    data = data[np.isfinite(data)]
+    finite = np.isfinite(data)
+    w = None
+    if weights is not None:
+        w = np.asarray(weights, dtype=float)
+        finite &= np.isfinite(w)
+    data = data[finite]
+    if w is not None:
+        w = w[finite]
     n = data.size
     if n < 2 or x_grid.size < 2:
         return np.zeros_like(x_grid)
     std = float(np.std(data))
     if std <= 0:
         return np.zeros_like(x_grid)
-
     bw = (n ** (-1.0 / 5.0)) * std                 # Scott's rule on the FULL data
+
+    fit_data, fit_w, fold = data, w, 1.0
+    lo_fit, hi_fit = x_grid[0], x_grid[-1]
+    if reflect_boundary is not None:
+        mirror = 2.0 * reflect_boundary - data
+        fit_data = np.concatenate([data, mirror])
+        fit_w = np.concatenate([w, w]) if w is not None else None
+        # extend the fit range symmetrically about the boundary so the
+        # mirrored mass has somewhere to land before folding back
+        span = hi_fit - reflect_boundary
+        lo_fit = reflect_boundary - span
+        fold = 2.0
+
     n_bins = max(2000, x_grid.size * 4)
-    edges = np.linspace(x_grid[0], x_grid[-1], n_bins + 1)
-    hist, edges = np.histogram(data, bins=edges, density=True)
+    edges = np.linspace(lo_fit, hi_fit, n_bins + 1)
+    hist, edges = np.histogram(fit_data, bins=edges, weights=fit_w,
+                               density=(fit_w is None))
     width = edges[1] - edges[0]
     if width <= 0:
         return np.zeros_like(x_grid)
+    if fit_w is not None:
+        total_w = float(fit_w.sum())
+        if total_w <= 0:
+            return np.zeros_like(x_grid)
+        hist = hist / (total_w * width)            # weighted density, area 1
     smoothed = gaussian_filter1d(hist, sigma=bw / width, mode="nearest")
     centers = (edges[:-1] + edges[1:]) / 2.0
-    return np.interp(x_grid, centers, smoothed)
+    return np.interp(x_grid, centers, smoothed) * fold
 
 
 def compare_distributions(reference: np.ndarray, current: np.ndarray
