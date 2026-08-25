@@ -88,6 +88,11 @@ def apply_filter(df: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
         despike_net=getattr(config, "despike_net", False),
         despike_net_nsigma=getattr(config, "despike_net_nsigma", 6.0),
         despike_net_window_s=getattr(config, "despike_net_window_s", 0.011),
+        transient_enabled=getattr(config, "transient_despike", False),
+        transient_pct=getattr(config, "transient_despike_pct", 20.0),
+        transient_window_s=getattr(config, "transient_despike_window_s", 1.0),
+        transient_noise_floor_mult=getattr(config, "transient_despike_noise_floor_mult", 10.0),
+        transient_max_spike_frac=getattr(config, "transient_despike_max_spike_frac", 0.4),
         emit_lpf_columns=False,
     )
     treated = count_conditioned(applied)

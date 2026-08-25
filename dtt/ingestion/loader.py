@@ -329,7 +329,12 @@ def load_raw_folder(folder: Path, config: RunConfig) -> Tuple[pd.DataFrame, dict
                             despike_hw_cutoff_hz=getattr(config, "despike_hw_cutoff_hz", 200.0),
                             despike_net=getattr(config, "despike_net", False),
                             despike_net_nsigma=getattr(config, "despike_net_nsigma", 6.0),
-                            despike_net_window_s=getattr(config, "despike_net_window_s", 0.011))
+                            despike_net_window_s=getattr(config, "despike_net_window_s", 0.011),
+                            transient_despike=getattr(config, "transient_despike", False),
+                            transient_despike_pct=getattr(config, "transient_despike_pct", 20.0),
+                            transient_despike_window_s=getattr(config, "transient_despike_window_s", 1.0),
+                            transient_despike_noise_floor_mult=getattr(config, "transient_despike_noise_floor_mult", 10.0),
+                            transient_despike_max_spike_frac=getattr(config, "transient_despike_max_spike_frac", 0.4))
     return _finalize_raw(df, imeta, config, folder.name)
 
 
@@ -348,5 +353,10 @@ def load_raw_files(files, config: RunConfig) -> Tuple[pd.DataFrame, dict]:
                            despike_hw_cutoff_hz=getattr(config, "despike_hw_cutoff_hz", 200.0),
                            despike_net=getattr(config, "despike_net", False),
                            despike_net_nsigma=getattr(config, "despike_net_nsigma", 6.0),
-                           despike_net_window_s=getattr(config, "despike_net_window_s", 0.011))
+                           despike_net_window_s=getattr(config, "despike_net_window_s", 0.011),
+                           transient_despike=getattr(config, "transient_despike", False),
+                           transient_despike_pct=getattr(config, "transient_despike_pct", 20.0),
+                           transient_despike_window_s=getattr(config, "transient_despike_window_s", 1.0),
+                           transient_despike_noise_floor_mult=getattr(config, "transient_despike_noise_floor_mult", 10.0),
+                           transient_despike_max_spike_frac=getattr(config, "transient_despike_max_spike_frac", 0.4))
     return _finalize_raw(df, imeta, config, f"{len(files)} files")

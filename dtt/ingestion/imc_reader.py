@@ -384,7 +384,11 @@ def _assemble(channels, target_fs, source, famos: bool = True,
               deglitch: bool = False, despike: bool = False,
               despike_rail_min_run: int = 3, despike_dropout_max_run: int = 5,
               despike_hw_cutoff_hz: float = 200.0, despike_net: bool = False,
-              despike_net_nsigma: float = 6.0, despike_net_window_s: float = 0.011
+              despike_net_nsigma: float = 6.0, despike_net_window_s: float = 0.011,
+              transient_despike: bool = False, transient_despike_pct: float = 20.0,
+              transient_despike_window_s: float = 1.0,
+              transient_despike_noise_floor_mult: float = 10.0,
+              transient_despike_max_spike_frac: float = 0.4
               ) -> tuple[pd.DataFrame, dict]:
     if not channels:
         return pd.DataFrame(), {"error": "no imc channels found"}
@@ -436,6 +440,11 @@ def _assemble(channels, target_fs, source, famos: bool = True,
             despike_net=despike_net,
             despike_net_nsigma=despike_net_nsigma,
             despike_net_window_s=despike_net_window_s,
+            transient_enabled=transient_despike,
+            transient_pct=transient_despike_pct,
+            transient_window_s=transient_despike_window_s,
+            transient_noise_floor_mult=transient_despike_noise_floor_mult,
+            transient_max_spike_frac=transient_despike_max_spike_frac,
             emit_lpf_columns=False)
     elif step > 1:
         df = df.iloc[::step].reset_index(drop=True)
@@ -465,7 +474,11 @@ def read_folder(folder: Path, target_fs: Optional[float] = None,
                 despike: bool = False, despike_rail_min_run: int = 3,
                 despike_dropout_max_run: int = 5, despike_hw_cutoff_hz: float = 200.0,
                 despike_net: bool = False, despike_net_nsigma: float = 6.0,
-                despike_net_window_s: float = 0.011
+                despike_net_window_s: float = 0.011,
+                transient_despike: bool = False, transient_despike_pct: float = 20.0,
+                transient_despike_window_s: float = 1.0,
+                transient_despike_noise_floor_mult: float = 10.0,
+                transient_despike_max_spike_frac: float = 0.4
                 ) -> tuple[pd.DataFrame, dict]:
     """Read every channel in an imc raw folder into one time-aligned DataFrame.
 
@@ -473,7 +486,9 @@ def read_folder(folder: Path, target_fs: Optional[float] = None,
     native rate followed by ``red()`` — is applied as the data is assembled, so
     the frame matches a FAMOS export rather than a raw stride-decimation.
     ``despike`` (off by default) runs the physical-rule despike ahead of it;
-    see :func:`dtt.preprocessing.despike`.
+    see :func:`dtt.preprocessing.despike`. ``transient_despike`` (off by
+    default) runs the manual's "20% within 1s" rule after conditioning; see
+    :func:`dtt.preprocessing.detect_transient_spikes`.
     """
     folder = resolve_raw_folder(folder)
     spans = read_imcdbc(folder)
@@ -484,7 +499,12 @@ def read_folder(folder: Path, target_fs: Optional[float] = None,
                      despike_dropout_max_run=despike_dropout_max_run,
                      despike_hw_cutoff_hz=despike_hw_cutoff_hz,
                      despike_net=despike_net, despike_net_nsigma=despike_net_nsigma,
-                     despike_net_window_s=despike_net_window_s)
+                     despike_net_window_s=despike_net_window_s,
+                     transient_despike=transient_despike,
+                     transient_despike_pct=transient_despike_pct,
+                     transient_despike_window_s=transient_despike_window_s,
+                     transient_despike_noise_floor_mult=transient_despike_noise_floor_mult,
+                     transient_despike_max_spike_frac=transient_despike_max_spike_frac)
 
 
 def read_files(files, target_fs: Optional[float] = None,
@@ -492,7 +512,11 @@ def read_files(files, target_fs: Optional[float] = None,
                despike: bool = False, despike_rail_min_run: int = 3,
                despike_dropout_max_run: int = 5, despike_hw_cutoff_hz: float = 200.0,
                despike_net: bool = False, despike_net_nsigma: float = 6.0,
-               despike_net_window_s: float = 0.011
+               despike_net_window_s: float = 0.011,
+               transient_despike: bool = False, transient_despike_pct: float = 20.0,
+               transient_despike_window_s: float = 1.0,
+               transient_despike_noise_floor_mult: float = 10.0,
+               transient_despike_max_spike_frac: float = 0.4
                ) -> tuple[pd.DataFrame, dict]:
     """Read a specific list of imc ``.raw`` files (a subset of a recording)."""
     files = [Path(f) for f in files]
@@ -503,4 +527,9 @@ def read_files(files, target_fs: Optional[float] = None,
                      despike_dropout_max_run=despike_dropout_max_run,
                      despike_hw_cutoff_hz=despike_hw_cutoff_hz,
                      despike_net=despike_net, despike_net_nsigma=despike_net_nsigma,
-                     despike_net_window_s=despike_net_window_s)
+                     despike_net_window_s=despike_net_window_s,
+                     transient_despike=transient_despike,
+                     transient_despike_pct=transient_despike_pct,
+                     transient_despike_window_s=transient_despike_window_s,
+                     transient_despike_noise_floor_mult=transient_despike_noise_floor_mult,
+                     transient_despike_max_spike_frac=transient_despike_max_spike_frac)

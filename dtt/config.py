@@ -151,6 +151,11 @@ class RunConfig:
     despike_net:             bool  = False # optional loose adaptive hampel net for gross leftovers
     despike_net_nsigma:      float = 6.0
     despike_net_window_s:    float = 0.011
+    transient_despike:              bool  = False  # manual's "20% within 1s" rule, post-smooth/decimate
+    transient_despike_pct:           float = 20.0
+    transient_despike_window_s:      float = 1.0
+    transient_despike_noise_floor_mult: float = 10.0
+    transient_despike_max_spike_frac:   float = 0.4
     miner_exponent: float = RAINFLOW_MINER
     output_dir:     Path  = field(default_factory=lambda: OUTPUTS_DIR)
     run_channels:   object = None      # ChannelSet-derived config, built at run time

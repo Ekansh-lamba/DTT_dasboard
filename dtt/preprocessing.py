@@ -562,6 +562,85 @@ def detect_narrow_spikes(x: np.ndarray, fs: float, hw_cutoff_hz: float = 200.0
     return flag & finite
 
 
+def detect_transient_spikes(x: np.ndarray, fs: float, window_s: float = 1.0,
+                            pct_threshold: float = 20.0,
+                            noise_floor_mult: float = 10.0,
+                            max_spike_frac: float = 0.4) -> np.ndarray:
+    """Despike rule 4 — sudden transient: encodes the manual step "a sudden
+    spike of more than 20% within a 1 second time frame should be adjusted
+    or eliminated."
+
+    Runs on the **already-conditioned** (smo/FiltLP'd, typically decimated)
+    signal, not the raw one — see :func:`despike` and the pipeline notes for
+    why. The manual's "20% within 1 second" describes what an operator saw
+    on a conditioned FAMOS trace; measured against genuinely raw 1kHz
+    samples the same test flags 25-90% of the channel, because raw
+    sample-to-sample jitter routinely exceeds 20% of a local median on its
+    own — that is ordinary raw noise, not a transient, and running this rule
+    post-smooth is what keeps it a transient detector instead of a second,
+    unwanted smoothing pass.
+
+    A plain "changed more than 20%" amplitude rule is still dangerous even on
+    conditioned data: real WFT road load genuinely swings far more than 20%
+    in a second when the tyre hits an event, and that swing is the real
+    signal the fatigue analysis exists to see. And "20% of what" is
+    undefined for a force channel that crosses zero. Both are handled the
+    way rule 3 handles its own version of this: measure deviation against
+    the **local trend** (a `window_s`-wide rolling median, robust to the
+    spike itself), require the excursion to be **narrow**, and gate on the
+    *larger* of 20% of the local level and `noise_floor_mult` times the
+    channel's own robust local noise scale, so the effective threshold can
+    never sit below the channel's own noise (the same fix that kept rule 3
+    from over-flagging ordinary chatter) while still reading as "20%"
+    everywhere the local level is not itself close to the noise floor.
+
+    "Narrow" is *not* "under `window_s`" — validated on a real recording, a
+    genuine ~0.7 s braking/cornering swing (smooth, monotonic, real load) is
+    still well under a 1 s cap and would pass a bare "< window_s" test. A
+    real spike-and-return is a small fraction of the window it's measured
+    against; `max_spike_frac` caps the flagged run at that fraction of
+    `window_s` (0.3 s of a 1 s window by default), which is what actually
+    tells a sudden manual-spec transient apart from an ordinary, wider real
+    load excursion that merely happens to resolve inside a second too.
+
+    Complements :func:`detect_narrow_spikes` rather than replacing it: that
+    rule catches sub-2-sample glitches of any size; this one catches wider
+    (but still short) transients that also clear the threshold.
+    """
+    arr = np.asarray(x, dtype=float)
+    n = arr.size
+    finite = np.isfinite(arr)
+    win = max(3, int(round(window_s * fs)))
+    if win % 2 == 0:
+        win += 1
+    max_run = max(1, int(round(max_spike_frac * window_s * fs)))
+    if n < win or finite.sum() < 8:
+        return np.zeros(n, dtype=bool)
+
+    probe = arr
+    if not finite.all():
+        idx = np.arange(n)
+        probe = np.interp(idx, idx[finite], arr[finite])
+    trend = median_filter(probe, size=win, mode="nearest")
+    resid = probe - trend
+    sign = np.sign(resid)
+
+    pct_level = (pct_threshold / 100.0) * np.abs(trend)     # "20% of local level", absolute units
+    noise_scale = 1.4826 * np.median(np.abs(resid[finite])) if finite.any() else 0.0
+    eff_threshold = np.maximum(pct_level, noise_floor_mult * noise_scale)
+
+    change = np.ones(n, dtype=bool)
+    change[1:] = sign[1:] != sign[:-1]
+    starts = np.where(change)[0]
+    ends = np.append(starts[1:], n)
+    flag = np.zeros(n, dtype=bool)
+    for s, e in zip(starts, ends):
+        if sign[s] != 0 and (e - s) < max_run and \
+           np.max(np.abs(resid[s:e])) >= np.max(eff_threshold[s:e]):
+            flag[s:e] = True
+    return flag & finite
+
+
 def despike(x: np.ndarray, fs: float,
            rail_min_run: int = 3, dropout_max_run: int = 5,
            hw_cutoff_hz: float = 200.0,
@@ -580,6 +659,11 @@ def despike(x: np.ndarray, fs: float,
     ``net``, off by default, optionally runs a very loose adaptive
     :func:`hampel_deglitch` pass afterwards for gross leftovers the physical
     rules miss.
+
+    The manual's "20% within 1 second" transient rule (:func:`detect_transient_spikes`)
+    is deliberately **not** included here — it runs post-smooth, on the
+    already-conditioned signal, wired separately into
+    :func:`apply_famos_recipe`. See that function's docstring for why.
 
     Returns ``(despiked, pct_flagged)``.
     """
@@ -696,6 +780,11 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
                        time_column: str = "Time",
                        emit_lpf_columns: bool = True,
                        blank_dead_s: float = 1.0,
+                       transient_enabled: bool = False,
+                       transient_pct: float = 20.0,
+                       transient_window_s: float = 1.0,
+                       transient_noise_floor_mult: float = 10.0,
+                       transient_max_spike_frac: float = 0.4,
                        ) -> Tuple[pd.DataFrame, float, Dict[str, str]]:
     """Apply the full imc/FAMOS recipe to every column of ``df``.
 
@@ -716,6 +805,17 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
     rules, see its docstring) ahead of ``deglitch`` and the FAMOS steps. Off
     by default so existing callers are unaffected; the ``despike_*`` kwargs
     tune its thresholds and its optional loose adaptive net.
+
+    ``transient_enabled`` runs :func:`detect_transient_spikes` (the manual's
+    "20% within 1 second" rule) **after** FiltLP/smo/red, on the
+    already-conditioned, decimated signal — not with the other despike rules
+    on the raw one. Measured against literal raw 1kHz samples, the same 20%
+    test flags 25-90% of the channel (ordinary raw jitter routinely exceeds
+    20% of a very local median); the manual's language describes what an
+    operator saw on a conditioned trace, so this rule runs where that
+    reading is actually true. Off by default; only channels the recipe
+    actually smoothed/filtered are eligible (a passthrough channel is
+    untouched by this too).
 
     With ``emit_lpf_columns``, the pre-smoothing ``Latacc_LPF`` intermediate is
     exported too, matching the column set of a FAMOS CSV.
@@ -776,6 +876,18 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
         if decimate_factor > 1:
             y = famos_red(y, decimate_factor)
             steps.append(f"red({decimate_factor})")
+        if transient_enabled and (s.apply_filter or s.smooth_width_s > 0):
+            # Post-conditioning, on whatever this channel ended up at (the
+            # decimated rate, once red() has run) -- see the docstring for
+            # why this rule specifically does not run on the raw signal.
+            t_flag = detect_transient_spikes(
+                y, new_fs, window_s=transient_window_s,
+                pct_threshold=transient_pct,
+                noise_floor_mult=transient_noise_floor_mult,
+                max_spike_frac=transient_max_spike_frac)
+            if t_flag.any():
+                y = _interpolate_over(y, t_flag, np.isfinite(y), 1.0)
+                steps.append(f"transient({100.0 * t_flag.sum() / max(1, t_flag.size):.3g}%)")
         out[col] = y
         applied[col] = " -> ".join(steps) if steps else "passthrough"
 

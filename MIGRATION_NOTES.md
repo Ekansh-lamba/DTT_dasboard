@@ -417,3 +417,79 @@ end to end on a synthetic multi-channel frame built from
   boundary. P95 line and damage annotation (untouched by the restyle) still
   render correctly alongside.
 Both target archetypes confirmed against real data before moving on.
+
+## Step 3 — 20% transient spike rule (2026-08-25)
+
+**New function** `dtt/preprocessing.py::detect_transient_spikes` — despike
+rule 4, encoding the manual step "a sudden spike of more than 20% within a
+1 second time frame should be adjusted or eliminated." Wired into
+`apply_famos_recipe()` as new `transient_*` kwargs, threaded through
+`RunConfig`, `signal_processor.py::apply_filter` (CSV path),
+`imc_reader.py::_assemble`/`read_folder`/`read_files`, and `loader.py`'s two
+raw call sites — same chain as the despike round. Off by default; existing
+callers unaffected (confirmed: `apply_famos_recipe` output is byte-identical
+with the new kwargs omitted).
+
+**Placement pivot, mid-implementation — this rule does NOT run on the raw
+channel, unlike the other three despike rules.** The plan called for it
+raw, alongside rail/dropout/narrow-spike. First validation against raw
+1kHz data flagged 25-90% of the channel regardless of window/threshold
+tuning — not a tuning problem, a scale mismatch: raw 1kHz WFT samples
+routinely deviate more than 20% from even a 21ms local median purely from
+ordinary sample-to-sample jitter (confirmed: 25.7% of samples already
+exceed 20% of a 21ms trend with the width test removed entirely). Only
+inflating the percent threshold to ~300-500% brought the raw-data flag
+rate down to a believable range, which would have gutted the rule's
+stated intent. Flagged this to you mid-step rather than picking an
+arbitrary threshold; you confirmed the fix: **run this rule on the
+already-conditioned (smo/FiltLP'd, decimated) signal instead** — the
+manual's "20% within 1 second" describes what an operator saw on a
+conditioned FAMOS trace, not literal raw samples — while the three raw-stage
+rules (rail, dropout, sub-hardware-width) stay exactly where they were,
+since they catch true digitizer glitches that only show up before
+smoothing. `despike()` no longer carries a `transient_*` parameter; the new
+rule runs as its own step in `apply_famos_recipe`, after `red()`, gated to
+channels the recipe actually smoothed/filtered.
+
+**Design, once moved to conditioned data:**
+- Local trend = `window_s`-wide (default 1.0s) rolling median.
+- Threshold = the *larger* of `pct_threshold`% (default 20%) of the local
+  trend level, and `noise_floor_mult` (default 10.0) times the channel's own
+  robust local noise scale (`1.4826 * median(|residual|)`) — same fix
+  pattern as rule 3's noise floor, needed for the same reason: a bare 20%
+  test, even on conditioned 100Hz data, still flagged ordinary chatter at
+  low multipliers.
+- **Second bug found during validation**: "narrow" was originally defined as
+  "run length `< window_s`" — i.e. anything under the full second. A real,
+  smooth, monotonic ~0.7s braking/cornering swing found in the actual
+  reference recording passed that test and got flagged, which is exactly
+  the "eating real peaks" failure mode the brief warned about. Fixed by
+  decoupling the width cap from the trend window: `max_spike_frac` (default
+  0.4) caps the flagged run at that fraction of `window_s` (0.4s of a 1s
+  window), which is what actually distinguishes a spike-and-return from an
+  ordinary wider real excursion that happens to resolve inside a second too.
+- Replacement via the existing `_interpolate_over` helper, never dropped.
+
+**Validation** (real channel, `data/Fx_raw_cut.csv::Fx_red_cut`, the 100Hz
+decimated ground truth, n=3001, defaults):
+- Baseline (unmodified real data): **0 samples flagged (0%)** — the clean
+  FAMOS-equivalent output has no artifacts of this kind, as expected.
+- Injected genuine narrow transient (Gaussian bump, ~0.3s, 800 daN peak,
+  added to the real trace): **34 samples flagged and correctly bridged** —
+  confirms the rule can actually catch something, not just stay silent.
+- Injected wide sustained ramp (same 800 daN peak, ~0.7s): **0 samples
+  flagged** — confirms real load of comparable size survives when it's wide
+  enough, the core safety requirement.
+- Full pipeline smoke test (`apply_famos_recipe(..., transient_enabled=True)`
+  with the same injected narrow transient): correctly caught post-`red()`,
+  reported as `transient(0.433%)` in the `applied` log — well within "a
+  small fraction of a percent."
+- Before/after plots saved to
+  `C:\Users\ekans\AppData\Local\Temp\claude\d--Apollo-Project-Main\85ae4cfe-2ec7-4f03-816e-3a7bcff1fc60\scratchpad\transient_spike_validation.png`
+  (scratch dir, not committed): the injected spike is cleanly bridged; the
+  wide real swing is untouched, before/after traces overlapping exactly.
+- Re-ran the Step 1/2-era smo/FiltLP/red ground-truth checks after these
+  edits: identical numbers to before (5.6e-3 N / 5.0e-6 / 0.0 respectively)
+  — confirms the verified recipe math in `preprocessing.py` wasn't disturbed.
+- `pytest tests/` — 37/38 pass, same single pre-existing failure as last
+  round (missing gitignored proprietary file, unrelated).
