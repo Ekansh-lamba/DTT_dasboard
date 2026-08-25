@@ -1,0 +1,283 @@
+[
+  {
+    "study": "20260615_131715",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": 0.190477,
+    "max_divergence": 0.190398,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.008479
+  },
+  {
+    "study": "20260615_132220",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": 0.190477,
+    "max_divergence": 0.190398,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.008479
+  },
+  {
+    "study": "20260615_145853",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": 0.118365,
+    "max_divergence": 0.118316,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.0495
+  },
+  {
+    "study": "20260619_212413",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": 0.190477,
+    "max_divergence": 0.190398,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.008479
+  },
+  {
+    "study": "20260703_154052",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": 0.190477,
+    "max_divergence": 0.190398,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.008479
+  },
+  {
+    "study": "20260707_182929",
+    "status": "no processed_data.csv"
+  },
+  {
+    "study": "20260707_183157",
+    "status": "no processed_data.csv"
+  },
+  {
+    "study": "20260707_193025",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": -0.03,
+    "max_divergence": 0.029988,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.017831
+  },
+  {
+    "study": "20260707_200926",
+    "status": "no processed_data.csv"
+  },
+  {
+    "study": "20260712_233309",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": -0.03,
+    "max_divergence": 0.029988,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.017831
+  },
+  {
+    "study": "20260723_184608",
+    "status": "no processed_data.csv"
+  },
+  {
+    "study": "20260723_184740",
+    "status": "unaffected",
+    "reason": "no FiltLP'd channel present"
+  },
+  {
+    "study": "20260728_113209",
+    "status": "unaffected",
+    "reason": "no FiltLP'd channel present"
+  },
+  {
+    "study": "20260728_114725",
+    "status": "unaffected",
+    "reason": "no FiltLP'd channel present"
+  },
+  {
+    "study": "20260728_133250",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 97.8475,
+    "x0_proxy": 106.24,
+    "max_divergence": 106.192085,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.991,
+    "pct_of_record": 0.023496
+  },
+  {
+    "study": "20260730_212940",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": -0.033555,
+    "max_divergence": 0.033541,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.017831
+  },
+  {
+    "study": "20260730_213222",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": -0.033555,
+    "max_divergence": 0.033541,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.017831
+  },
+  {
+    "study": "20260730_220230",
+    "status": "unaffected",
+    "reason": "no FiltLP'd channel present"
+  },
+  {
+    "study": "20260812_112412",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": -0.033555,
+    "max_divergence": 0.033541,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.017831
+  },
+  {
+    "study": "20260821_095520",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": -0.032915,
+    "max_divergence": 0.032901,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.017845
+  },
+  {
+    "study": "Clean_RLDA_2026",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 99.9931,
+    "x0_proxy": 0.418757,
+    "max_divergence": 0.418583,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.023466
+  },
+  {
+    "study": "Demo_4wheel_test",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 97.8475,
+    "x0_proxy": 106.24,
+    "max_divergence": 106.192085,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.991,
+    "pct_of_record": 0.023496
+  },
+  {
+    "study": "Demo_dat_test",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": -0.03,
+    "max_divergence": 0.029988,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.017831
+  },
+  {
+    "study": "FIX_VERIFY",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": -0.033555,
+    "max_divergence": 0.033541,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.017845
+  },
+  {
+    "study": "Raw_Ingest_Test",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 97.8475,
+    "x0_proxy": 106.24,
+    "max_divergence": 106.192085,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.991,
+    "pct_of_record": 0.023496
+  },
+  {
+    "study": "Refactor_4wheel",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": 0.118365,
+    "max_divergence": 0.118316,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.0495
+  },
+  {
+    "study": "Refactor_6wheel",
+    "status": "unaffected",
+    "reason": "no FiltLP'd channel present"
+  },
+  {
+    "study": "Synthetic_Mixed_Demo",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": 0.118365,
+    "max_divergence": 0.118316,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.0495
+  },
+  {
+    "study": "Test_Run_Final",
+    "status": "AFFECTED",
+    "channel": "Latacc",
+    "fs_hz": 100.0,
+    "x0_proxy": 0.190477,
+    "max_divergence": 0.190398,
+    "unit": "m/s^2",
+    "window_1e3_s": 0.45,
+    "window_1e6_s": 0.99,
+    "pct_of_record": 0.008479
+  }
+]

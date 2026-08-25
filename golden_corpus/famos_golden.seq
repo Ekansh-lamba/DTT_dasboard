@@ -1,0 +1,115 @@
+; ===========================================================================
+; GOLDEN CORPUS CAPTURE  --  imc FAMOS sequence
+; ---------------------------------------------------------------------------
+; Purpose: characterise FiltLP / smo / red exactly, so the Python replacement
+;          can be validated against FAMOS without a licence afterwards.
+;
+; RUN THIS ONCE. The trial is the only window in which this data can ever be
+; produced; everything else in the project can be redone later.
+;
+; This sequence deliberately uses ONLY the three operators already observed
+; working in your own file (imc coding_filtering_Channel mapping.txt):
+;     FiltLP(x, 0, 0, order, cutoff)
+;     smo(x, width_seconds)
+;     red(x, factor)
+; No synthesis functions, no helpers whose exact spelling could differ between
+; FAMOS versions. The test signals are generated in Python and imported, so
+; nothing here can fail on a function name.
+;
+; PREREQUISITE -- do the import first (see famos_golden_CHECKLIST.md):
+;   load golden_corpus/famos_golden_inputs.csv with dx = 0.001 s, so the
+;   following 8 channels exist in the FAMOS workspace:
+;       gc_impulse  gc_step  gc_dc  gc_chirp  gc_noise
+;       gc_sine_2p5  gc_sine_5p0  gc_sine_10p0
+; ===========================================================================
+
+
+; ---------------------------------------------------------------------------
+; STAGE 1: FiltLP only  -- identifies the filter and its initialisation
+; ---------------------------------------------------------------------------
+; Exactly the call from the production recipe:
+;     Latacc_LPF = FiltLP(Lat_acc, 0, 0, 4, 5)
+
+gc_impulse_lpf   = FiltLP(gc_impulse,   0, 0, 4, 5)
+gc_step_lpf      = FiltLP(gc_step,      0, 0, 4, 5)
+gc_dc_lpf        = FiltLP(gc_dc,        0, 0, 4, 5)
+gc_chirp_lpf     = FiltLP(gc_chirp,     0, 0, 4, 5)
+gc_noise_lpf     = FiltLP(gc_noise,     0, 0, 4, 5)
+gc_sine2p5_lpf   = FiltLP(gc_sine_2p5,  0, 0, 4, 5)
+gc_sine5p0_lpf   = FiltLP(gc_sine_5p0,  0, 0, 4, 5)
+gc_sine10p0_lpf  = FiltLP(gc_sine_10p0, 0, 0, 4, 5)
+
+
+; ---------------------------------------------------------------------------
+; STAGE 2: FiltLP -> smo  -- the intermediate after smoothing
+; ---------------------------------------------------------------------------
+; smo width 0.5 s, as the recipe uses for Latacc:
+;     Latacc = smo(Latacc_LPF, 0.5)
+
+gc_impulse_smo   = smo(gc_impulse_lpf,  0.5)
+gc_step_smo      = smo(gc_step_lpf,     0.5)
+gc_dc_smo        = smo(gc_dc_lpf,       0.5)
+gc_chirp_smo     = smo(gc_chirp_lpf,    0.5)
+gc_noise_smo     = smo(gc_noise_lpf,    0.5)
+gc_sine2p5_smo   = smo(gc_sine2p5_lpf,  0.5)
+gc_sine5p0_smo   = smo(gc_sine5p0_lpf,  0.5)
+gc_sine10p0_smo  = smo(gc_sine10p0_lpf, 0.5)
+
+; smo in isolation, straight off the raw input. This separates the two
+; operators: without it, every smo measurement is contaminated by FiltLP's
+; response and the two cannot be told apart.
+gc_impulse_smoonly = smo(gc_impulse,   0.5)
+gc_step_smoonly    = smo(gc_step,      0.5)
+gc_dc_smoonly      = smo(gc_dc,        0.5)
+gc_chirp_smoonly   = smo(gc_chirp,     0.5)
+gc_noise_smoonly   = smo(gc_noise,     0.5)
+
+; The force-channel width, 0.1 s. The production recipe applies this to all 24
+; WFT force/moment channels, so it needs characterising as much as 0.5 s does.
+gc_impulse_smo01   = smo(gc_impulse,   0.1)
+gc_step_smo01      = smo(gc_step,      0.1)
+gc_noise_smo01     = smo(gc_noise,     0.1)
+
+
+; ---------------------------------------------------------------------------
+; STAGE 3: FiltLP -> smo -> red  -- the full production chain
+; ---------------------------------------------------------------------------
+; red(x, 10), as the recipe applies it last:  cutdata = red(cutd, 10)
+; This is where the decimation PHASE is settled: which sample of each block of
+; ten survives. A wrong phase shows up as a fixed sample lag downstream.
+
+gc_impulse_red   = red(gc_impulse_smo,  10)
+gc_step_red      = red(gc_step_smo,     10)
+gc_dc_red        = red(gc_dc_smo,       10)
+gc_chirp_red     = red(gc_chirp_smo,    10)
+gc_noise_red     = red(gc_noise_smo,    10)
+gc_sine2p5_red   = red(gc_sine2p5_smo,  10)
+gc_sine5p0_red   = red(gc_sine5p0_smo,  10)
+gc_sine10p0_red  = red(gc_sine10p0_smo, 10)
+
+; red in isolation, on the raw impulse. With a single nonzero sample at a known
+; index, the surviving index states the decimation phase directly and with no
+; ambiguity at all -- this one channel answers the question by itself.
+gc_impulse_redonly = red(gc_impulse, 10)
+
+
+; ---------------------------------------------------------------------------
+; STAGE 4: the real recording  -- the matched raw/filtered pair
+; ---------------------------------------------------------------------------
+; This is the single most valuable capture here. Every validation so far has
+; been blocked because no FAMOS export ships a raw channel beside its filtered
+; form. Running the production chain on a real WFT record closes that gap.
+;
+; PREREQUISITE: load
+;   raw data in .dat format/2006-08-25 09-10-46 (1)/AccelY.raw
+; and make sure it is named  wft_accely  in the workspace.
+;
+; If the load fails or you are short of time, SKIP THIS BLOCK -- stages 1 to 3
+; are the ones that cannot be reconstructed later.
+
+wft_accely_lpf   = FiltLP(wft_accely, 0, 0, 4, 5)
+wft_accely_smo   = smo(wft_accely_lpf, 0.5)
+wft_accely_red   = red(wft_accely_smo, 10)
+
+; Same record through the force-channel path, for the smo(0.1) characterisation
+wft_accely_smo01 = smo(wft_accely, 0.1)

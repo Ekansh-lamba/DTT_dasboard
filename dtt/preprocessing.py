@@ -38,12 +38,16 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy.ndimage import median_filter, convolve1d
-from scipy.signal import butter, filtfilt, lfilter, decimate
+from scipy.ndimage import median_filter, convolve1d, uniform_filter1d
+from scipy.signal import butter, filtfilt, lfilter, decimate, sosfilt, sosfilt_zi
 
 from dtt.channels import COMPONENTS, parse_channel
 
 # ---------------------------------------------------------------- FAMOS recipe
+
+FILTER_INIT_FAMOS = "famos"                # step-response: zi = sosfilt_zi * x[0]
+FILTER_INIT_LEGACY = "legacy_zero_state"   # pre-2026-08 behaviour, reproduction only
+FILTER_INIT_DEFAULT = FILTER_INIT_FAMOS
 
 FAMOS_FORCE_SMOOTH_S = 0.1      # smo(FL_Fx1, 0.1)  — WFT forces & moments
 FAMOS_AUX_SMOOTH_S = 0.5        # smo(Latacc_LPF, 0.5), smo(Speed_kmph, 0.5)
@@ -97,6 +101,9 @@ class PreprocessSettings:
     filter_order: int = FAMOS_LPF_ORDER
     resample_factor: int = 1            # decimation factor (FAMOS red(x, 10))
     resample_mode: str = "famos"        # "famos" = red() stride | "antialias"
+    # FAMOS FiltLP initial conditions. "famos" = step-response (correct);
+    # "legacy_zero_state" reproduces pre-fix outputs and nothing else.
+    filter_init: str = FILTER_INIT_DEFAULT
 
 
 def famos_recipe(channel: str, decimate_factor: int = 1) -> PreprocessSettings:
@@ -149,42 +156,27 @@ def famos_smooth_window(fs: float, width_s: float) -> np.ndarray:
 
 
 def famos_smooth(x: np.ndarray, fs: float, width_s: float) -> np.ndarray:
-    """FAMOS ``smo(x, width_s)`` — exact triangular weighted moving average.
+    """FAMOS ``smo(x, width_s)`` -- delegates to :func:`famos.ops.smo`.
 
-    A single pass with the triangular kernel from :func:`famos_smooth_window`
-    (not the previous two cascaded box-cars, which reached only 99.995 % match
-    against a real FAMOS export because a boxcar-of-boxcars kernel is a coarser
-    triangle than the true one). Scored against ``data/Fx_raw_cut.csv``, this
-    single-kernel form matches FAMOS to max abs error 5.6e-3 N, r = 1.000000000.
-    Zero-phase, so no lag is introduced.
+    The maths lives in one place only. This module used to carry its own copy,
+    and a third lived in ``famos_repro.py``; they drifted apart on the edge
+    convention, which is exactly how a signal-processing codebase corrupts data
+    without anyone noticing -- two callers, two answers, both plausible.
 
-    NaN-safe and edge-shrinking: both gaps and the true start/end of the
-    array are treated as zero-weight regions and the kernel is renormalised
-    by the fraction of it that overlapped real data, rather than padding
-    with the edge value repeated. This keeps the ~0.25 s at each channel end
-    unbiased, at a progressively shorter effective window; the interior is
-    unaffected either way.
+    This wrapper keeps the lenient boundary behaviour existing callers (and the
+    GUI) rely on: a width below one sample, or a window longer than the record,
+    returns the input untouched rather than raising, because the GUI previews
+    arbitrary channels at arbitrary zoom and must not throw on a short one.
     """
-    if width_s <= 0:
-        return x
+    from famos import ops as _ops
+
     arr = np.asarray(x, dtype=float)
-    h = famos_smooth_window(fs, width_s)
-    if h.size <= 1 or arr.size < 2:
-        return arr.copy()
-
-    mask = np.isfinite(arr)
-    if not mask.any():
-        return arr.copy()
-
-    filled = np.where(mask, arr, 0.0)
-    w = mask.astype(float)
-    filled = convolve1d(filled, h, mode="constant", cval=0.0)
-    w = convolve1d(w, h, mode="constant", cval=0.0)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        out = filled / w
-    out[~np.isfinite(out)] = np.nan
-    out[~mask] = np.nan          # keep original gaps as gaps
-    return out
+    if width_s <= 0:
+        return arr
+    h = _ops.smo_kernel(width_s, fs)
+    if h.size <= 1 or h.size > arr.size or arr.size < 2:
+        return arr
+    return _ops.smo(arr, width_s, fs)
 
 
 # ------------------------------------------------------------------ FAMOS red
@@ -255,28 +247,36 @@ def resample(x: np.ndarray, factor: int, fs: float, mode: str = "famos"
 
 # --------------------------------------------------------------- FAMOS FiltLP
 
-def butterworth_lpf(x: np.ndarray, cutoff: float, order: int, fs: float) -> np.ndarray:
-    """FAMOS ``FiltLP(x, 0, 0, order, cutoff)`` — causal Butterworth low-pass.
+def butterworth_lpf(x: np.ndarray, cutoff: float, order: int, fs: float,
+                    init: str = FILTER_INIT_DEFAULT) -> np.ndarray:
+    """FAMOS ``FiltLP(x, 0, 0, order, cutoff)`` -- delegates to
+    :func:`famos.ops.filtlp`.
 
-    Causal, single-pass (``lfilter``) is the verified FAMOS convention: scored
-    against a matched raw-vs-processed FAMOS export (``data/Fx_raw_cut.csv``),
-    a single ``lfilter`` pass matches the FAMOS ``Lat_lpf`` column to 5e-6 max
-    abs error with r = 1.000000000. ``filtfilt`` (zero-phase, double filtering)
-    misses it by 0.66 and drops correlation to 0.93 — do not substitute it back
-    in. NaN-safe.
+    Confirmed against the imc FAMOS Function Reference: SvCharacter 0 is
+    Butterworth, coefficients come from a bilinear transformation, and
+    ``FiltLpZ`` is a *separate* "without phase shift" function -- so plain
+    ``FiltLP`` is single-pass causal by design, not by our choice.
+
+    ``init="famos"`` (default) is step-response initialisation, ``y[0] == x[0]``.
+    ``init="legacy_zero_state"`` exists solely to reproduce study outputs
+    published before that was fixed, and must never become the default.
+
+    As with :func:`famos_smooth`, the lenient boundary behaviour is kept for the
+    GUI's sake: a cutoff at or above Nyquist is clamped and a too-short record
+    is returned untouched, where the library core would raise.
     """
+    from famos import ops as _ops
+
+    if init not in (FILTER_INIT_FAMOS, FILTER_INIT_LEGACY):
+        raise ValueError(f"unknown filter init {init!r}; expected "
+                         f"{FILTER_INIT_FAMOS!r} or {FILTER_INIT_LEGACY!r}")
+    arr = np.asarray(x, dtype=float)
     nyq = 0.5 * fs
     if cutoff >= nyq:
         cutoff = nyq * 0.9
-    arr = x.astype(float).copy()
-    mask = np.isfinite(arr)
-    if mask.sum() < 4 * order:
+    if np.isfinite(arr).sum() < 4 * order:
         return arr
-    arr[~mask] = np.nanmean(arr[mask])
-    b, a = butter(order, cutoff / nyq, btype="low")
-    y = lfilter(b, a, arr)
-    y[~mask] = np.nan
-    return y
+    return _ops.filtlp(arr, cutoff, order, fs, init=init)
 
 
 famos_filtlp = butterworth_lpf
@@ -671,7 +671,8 @@ def apply_pipeline(t: np.ndarray, x: np.ndarray, fs: float, s: PreprocessSetting
     if s.bridge_gaps:
         t, y = bridge_gaps(t, y, fs, s.min_gap_s)
     if s.apply_filter:
-        y = butterworth_lpf(y, s.filter_cutoff, s.filter_order, fs)   # FiltLP
+        y = butterworth_lpf(y, s.filter_cutoff, s.filter_order, fs,
+                            init=s.filter_init)                # FiltLP
     if s.smooth_width_s > 0:
         y = famos_smooth(y, fs, s.smooth_width_s)                     # smo
     new_fs = fs
@@ -763,7 +764,8 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
             y = hampel_deglitch(y, fs, n_sigmas=deglitch_nsigma)
             steps.append("de-glitch")
         if s.apply_filter:
-            y = butterworth_lpf(y, s.filter_cutoff, s.filter_order, fs)
+            y = butterworth_lpf(y, s.filter_cutoff, s.filter_order, fs,
+                                init=s.filter_init)
             steps.append(f"FiltLP({s.filter_order},{s.filter_cutoff:g}Hz)")
             if emit_lpf_columns:
                 out[f"{col}_LPF"] = famos_red(y, decimate_factor)
@@ -815,3 +817,173 @@ def summary_stats(x: np.ndarray) -> dict:
         "max": float(np.max(finite)),
         "removed": int(len(x) - finite.size),
     }
+
+
+# ------------------------------------------------------- stationary / pause removal
+
+STOP_MIN_S = 5.0            # shorter than this is traffic, not a stop worth cutting
+STOP_WINDOW_S = 1.0         # rolling window the stationarity test looks through
+STOP_QUIET_FRAC = 0.10      # "quiet" = this fraction of the channel's own robust sigma
+STOP_MAX_FRAC = 0.60        # bail out rather than gut the recording
+
+
+def _rolling_std(a: np.ndarray, win: int) -> np.ndarray:
+    """Rolling standard deviation, O(n) via the mean of squares."""
+    arr = np.asarray(a, dtype=float)
+    fill = float(np.nanmedian(arr)) if np.isfinite(arr).any() else 0.0
+    arr = np.nan_to_num(arr, nan=fill, posinf=fill, neginf=fill)
+    m = uniform_filter1d(arr, win, mode="nearest")
+    m2 = uniform_filter1d(arr * arr, win, mode="nearest")
+    # m2 - m^2 is a difference of close numbers and can land just below zero
+    return np.sqrt(np.maximum(m2 - m * m, 0.0))
+
+
+def _runs_at_least(mask: np.ndarray, min_len: int) -> np.ndarray:
+    """Keep only the runs of True in ``mask`` lasting ``min_len`` samples or more."""
+    out = np.zeros(mask.size, dtype=bool)
+    if not mask.any():
+        return out
+    edges = np.flatnonzero(np.diff(np.r_[False, mask, False].astype(np.int8)))
+    for start, stop in zip(edges[0::2], edges[1::2]):
+        if (stop - start) >= min_len:
+            out[start:stop] = True
+    return out
+
+
+def detect_stops(x: np.ndarray, fs: float, min_stop_s: float = STOP_MIN_S,
+                 window_s: float = STOP_WINDOW_S,
+                 quiet_frac: float = STOP_QUIET_FRAC) -> np.ndarray:
+    """Boolean mask of samples where the channel carries no road input.
+
+    A parked vehicle still reads its static corner weight, so the test cannot be
+    on the *level* -- :func:`bridge_gaps` looks for a near-zero run and therefore
+    never sees a stop at all. What actually vanishes when the wheels stop turning
+    is the road input, so the measure is the **rolling standard deviation**: on
+    the reference recording it runs at 57 daN while driving and under 7 daN at a
+    standstill, an eight-fold separation that makes the threshold choice almost
+    free -- 0.05 sigma and 0.20 sigma pick out the same three stops.
+
+    Scoring against the channel's own robust sigma keeps it scale-free: it works
+    on newtons or decanewtons, a hatchback or a loaded truck, with no tuning.
+
+    Samples already blanked to NaN count as stopped. A dead sensor is not road
+    input either, and leaving them out would split one stop into two.
+    """
+    x = np.asarray(x, dtype=float)
+    if x.size == 0 or min_stop_s <= 0 or fs <= 0:
+        return np.zeros(x.size, dtype=bool)
+
+    finite = np.isfinite(x)
+    if finite.sum() < 8:
+        return np.zeros(x.size, dtype=bool)
+    med = np.median(x[finite])
+    sigma = 1.4826 * np.median(np.abs(x[finite] - med))
+    if not np.isfinite(sigma) or sigma <= 0:
+        return np.zeros(x.size, dtype=bool)      # a constant channel says nothing
+
+    win = max(3, int(round(window_s * fs)))
+    quiet = (_rolling_std(x, win) < quiet_frac * sigma) | ~finite
+    return _runs_at_least(quiet, max(1, int(round(min_stop_s * fs))))
+
+
+def detect_stops_from_speed(speed, fs: float, min_stop_s: float = STOP_MIN_S,
+                            moving_kph: float = 1.0):
+    """Stops straight from a speed channel, or ``None`` if it is unusable.
+
+    Preferred whenever the recording actually has speed, because it states
+    directly what the force channels only imply. Returns ``None`` for an absent
+    or all-zero channel -- the reference recording's ``Vehicle_Speed`` is exactly
+    that, which is why the force-dynamics route is not merely a fallback.
+    """
+    if speed is None:
+        return None
+    v = np.asarray(speed, dtype=float)
+    finite = np.isfinite(v)
+    if finite.sum() < 8 or float(np.max(np.abs(v[finite]))) <= moving_kph:
+        return None                          # never moves -> carries no information
+    stopped = (np.abs(np.nan_to_num(v)) < moving_kph) | ~finite
+    return _runs_at_least(stopped, max(1, int(round(min_stop_s * fs))))
+
+
+def remove_stops(t: np.ndarray, x: np.ndarray, fs: float,
+                 min_stop_s: float = STOP_MIN_S,
+                 window_s: float = STOP_WINDOW_S,
+                 quiet_frac: float = STOP_QUIET_FRAC,
+                 mask=None) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Excise stationary stretches and re-stitch time. Returns ``(t, x, seconds)``.
+
+    Pass ``mask`` to excise a decision made elsewhere -- that is how every channel
+    in a frame gets cut identically. Cutting each channel on its own evidence
+    would remove different samples from each and slide them out of sync, which is
+    considerably worse than leaving the stops in.
+    """
+    x = np.asarray(x, dtype=float)
+    if mask is None:
+        mask = detect_stops(x, fs, min_stop_s, window_s, quiet_frac)
+    if mask is None or not mask.any():
+        return t, x, 0.0
+    if mask.mean() > STOP_MAX_FRAC:
+        # Most of the recording reads as stationary: either the vehicle never
+        # really moved or the channel is flat. Cutting is not the right response
+        # to either, so hand back what came in.
+        return t, x, 0.0
+
+    keep = ~mask
+    removed_s = float(mask.sum()) / fs
+    x_out = x[keep]
+    start = float(t[0]) if t is not None and len(t) else 0.0
+    t_out = np.arange(x_out.size) / fs + start
+    return t_out, x_out, removed_s
+
+
+def remove_stops_frame(df: pd.DataFrame, fs: float,
+                       speed_column=None, time_column: str = "Time",
+                       min_stop_s: float = STOP_MIN_S,
+                       window_s: float = STOP_WINDOW_S,
+                       quiet_frac: float = STOP_QUIET_FRAC,
+                       ) -> Tuple[pd.DataFrame, dict]:
+    """Drop stationary stretches from every channel at once.
+
+    One mask decides for the whole frame -- taken from the speed channel when it
+    says anything, otherwise from a per-force-channel majority vote, so a single
+    noisy wheel cannot cut the recording on its own. Time is rebuilt at the
+    original spacing, leaving a continuous record with the stops closed up.
+    """
+    if df.empty or fs <= 0:
+        return df, {}
+
+    mask = None
+    basis = ""
+    if speed_column and speed_column in df.columns:
+        mask = detect_stops_from_speed(
+            pd.to_numeric(df[speed_column], errors="coerce").to_numpy(dtype=float),
+            fs, min_stop_s)
+        if mask is not None:
+            basis = "speed (%s)" % speed_column
+
+    if mask is None:
+        votes = [detect_stops(pd.to_numeric(df[c], errors="coerce").to_numpy(dtype=float),
+                              fs, min_stop_s, window_s, quiet_frac)
+                 for c in df.columns if c != time_column and is_wft_channel(c)]
+        if not votes:
+            return df, {}
+        # >= 0.5, so with an even channel count a half-and-half split still
+        # cuts. That is the wanted behaviour: when three of six wheels read as
+        # stationary it is usually because their sensor died, and half a frame
+        # of dead channel is not data worth keeping either.
+        mask = np.median(np.vstack(votes).astype(float), axis=0) >= 0.5
+        # the vote is per-sample; re-impose the duration rule on the consensus
+        mask = _runs_at_least(mask, max(1, int(round(min_stop_s * fs))))
+        basis = "force dynamics (%d channels)" % len(votes)
+
+    if not mask.any() or mask.mean() > STOP_MAX_FRAC:
+        return df, {"stops_removed": 0, "stop_seconds": 0.0, "stop_basis": basis}
+
+    n_stops = int(np.count_nonzero(np.diff(np.r_[False, mask].astype(np.int8)) == 1))
+    out = df.loc[~mask].reset_index(drop=True)
+    if time_column in out.columns:
+        start = float(df[time_column].iloc[0]) if len(df) else 0.0
+        out[time_column] = np.arange(len(out)) / fs + start
+    return out, {"stops_removed": n_stops,
+                 "stop_seconds": round(float(mask.sum()) / fs, 2),
+                 "stop_basis": basis}
