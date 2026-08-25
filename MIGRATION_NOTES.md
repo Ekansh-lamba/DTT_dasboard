@@ -493,3 +493,94 @@ decimated ground truth, n=3001, defaults):
   — confirms the verified recipe math in `preprocessing.py` wasn't disturbed.
 - `pytest tests/` — 37/38 pass, same single pre-existing failure as last
   round (missing gitignored proprietary file, unrelated).
+
+## Step 4 — Stop / stationary-period removal (2026-08-25)
+
+**Files:** `dtt/preprocessing.py::remove_stops_frame` (extended, new seam
+helpers `_stop_intervals`, `_seam_reference`, `_nudge_stop_boundaries`,
+`_blend_seams_inplace`), `dtt/config.py::RunConfig` (new `remove_stops`/
+`stop_*` fields), `dtt/pipeline.py` (new stage + `_find_speed_column` helper).
+`detect_stops`/`detect_stops_from_speed`/`remove_stops` (single-channel) were
+already correct from the previous round and are unchanged.
+
+**Amendments from you before starting, both implemented as specified:**
+
+1. **`processed_data.csv` is never overwritten with stop-removed data.**
+   `pipeline.py` still writes it from the full, canonical `df` right after
+   stage 4, exactly as before. A *separate* `stats_df` is built via
+   `remove_stops_frame` (only when `config.remove_stops` is set) and is the
+   only thing that changes: `compute_statistics` and `generate_rainflow` now
+   read `stats_df` instead of `df`; severity, histograms, heatmaps, boxplots,
+   and both CSVs (`processed_data.csv`, `raw_data.csv`) still read the full
+   `df`. Removed intervals are written to `metadata["stop_removal"]`
+   regardless of whether anything was actually cut. Reversible by
+   construction: turning `remove_stops` off is the only difference between
+   `stats_df` and `df`.
+2. **Rainflow before/after cycle-count and damage comparison added to
+   validation**, alongside an actual seam level plot (not an asserted
+   number) — see below.
+
+**Seam handling** (`remove_stops_frame`'s new `seam_search_s`/`seam_blend_s`
+kwargs, both against the *same* shared mask so every channel still cuts at
+identical indices):
+1. `_seam_reference` builds one robust-z-scored "how loaded is the frame"
+   signal from every force/moment channel jointly (never from an individual
+   channel, for the same reason the stop mask itself is one shared decision).
+2. `_nudge_stop_boundaries` extends each cut boundary (up to `seam_search_s`,
+   default 1.0 s, each side) to the nearest low-reference sample — "cut at a
+   quiet moment," the first line of defence against a join step.
+3. `_blend_seams_inplace` replaces a short stretch (`seam_blend_s`, default
+   0.2 s, each side) at whatever step survives the nudge with a straight
+   line, per channel — the backstop. Per your note: this is a small,
+   deliberate distortion of already-short stretches at each seam, an
+   acceptable default; worth revisiting only if a study turns out to have
+   many stops. Not changed now.
+
+**Validation — real data, not synthetic.** `data/WFT_Fx_fr.raw`'s
+1000 Hz `FR_Fx` channel, t=3100-3300 s (a window containing two genuine
+stationary stretches, confirmed against the recording's own rolling-σ
+signature), run through `apply_famos_recipe(..., despike_enabled=True,
+transient_enabled=True)` to 100 Hz — i.e. the actual target pipeline order
+(despike raw -> smo/FiltLP -> decimate), not a shortcut. Built a 4-channel
+frame (`FL/FR/RL/RR_Fx`, the real conditioned trace plus independent noise
+per wheel — physically reasonable since all four wheels stop simultaneously)
+with no speed column, exercising the force-dynamics-vote fallback path.
+
+**A debugging detour that turned into useful evidence.** The first pass
+skipped despike/transient entirely and found a rainflow damage ratio
+(after/before stop removal) of 0.38 — alarming, since "barely move the
+damage number" was the whole point. Traced it to a single ~900 daN spike
+sitting *inside* one of the detected stop intervals (visible in the raw
+trace, not a stop-removal artifact) that dominated the m=8 Miner-weighted
+damage sum on its own. Re-ran with the real target pipeline order
+(`despike_enabled=True, transient_enabled=True` — the raw-stage rules don't
+catch this one, it's ~150ms wide, `detect_transient_spikes`'s job, not
+`detect_narrow_spikes`'s) and the spike is gone from the conditioned trace
+before stop removal ever sees it. This is a genuine cross-check that the
+despike work from Steps 3/3-of-last-round and stop removal are pulling in
+the same direction, not fighting each other — validate stop removal with
+the artifacts it will actually run downstream of in production, not in
+isolation.
+
+**Final numbers** (full target pipeline, real data):
+
+| metric | value |
+|---|---|
+| window | 200 s (`data/WFT_Fx_fr.raw`, t=3100-3300s, conditioned to 100 Hz) |
+| stops found | 2 (`53.91-83.93s`, `87.25-144.21s`) |
+| removed | 86.98 s (43.5% of this deliberately stop-heavy test window) |
+| basis | force dynamics (4 channels), no speed column in this single-source test |
+| rainflow cycles | 4382 -> 1524 (most of the drop is near-zero-amplitude noise cycles from the dead stretches, which is exactly what should disappear) |
+| rainflow damage (m=8) | ratio after/before = **1.000000** |
+
+All 4 channels confirmed cut at identical indices (single shared mask via one
+`df.loc[keep]`, no NaNs introduced, row counts match across columns).
+Before/after traces, a zoomed seam level plot (before: raw step at the join;
+after: joined + blended, no visible step), and the rainflow comparison saved
+to
+`C:\Users\ekans\AppData\Local\Temp\claude\d--Apollo-Project-Main\85ae4cfe-2ec7-4f03-816e-3a7bcff1fc60\scratchpad\stop_removal_full_validation.png`
+(scratch dir, not committed).
+
+**Not done, out of scope per your original brief**: no GUI checkbox / CLI
+flag, same scope decision as despike and the transient rule — `RunConfig`
+fields and full pipeline wiring are in place, off by default.

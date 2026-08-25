@@ -4,7 +4,7 @@ import sys
 import time
 from pathlib import Path
 
-from dtt.config import RunConfig, TIME_COLUMN, N_TO_DAN_FACTOR
+from dtt.config import RunConfig, TIME_COLUMN, N_TO_DAN_FACTOR, SPEED_CANDIDATES
 from dtt.ingestion.loader import load_csv
 from dtt.validation.validator import validate
 from dtt.sanitization.sanitizer import sanitize
@@ -47,6 +47,19 @@ def _setup_logging(config: RunConfig) -> None:
         ],
     )
 
+
+
+def _find_speed_column(df):
+    """First usable speed-like column name, or None. Same candidate list
+    histograms.py searches, so stop removal and distance weighting agree
+    on which column is "the" speed channel for a given study."""
+    cols = {c.lower(): c for c in df.columns}
+    for name in SPEED_CANDIDATES:
+        if name in df.columns:
+            return name
+        if name.lower() in cols:
+            return cols[name.lower()]
+    return None
 
 
 def _force_frame(df, config):
@@ -210,8 +223,34 @@ def run(
     df.to_csv(processed_csv, index=False, float_format=CSV_FLOAT_FORMAT)
     logger.info("Processed data saved: %s  (%d rows)", processed_csv, len(df))
 
+    # Stop removal produces a *derived* series for rainflow and statistics
+    # only -- processed_data.csv above is already saved from the full `df`,
+    # which stays the canonical processed artifact. This keeps the feature
+    # reversible (nothing downstream of `df` itself depends on it) and keeps
+    # a stop-containing study's "study data" file showing everything that
+    # was actually measured.
+    stats_df = df
+    if getattr(config, "remove_stops", False):
+        from dtt.preprocessing import remove_stops_frame
+        speed_col = _find_speed_column(df)
+        moving_df, stop_meta = remove_stops_frame(
+            df, config.sampling_rate, speed_column=speed_col,
+            min_stop_s=getattr(config, "stop_min_s", 3.0),
+            moving_kph=getattr(config, "stop_speed_kph", 1.5),
+            seam_search_s=getattr(config, "stop_seam_search_s", 1.0),
+            seam_blend_s=getattr(config, "stop_seam_blend_s", 0.2))
+        metadata["stop_removal"] = stop_meta
+        if stop_meta.get("stops_removed"):
+            logger.info(
+                "Stop removal: %d stop(s), %.1fs removed (%s), basis=%s",
+                stop_meta["stops_removed"], stop_meta["stop_seconds"],
+                stop_meta.get("removed_intervals"), stop_meta.get("stop_basis"))
+            stats_df = moving_df
+        else:
+            logger.info("Stop removal enabled but found nothing to cut")
+
     logger.info("[5/9]  Statistical Analysis")
-    stats = compute_statistics(df, config)
+    stats = compute_statistics(stats_df, config)
 
     logger.info("[5b/9] Load Severity  (Gx, Gy, Gxy, DLC)")
     try:
@@ -241,7 +280,7 @@ def run(
 
     logger.info("[9/9]  Rainflow Analysis")
     try:
-        generate_rainflow(df, config)
+        generate_rainflow(stats_df, config)
     except Exception as exc:
         logger.error("Rainflow generation failed: %s", exc, exc_info=True)
 

@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -1048,18 +1048,106 @@ def remove_stops(t: np.ndarray, x: np.ndarray, fs: float,
     return t_out, x_out, removed_s
 
 
+def _stop_intervals(mask: np.ndarray) -> list:
+    """[(start, end), ...] for every contiguous True run in ``mask``."""
+    edges = np.flatnonzero(np.diff(np.r_[False, mask, False].astype(np.int8)))
+    return list(zip(edges[0::2].tolist(), edges[1::2].tolist()))
+
+
+def _seam_reference(df: pd.DataFrame, time_column: str) -> Optional[np.ndarray]:
+    """A single 1D 'how loaded is the frame right now' signal, built from every
+    force/moment channel jointly (robust z-score, averaged), used only to pick
+    *where* to cut -- never to decide *whether* to. One shared signal is what
+    keeps the nudge decision identical for every column, the same reason the
+    stop mask itself is one shared decision.
+    """
+    cols = [c for c in df.columns if c != time_column and is_wft_channel(c)]
+    if not cols:
+        return None
+    parts = []
+    for c in cols:
+        v = pd.to_numeric(df[c], errors="coerce").to_numpy(dtype=float)
+        finite = np.isfinite(v)
+        if finite.sum() < 8:
+            continue
+        med = np.median(v[finite])
+        mad = 1.4826 * np.median(np.abs(v[finite] - med))
+        scale = mad if mad > 0 else 1.0
+        parts.append(np.abs(np.nan_to_num((v - med) / scale)))
+    if not parts:
+        return None
+    return np.mean(np.vstack(parts), axis=0)
+
+
+def _nudge_stop_boundaries(mask: np.ndarray, ref: Optional[np.ndarray],
+                           search_n: int) -> np.ndarray:
+    """Extend each removed interval's boundaries (by up to ``search_n``
+    samples each side) to the nearest low-``ref`` sample, so the cut lands at
+    a quiet moment rather than wherever the duration test happened to trip.
+
+    A small join step is what keeps a concatenation from reading as a load
+    cycle in rainflow; this is the first and preferred defence, the seam
+    blend afterwards is the backstop for whatever residual step is left.
+    """
+    if ref is None or search_n <= 0 or not mask.any():
+        return mask
+    n = mask.size
+    new_mask = np.zeros(n, dtype=bool)
+    for s, e in _stop_intervals(mask):
+        lo = max(0, s - search_n)
+        s_new = lo + int(np.argmin(ref[lo:s + 1])) if s + 1 > lo else s
+        hi = min(n, e + search_n)
+        e_new = e + int(np.argmin(ref[e:hi])) if hi > e else e
+        if e_new > s_new:
+            new_mask[s_new:e_new] = True
+    return new_mask
+
+
+def _blend_seams_inplace(values: np.ndarray, join_positions: list, blend_n: int) -> None:
+    """Replace ``blend_n`` samples either side of each join with a straight
+    line between the (untouched) samples that bound them, in place.
+
+    This is a small, deliberate distortion at each seam -- it trades a short,
+    already-artificial stretch of samples for removing the level step a hard
+    concatenation would otherwise leave, which is what rainflow could
+    misread as a load cycle. See the boundary nudge above for the first line
+    of defence; this is only the backstop for whatever step survives it.
+    """
+    if blend_n <= 0:
+        return
+    n = values.size
+    for j in join_positions:
+        lo, hi = j - blend_n, j + blend_n
+        if lo < 0 or hi >= n:
+            continue          # not enough room at this edge -- leave it
+        values[lo + 1:hi] = np.linspace(values[lo], values[hi], hi - lo + 1)[1:-1]
+
+
 def remove_stops_frame(df: pd.DataFrame, fs: float,
                        speed_column=None, time_column: str = "Time",
                        min_stop_s: float = STOP_MIN_S,
                        window_s: float = STOP_WINDOW_S,
                        quiet_frac: float = STOP_QUIET_FRAC,
+                       moving_kph: float = 1.5,
+                       seam_search_s: float = 1.0,
+                       seam_blend_s: float = 0.2,
                        ) -> Tuple[pd.DataFrame, dict]:
-    """Drop stationary stretches from every channel at once.
+    """Drop stationary stretches from every channel at once, with seam handling.
 
     One mask decides for the whole frame -- taken from the speed channel when it
     says anything, otherwise from a per-force-channel majority vote, so a single
     noisy wheel cannot cut the recording on its own. Time is rebuilt at the
     original spacing, leaving a continuous record with the stops closed up.
+
+    A hard concatenation leaves a level step at every join, and rainflow can
+    read that step as a load cycle -- corrupting exactly the fatigue numbers
+    this whole recipe exists to get right. Two defences, both against the
+    *same* shared mask so every channel is still cut at identical indices:
+    ``seam_search_s`` extends each cut boundary (up to that many seconds each
+    side) to the nearest quiet moment across all the force channels jointly,
+    minimising the step before it happens; ``seam_blend_s`` then replaces a
+    short stretch (that many seconds each side) at whatever step remains with
+    a straight line, per channel, as a backstop. Set either to 0 to disable it.
     """
     if df.empty or fs <= 0:
         return df, {}
@@ -1069,7 +1157,7 @@ def remove_stops_frame(df: pd.DataFrame, fs: float,
     if speed_column and speed_column in df.columns:
         mask = detect_stops_from_speed(
             pd.to_numeric(df[speed_column], errors="coerce").to_numpy(dtype=float),
-            fs, min_stop_s)
+            fs, min_stop_s, moving_kph=moving_kph)
         if mask is not None:
             basis = "speed (%s)" % speed_column
 
@@ -1091,11 +1179,37 @@ def remove_stops_frame(df: pd.DataFrame, fs: float,
     if not mask.any() or mask.mean() > STOP_MAX_FRAC:
         return df, {"stops_removed": 0, "stop_seconds": 0.0, "stop_basis": basis}
 
-    n_stops = int(np.count_nonzero(np.diff(np.r_[False, mask].astype(np.int8)) == 1))
-    out = df.loc[~mask].reset_index(drop=True)
+    ref = _seam_reference(df, time_column)
+    search_n = max(0, int(round(seam_search_s * fs)))
+    mask = _nudge_stop_boundaries(mask, ref, search_n)
+    if not mask.any():
+        return df, {"stops_removed": 0, "stop_seconds": 0.0, "stop_basis": basis}
+
+    intervals = _stop_intervals(mask)
+    n_stops = len(intervals)
+    t0 = float(df[time_column].iloc[0]) if time_column in df.columns and len(df) else 0.0
+    removed_intervals = [(round(t0 + s / fs, 3), round(t0 + e / fs, 3)) for s, e in intervals]
+
+    keep = ~mask
+    csum = np.cumsum(keep)                    # csum[i]-1 = output index of original row i, if kept
+    # output index of the first sample after each gap -- where the two
+    # originally-separated stretches now sit adjacent to each other
+    join_positions = [int(csum[s - 1]) for s, _ in intervals if s > 0]
+
+    out = df.loc[keep].reset_index(drop=True)
     if time_column in out.columns:
-        start = float(df[time_column].iloc[0]) if len(df) else 0.0
-        out[time_column] = np.arange(len(out)) / fs + start
+        out[time_column] = np.arange(len(out)) / fs + t0
+
+    blend_n = max(0, int(round(seam_blend_s * fs)))
+    if blend_n > 0 and join_positions:
+        for col in out.columns:
+            if col == time_column:
+                continue
+            vals = pd.to_numeric(out[col], errors="coerce").to_numpy(dtype=float).copy()
+            _blend_seams_inplace(vals, join_positions, blend_n)
+            out[col] = vals
+
     return out, {"stops_removed": n_stops,
                  "stop_seconds": round(float(mask.sum()) / fs, 2),
-                 "stop_basis": basis}
+                 "stop_basis": basis,
+                 "removed_intervals": removed_intervals}

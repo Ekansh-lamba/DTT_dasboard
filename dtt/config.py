@@ -156,6 +156,11 @@ class RunConfig:
     transient_despike_window_s:      float = 1.0
     transient_despike_noise_floor_mult: float = 10.0
     transient_despike_max_spike_frac:   float = 0.4
+    remove_stops:            bool  = False  # cut stationary stretches ahead of rainflow/statistics only
+    stop_speed_kph:           float = 1.5   # below this reads as "stopped", not literal zero
+    stop_min_s:                float = 3.0   # shorter than this is traffic, not a stop worth cutting
+    stop_seam_search_s:        float = 1.0   # nudge each cut boundary up to this many seconds to a quiet moment
+    stop_seam_blend_s:         float = 0.2   # short linear blend across whatever step survives the nudge
     miner_exponent: float = RAINFLOW_MINER
     output_dir:     Path  = field(default_factory=lambda: OUTPUTS_DIR)
     run_channels:   object = None      # ChannelSet-derived config, built at run time
