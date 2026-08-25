@@ -320,3 +320,26 @@ and the leading-trim heuristic land relative to a **known-correct**
 reference like this file (a repeatable regression check now exists: this
 exact comparison, `WFT_Fx_fr.raw` sample `[1000000+58 : 1030001+58]` vs.
 `Fx_raw_cut.csv`).
+
+---
+---
+
+# Round 2: histogram restyle, stop removal, spike rule, resampling confirmation (2026-08-25)
+
+Since the last round, `famos/` became the single home for the verified recipe
+math (triangular smo, causal FiltLP, stride red) — `dtt/preprocessing.py`
+now delegates to `famos.ops` rather than carrying its own copy. That math is
+untouched in this round; everything below is new preprocessing/reporting
+features layered on top of it.
+
+## Step 1 — Resampling: confirmed, no change
+
+`famos_red` (delegating to `famos.ops.red`) is plain stride decimation, keep
+every 10th sample from index 0, no anti-alias filtering of its own — verified
+exact again: `red(Fx_smo_cut, 10)` vs `Fx_red_cut` from `data/Fx_raw_cut.csv`,
+max err 0.0. It already runs last in `apply_famos_recipe`'s per-channel order
+(`despike -> deglitch -> FiltLP -> smo -> red`), after the signal is
+band-limited, which is the FAMOS-correct order. `resample()`'s
+`mode="antialias"` (scipy `decimate`) path exists in `preprocessing.py` but
+grepping the whole tree found no caller that ever sets `resample_mode` to
+anything but the default `"famos"` (plain stride). No code change needed.
