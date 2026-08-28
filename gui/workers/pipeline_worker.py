@@ -42,6 +42,8 @@ class RunRequest:
     no_filter: bool = False
     no_famos: bool = False        # fall back to the legacy Butterworth LPF
     deglitch: bool = False        # rolling-median removal of DAQ artifact spikes
+    remove_stops: bool = False    # excise stationary/paused stretches
+    stop_min_s: Optional[float] = None
 
     def to_cmd(self) -> List[str]:
         # A frozen .exe re-invokes itself in pipeline mode; from source we call
@@ -73,6 +75,10 @@ class RunRequest:
             cmd += ["--no-filter"]
         if self.no_famos:
             cmd += ["--no-famos"]
+        if self.remove_stops:
+            cmd += ["--remove-stops"]
+            if self.stop_min_s:
+                cmd += ["--stop-min-s", str(self.stop_min_s)]
         if self.deglitch:
             cmd += ["--deglitch"]
         return cmd

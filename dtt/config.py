@@ -134,6 +134,8 @@ class RunConfig:
     raw_folder:     Optional[Path] = None      # imc STUDIO .raw folder (alt source)
     raw_files:      Optional[list] = None       # explicit subset of .raw files
     raw_folders:    Optional[list] = None       # several session folders, joined end to end
+    remove_stops:   bool = False                # excise stationary/paused stretches
+    stop_min_s:     float = 5.0                 # shorter than this is traffic, not a stop
     vehicle_type:   str   = ""                 # chosen preset name ("" = auto-detect)
     vehicle_name:   str   = "Vehicle"
     study_name:     str   = ""

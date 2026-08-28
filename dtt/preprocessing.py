@@ -936,21 +936,20 @@ def remove_stops(t: np.ndarray, x: np.ndarray, fs: float,
     return t_out, x_out, removed_s
 
 
-def remove_stops_frame(df: pd.DataFrame, fs: float,
-                       speed_column=None, time_column: str = "Time",
-                       min_stop_s: float = STOP_MIN_S,
-                       window_s: float = STOP_WINDOW_S,
-                       quiet_frac: float = STOP_QUIET_FRAC,
-                       ) -> Tuple[pd.DataFrame, dict]:
-    """Drop stationary stretches from every channel at once.
+def stop_mask_frame(df: pd.DataFrame, fs: float, speed_column=None,
+                    time_column: str = "Time",
+                    min_stop_s: float = STOP_MIN_S,
+                    window_s: float = STOP_WINDOW_S,
+                    quiet_frac: float = STOP_QUIET_FRAC):
+    """``(mask, basis)`` marking the stationary samples of a whole frame.
 
-    One mask decides for the whole frame -- taken from the speed channel when it
-    says anything, otherwise from a per-force-channel majority vote, so a single
-    noisy wheel cannot cut the recording on its own. Time is rebuilt at the
-    original spacing, leaving a continuous record with the stops closed up.
+    Separate from :func:`remove_stops_frame` so one decision can be applied to
+    more than one frame. The pipeline needs exactly that: the conditioned data
+    and its unconditioned twin have to lose the *same* stretches, or the
+    before/after view ends up comparing two different drives.
     """
     if df.empty or fs <= 0:
-        return df, {}
+        return None, ""
 
     mask = None
     basis = ""
@@ -977,13 +976,42 @@ def remove_stops_frame(df: pd.DataFrame, fs: float,
         basis = "force dynamics (%d channels)" % len(votes)
 
     if not mask.any() or mask.mean() > STOP_MAX_FRAC:
-        return df, {"stops_removed": 0, "stop_seconds": 0.0, "stop_basis": basis}
+        return None, basis
+    return mask, basis
 
-    n_stops = int(np.count_nonzero(np.diff(np.r_[False, mask].astype(np.int8)) == 1))
-    out = df.loc[~mask].reset_index(drop=True)
+
+def apply_stop_mask(df: pd.DataFrame, mask, fs: float,
+                    time_column: str = "Time") -> pd.DataFrame:
+    """Drop the masked samples and rebuild the clock at the original spacing."""
+    if mask is None or df.empty or not mask.any():
+        return df
+    n = min(len(df), mask.size)
+    out = df.iloc[:n].loc[~mask[:n]].reset_index(drop=True)
     if time_column in out.columns:
         start = float(df[time_column].iloc[0]) if len(df) else 0.0
         out[time_column] = np.arange(len(out)) / fs + start
-    return out, {"stops_removed": n_stops,
-                 "stop_seconds": round(float(mask.sum()) / fs, 2),
-                 "stop_basis": basis}
+    return out
+
+
+def remove_stops_frame(df: pd.DataFrame, fs: float,
+                       speed_column=None, time_column: str = "Time",
+                       min_stop_s: float = STOP_MIN_S,
+                       window_s: float = STOP_WINDOW_S,
+                       quiet_frac: float = STOP_QUIET_FRAC,
+                       ) -> Tuple[pd.DataFrame, dict]:
+    """Drop stationary stretches from every channel at once.
+
+    One mask decides for the whole frame -- taken from the speed channel when it
+    says anything, otherwise from a per-force-channel majority vote, so a single
+    noisy wheel cannot cut the recording on its own. Time is rebuilt at the
+    original spacing, leaving a continuous record with the stops closed up.
+    """
+    mask, basis = stop_mask_frame(df, fs, speed_column, time_column,
+                                  min_stop_s, window_s, quiet_frac)
+    if mask is None:
+        return df, {"stops_removed": 0, "stop_seconds": 0.0, "stop_basis": basis}
+    n_stops = int(np.count_nonzero(np.diff(np.r_[False, mask].astype(np.int8)) == 1))
+    return apply_stop_mask(df, mask, fs, time_column), {
+        "stops_removed": n_stops,
+        "stop_seconds": round(float(mask.sum()) / fs, 2),
+        "stop_basis": basis}

@@ -4,6 +4,8 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+
 from dtt.config import RunConfig, TIME_COLUMN, N_TO_DAN_FACTOR
 from dtt.ingestion.loader import load_csv
 from dtt.validation.validator import validate
@@ -82,6 +84,82 @@ def _write_raw_csv(raw_frame, config, metadata, scale_meta) -> None:
                 "scaled by 1/%g)", path, len(out), len(out.columns) - 1, divisor)
 
 
+
+
+def _warn_if_stationary(df, config) -> None:
+    """Say so when a recording holds stops and they are being kept.
+
+    Silence here would be the dangerous option. A parked vehicle still reads a
+    static longitudinal load -- on the reference recording |Fx/Fz| sits at 0.667
+    while stopped against 0.026 while driving -- and because G-severity is an RMS
+    it is dominated by those large ratios. 280 s of standstill in a 5548 s record,
+    5% of it, inflated Gx from 0.045 to 0.116. The number is not wrong so much as
+    answering a different question, and nothing on the report says which.
+    """
+    from dtt.preprocessing import stop_mask_frame
+
+    try:
+        fs = config.sampling_rate
+        speed = next((c for c in ("Vehicle_Speed", "Speed_kmph", "Speed2D")
+                      if c in df.columns), None)
+        mask, basis = stop_mask_frame(df, fs, speed_column=speed,
+                                      min_stop_s=getattr(config, "stop_min_s", 5.0))
+    except Exception:                                            # noqa: BLE001
+        return
+    if mask is None or not mask.any():
+        return
+    seconds = float(mask.sum()) / fs
+    pct = 100.0 * seconds / (len(df) / fs) if len(df) else 0.0
+    logger.warning(
+        "%.0f s stationary (%.1f%% of the recording, from %s) is being kept. "
+        "Standstill carries a static Fx/Fz that an RMS severity is dominated by, "
+        "so Gx/Gy/Gxy and the histograms describe the parked vehicle as much as "
+        "the road. Re-run with --remove-stops to exclude it.",
+        seconds, pct, basis)
+
+
+def _drop_stationary(df, raw_frame, config, metadata):
+    """Excise stationary and paused stretches from the record.
+
+    Placed before validation and statistics: a stop is not road load, and left
+    in it drags the mean toward the static wheel weight, inflates the time spent
+    near zero in every histogram, and adds cycles to the rainflow count that the
+    vehicle never saw.
+
+    One mask cuts both frames. They still share an index here -- sanitisation
+    has not yet dropped rows -- and cutting them separately would leave the
+    before/after view comparing two different drives.
+    """
+    from dtt.preprocessing import stop_mask_frame, apply_stop_mask
+
+    fs = config.sampling_rate
+    speed = next((c for c in ("Vehicle_Speed", "Speed_kmph", "Speed2D")
+                  if c in df.columns), None)
+    mask, basis = stop_mask_frame(df, fs, speed_column=speed,
+                                  min_stop_s=getattr(config, "stop_min_s", 5.0))
+    if mask is None:
+        logger.info("No stationary stretches found (basis: %s)", basis or "n/a")
+        return df, raw_frame
+
+    n_stops = int(np.count_nonzero(np.diff(np.r_[False, mask].astype(np.int8)) == 1))
+    seconds = float(mask.sum()) / fs
+    before = len(df)
+    df = apply_stop_mask(df, mask, fs, TIME_COLUMN)
+    if raw_frame is not None and len(raw_frame) == before:
+        raw_frame = apply_stop_mask(raw_frame, mask, fs, TIME_COLUMN)
+    elif raw_frame is not None:
+        logger.warning("Raw copy is %d rows against %d - left uncut, so the "
+                       "before/after view will not line up",
+                       len(raw_frame), before)
+    metadata["stops_removed"] = n_stops
+    metadata["stop_seconds"] = round(seconds, 2)
+    metadata["stop_basis"] = basis
+    logger.info("Removed %d stationary stretch(es), %.0f s (%.1f%% of the "
+                "recording), detected from %s", n_stops, seconds,
+                100.0 * seconds / (before / fs) if before else 0.0, basis)
+    return df, raw_frame
+
+
 def run(
     csv_path: Path = None,
     vehicle_name: str = "Vehicle",
@@ -95,6 +173,7 @@ def run(
     raw_folder: Path        = None,
     raw_files:  list        = None,
     raw_folders: list       = None,
+    remove_stops: bool      = False,
     vehicle_type: str       = "",
     famos_mode: bool        = True,
     deglitch:   bool        = False,
@@ -119,6 +198,7 @@ def run(
     kwargs["apply_filter"] = apply_filter_flag
     kwargs["famos_mode"]   = famos_mode
     kwargs["deglitch"]     = deglitch
+    kwargs["remove_stops"] = remove_stops
 
     config = RunConfig(**kwargs)
     _setup_logging(config)
@@ -193,6 +273,12 @@ def run(
     from dtt.ingestion.loader import normalise_force_units
     df, scale_meta = normalise_force_units(df, config)
     metadata.update(scale_meta)
+
+    if getattr(config, "remove_stops", False):
+        logger.info("[1b/9] Removing stationary periods")
+        df, raw_frame = _drop_stationary(df, raw_frame, config, metadata)
+    else:
+        _warn_if_stationary(df, config)
 
     logger.info("[2/9]  Channel Validation")
     validation_report = validate(df, metadata, config)
@@ -285,6 +371,11 @@ def _cli() -> None:
     parser.add_argument("--no-filter", action="store_true", help="Disable all filtering")
     parser.add_argument("--no-famos",  action="store_true",
                         help="Use the legacy Butterworth LPF instead of the imc/FAMOS recipe")
+    parser.add_argument("--remove-stops", action="store_true",
+                        help="Excise stationary/paused stretches so stops are not "
+                             "counted as road load")
+    parser.add_argument("--stop-min-s", type=float,
+                        help="Shortest stationary stretch to remove (default 5 s)")
     parser.add_argument("--deglitch",  action="store_true",
                         help="Rolling-median de-glitch of DAQ artifact spikes before filtering")
     parser.add_argument("--miner",    type=float,           help="Miner's rule exponent (default 8)")
@@ -305,6 +396,7 @@ def _cli() -> None:
         apply_filter_flag= not args.no_filter,
         famos_mode       = not args.no_famos,
         deglitch         = args.deglitch,
+        remove_stops     = args.remove_stops,
         miner_exponent   = args.miner,
         output_dir       = args.outdir,
     )

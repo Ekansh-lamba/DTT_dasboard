@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout, QFormLayout, QLineEdit, QComboBox, QPushButton, QDoubleSpinBox,
     QSpinBox, QCheckBox, QLabel, QFileDialog, QGridLayout, QWidget, QScrollArea,
+    QListWidget, QVBoxLayout,
 )
 
 from gui import theme
@@ -100,6 +101,39 @@ class NewStudyPage(BasePage):
         raw_row.addWidget(add_session)
         form.addRow("Raw source", self.raw_container)
 
+        # The join list, shown only once there is more than one leg. Order is
+        # the join order, so it has to be editable: an undated session (no
+        # Storage.imcdbc) cannot be placed automatically, and the operator is
+        # the only one who knows which leg was driven first.
+        self.sessions_box = QWidget()
+        sess_col = QVBoxLayout(self.sessions_box)
+        sess_col.setContentsMargins(0, 0, 0, 0)
+        sess_col.setSpacing(6)
+        self.sessions_list = QListWidget()
+        self.sessions_list.setMaximumHeight(120)
+        self.sessions_list.setToolTip(
+            "Sessions are joined top to bottom. Dated recordings are sorted by "
+            "their imc timestamp at load; undated ones keep this order.")
+        sess_col.addWidget(self.sessions_list)
+        sess_btns = QHBoxLayout()
+        sess_btns.setSpacing(6)
+        for label, slot, tip in (
+                ("↑", self._session_up, "Move the selected session earlier"),
+                ("↓", self._session_down, "Move the selected session later"),
+                ("Remove", self._session_remove, "Drop the selected session"),
+                ("Clear", self._session_clear, "Drop every session")):
+            b = QPushButton(label)
+            b.setObjectName("Secondary")
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            if label in ("↑", "↓"):
+                b.setMaximumWidth(40)
+            sess_btns.addWidget(b)
+        sess_btns.addStretch(1)
+        sess_col.addLayout(sess_btns)
+        self.sessions_box.setVisible(False)
+        form.addRow("", self.sessions_box)
+
         # Detected configuration (auto)
         self.detect_label = QLabel("—")
         self.detect_label.setWordWrap(True)
@@ -175,6 +209,34 @@ class NewStudyPage(BasePage):
             "neighbours.\nLeave off for a cleanly-read imc recording; turn on if "
             "the raw traces show isolated out-of-family spikes.")
         right.layout().addWidget(self.deglitch_check)
+
+        self.stops_check = QCheckBox("Remove stationary periods")
+        self.stops_check.setChecked(False)
+        self.stops_check.setToolTip(
+            "Cut out the stretches where the vehicle was parked or paused, so "
+            "they are not counted as road load. Detected from the collapse in "
+            "road input rather than the signal level — a parked wheel still "
+            "carries its full static weight. On the reference recording this "
+            "removes 343 s (6.2%): the pre-drive wait, one mid-route stop and "
+            "the end of the run. It matters more than it sounds — a standstill "
+            "carries a static Fx/Fz that an RMS severity is dominated by, and "
+            "keeping it inflated Gx from 0.045 to 0.116 on that recording.")
+        right.layout().addWidget(self.stops_check)
+        stop_row = QHBoxLayout()
+        stop_row.addSpacing(22)
+        stop_row.addWidget(QLabel("Shortest stop to cut"))
+        self.stop_min_spin = QDoubleSpinBox()
+        self.stop_min_spin.setRange(1.0, 120.0)
+        self.stop_min_spin.setValue(5.0)
+        self.stop_min_spin.setSuffix(" s")
+        self.stop_min_spin.setToolTip(
+            "Anything shorter is treated as traffic rather than a stop.")
+        self.stop_min_spin.setMaximumWidth(110)
+        stop_row.addWidget(self.stop_min_spin)
+        stop_row.addStretch(1)
+        right.layout().addLayout(stop_row)
+        self.stops_check.toggled.connect(self.stop_min_spin.setEnabled)
+        self.stop_min_spin.setEnabled(False)
 
         self.cutoff_spin = QDoubleSpinBox()
         self.cutoff_spin.setRange(0.1, 1000.0)
@@ -283,11 +345,51 @@ class NewStudyPage(BasePage):
         self._update_detection()
 
     def _describe_sessions(self) -> None:
+        """Redraw the join list and the one-line summary from ``_raw_sessions``."""
         n = len(self._raw_sessions)
-        names = " → ".join(f.name for f in self._raw_sessions[:3])
-        if n > 3:
-            names += f" → … (+{n - 3})"
-        self.raw_edit.setText(f"{n} sessions, joined in order:  {names}")
+        self.sessions_box.setVisible(n > 0)
+        keep = self.sessions_list.currentRow()
+        self.sessions_list.clear()
+        for i, f in enumerate(self._raw_sessions, 1):
+            self.sessions_list.addItem(f"{i}.  {f.name}")
+            self.sessions_list.item(self.sessions_list.count() - 1).setToolTip(str(f))
+        if 0 <= keep < n:
+            self.sessions_list.setCurrentRow(keep)
+        if not n:
+            self.raw_edit.clear()
+            return
+        total = f"{n} session{'s' if n != 1 else ''}, joined in listed order"
+        self.raw_edit.setText(total)
+
+    def _move_session(self, delta: int) -> None:
+        i = self.sessions_list.currentRow()
+        j = i + delta
+        if i < 0 or not (0 <= j < len(self._raw_sessions)):
+            return
+        s = self._raw_sessions
+        s[i], s[j] = s[j], s[i]
+        self._describe_sessions()
+        self.sessions_list.setCurrentRow(j)
+        self._update_detection()
+
+    def _session_up(self) -> None:
+        self._move_session(-1)
+
+    def _session_down(self) -> None:
+        self._move_session(+1)
+
+    def _session_remove(self) -> None:
+        i = self.sessions_list.currentRow()
+        if 0 <= i < len(self._raw_sessions):
+            self._raw_sessions.pop(i)
+            self._describe_sessions()
+            self.sessions_list.setCurrentRow(min(i, len(self._raw_sessions) - 1))
+            self._update_detection()
+
+    def _session_clear(self) -> None:
+        self._raw_sessions = []
+        self._describe_sessions()
+        self._update_detection()
 
     def _browse_raw(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -424,6 +526,9 @@ class NewStudyPage(BasePage):
             no_filter=not self.filter_check.isChecked(),
             no_famos=not self.famos_check.isChecked(),
             deglitch=self.deglitch_check.isChecked(),
+            remove_stops=self.stops_check.isChecked(),
+            stop_min_s=(self.stop_min_spin.value()
+                        if self.stops_check.isChecked() else None),
         )
 
         if is_raw:
