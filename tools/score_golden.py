@@ -65,6 +65,43 @@ def _register() -> None:
     CASES["gc_impulse_redonly"] = ("gc_impulse", lambda x: ops.red(x, 10))
 
 
+# The force channels captured by famos_forces.seq, and the .raw each comes from.
+_FORCE_CHANNELS = ("FR_Fx_2", "FR_Fy_2", "FR_Fz_2",
+                   "RR_Fx_1", "RR_Fy_1", "RR_Fz_1")
+
+
+def _register_forces(raw_dir: Path) -> Dict[str, tuple]:
+    """Stage F: the WFT force chain on the real recording.
+
+    The force path is ``smo(0.1)`` then ``red(10)`` and no ``FiltLP`` -- that
+    operator belongs to Latacc alone. Scoring a force channel through the accel
+    chain would validate something the pipeline never runs.
+
+    Compared in the file's own units, deliberately. The N-to-daN step and the
+    decade correction are decisions this project makes and FAMOS does not, so
+    folding them in here would score our unit policy rather than our signal
+    processing, and a mismatch could not be attributed to either.
+    """
+    from dtt.ingestion.imc_reader import read_famos
+
+    cases: Dict[str, tuple] = {}
+    for ch_name in _FORCE_CHANNELS:
+        f = raw_dir / f"{ch_name}.raw"
+        if not f.exists():
+            continue
+        ch = read_famos(f)
+        if ch is None or not ch.data.size:
+            print(f"  ! could not read {f.name}")
+            continue
+        x, fs = ch.data, ch.fs
+        cases[f"{ch_name}_smo"] = (x, lambda v, fs=fs: ops.smo(v, 0.1, fs))
+        cases[f"{ch_name}_red"] = (
+            x, lambda v, fs=fs: ops.red(ops.smo(v, 0.1, fs), 10))
+        # No smoothing at all: isolates the reader from the operators.
+        cases[f"{ch_name}_rawred"] = (x, lambda v: ops.red(v, 10))
+    return cases
+
+
 def _register_wft(raw_path: Path) -> Dict[str, tuple]:
     """Stage 4: the production chain on a real WFT record.
 
@@ -183,6 +220,9 @@ def main() -> int:
                     help="samples to drop at each end for the settled score")
     ap.add_argument("--tol", type=float, default=1e-4,
                     help="max abs error allowed on the settled region")
+    ap.add_argument("--raw-dir", default=None,
+                    help="folder of WFT .raw files, to score the force chain "
+                         "(smo(0.1) -> red(10)) end to end against FAMOS")
     ap.add_argument("--raw", default=None,
                     help="the .raw file Stage 4 was run on, e.g. AccelY.raw; "
                          "scores our reader and operators against FAMOS end to end")
@@ -193,6 +233,11 @@ def main() -> int:
     if args.raw and not wft:
         print(f"Could not read {args.raw} - Stage 4 will be skipped")
     CASES.update(wft)
+    if args.raw_dir:
+        forces = _register_forces(Path(args.raw_dir))
+        if not forces:
+            print(f"No WFT .raw files found in {args.raw_dir}")
+        CASES.update(forces)
 
     src = pd.read_csv(args.inputs)
     inputs = {c: pd.to_numeric(src[c], errors="coerce").to_numpy(float)

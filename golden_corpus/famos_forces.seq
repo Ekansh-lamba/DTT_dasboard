@@ -1,0 +1,74 @@
+; ===========================================================================
+; WFT FORCE CHANNELS  --  end-to-end capture against a real recording
+; ---------------------------------------------------------------------------
+; The gc_* corpus proved the operators, but every one of those signals was
+; generated in Python and merely imported, so our imc file reader was never
+; under test. This sequence closes that: FAMOS reads the same .raw files from
+; disk that our pipeline reads, and runs the production force chain on them.
+;
+; The force path is NOT the Latacc path. From the imc config file:
+;
+;     FL_Fx = smo(FL_Fx1, 0.1)        <- forces and moments: smo only
+;     cutdata = red(cutd, 10)
+;
+; No FiltLP. FiltLP(4, 5 Hz) applies to Latacc alone. Running the accel chain
+; on a force channel would validate something the pipeline never does.
+;
+; ---------------------------------------------------------------------------
+; PREREQUISITE -- load these from
+;   raw data in .dat format\2006-08-25 09-10-46 (1)\
+; They are already FAMOS format, so File > Open > Data opens them directly with
+; no import assistant. Each arrives named from inside the file, which is
+; already the name used below -- nothing to rename.
+;
+;   FR_Fx_2.raw   FR_Fy_2.raw   FR_Fz_2.raw
+;   RR_Fx_1.raw   RR_Fy_1.raw   RR_Fz_1.raw
+;
+; If memory or time runs short, load the three FR channels only and comment out
+; the RR block. Fz is the single most valuable one: it carries the static wheel
+; load, so an error there moves every severity and histogram figure.
+; ===========================================================================
+
+
+; ---------------------------------------------------------------------------
+; STAGE F1: smo(0.1) -- the force smoothing, on its own
+; ---------------------------------------------------------------------------
+; Isolated so a mismatch can be attributed. Combined with red() below, a
+; disagreement could come from either operator or from the reader; separated,
+; each one answers for itself.
+
+FR_Fx_2_smo = smo(FR_Fx_2, 0.1)
+FR_Fy_2_smo = smo(FR_Fy_2, 0.1)
+FR_Fz_2_smo = smo(FR_Fz_2, 0.1)
+
+RR_Fx_1_smo = smo(RR_Fx_1, 0.1)
+RR_Fy_1_smo = smo(RR_Fy_1, 0.1)
+RR_Fz_1_smo = smo(RR_Fz_1, 0.1)
+
+
+; ---------------------------------------------------------------------------
+; STAGE F2: smo(0.1) -> red(10) -- the full production chain
+; ---------------------------------------------------------------------------
+; This is exactly what a force column in processed_data.csv is, before the unit
+; handling. Matching here is what "our processed output matches FAMOS" means.
+
+FR_Fx_2_red = red(FR_Fx_2_smo, 10)
+FR_Fy_2_red = red(FR_Fy_2_smo, 10)
+FR_Fz_2_red = red(FR_Fz_2_smo, 10)
+
+RR_Fx_1_red = red(RR_Fx_1_smo, 10)
+RR_Fy_1_red = red(RR_Fy_1_smo, 10)
+RR_Fz_1_red = red(RR_Fz_1_smo, 10)
+
+
+; ---------------------------------------------------------------------------
+; STAGE F3: the raw channel decimated with no smoothing
+; ---------------------------------------------------------------------------
+; Reads the file through FAMOS with no filtering at all, so any difference is
+; the READER alone -- byte offsets, event-record stripping, the leading and
+; trailing sample trim. If F1 and F2 disagree but this matches, the fault is in
+; an operator; if this disagrees too, it is in how the file is being read, and
+; no amount of operator work will fix it.
+
+FR_Fz_2_rawred = red(FR_Fz_2, 10)
+RR_Fz_1_rawred = red(RR_Fz_1, 10)
