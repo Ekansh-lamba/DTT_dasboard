@@ -28,7 +28,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from famos import ops                                            # noqa: E402
-from dtt.ingestion.imc_reader import read_famos                  # noqa: E402
+from dtt.ingestion.imc_reader import read_famos_all              # noqa: E402
 
 FS = 1000.0                       # golden inputs are dx = 0.001 s
 INPUTS = Path("golden_corpus/famos_golden_inputs.csv")
@@ -65,6 +65,32 @@ def _register() -> None:
     CASES["gc_impulse_redonly"] = ("gc_impulse", lambda x: ops.red(x, 10))
 
 
+def _register_wft(raw_path: Path) -> Dict[str, tuple]:
+    """Stage 4: the production chain on a real WFT record.
+
+    This is the only case that puts our *reader* under test. Every gc_ channel
+    starts from a signal Python generated and FAMOS merely imported, so a fault
+    in the imc byte parsing could not show up there. Here both sides start from
+    the same file on disk and FAMOS does its own reading, so the comparison
+    covers ingestion and arithmetic together -- which is what "the processed
+    output matches FAMOS" actually means.
+    """
+    from dtt.ingestion.imc_reader import read_famos
+
+    ch = read_famos(raw_path)
+    if ch is None or not ch.data.size:
+        return {}
+    x = ch.data
+    fs = ch.fs
+    return {
+        "wft_accely_lpf":   (x, lambda v: ops.filtlp(v, 5.0, 4, fs)),
+        "wft_accely_smo":   (x, lambda v: ops.smo(ops.filtlp(v, 5.0, 4, fs), 0.5, fs)),
+        "wft_accely_red":   (x, lambda v: ops.red(
+            ops.smo(ops.filtlp(v, 5.0, 4, fs), 0.5, fs), 10)),
+        "wft_accely_smo01": (x, lambda v: ops.smo(v, 0.1, fs)),
+    }
+
+
 def load_outputs(path: Path) -> Dict[str, np.ndarray]:
     """FAMOS results, from a directory of .dat files or a single CSV."""
     out: Dict[str, np.ndarray] = {}
@@ -73,18 +99,60 @@ def load_outputs(path: Path) -> Dict[str, np.ndarray]:
             if f.suffix.lower() not in (".dat", ".raw"):
                 continue
             try:
-                ch = read_famos(f)
+                chans = read_famos_all(f)
             except Exception as exc:                             # noqa: BLE001
                 print(f"  ! could not read {f.name}: {exc}")
                 continue
-            if ch is not None and ch.data.size:
-                # the name inside the file wins; the filename is a fallback
-                out[(ch.raw_name or f.stem).strip()] = ch.data
+            # FAMOS writes every selected variable into one file, so a single
+            # .dat routinely holds the whole export.
+            for ch in chans:
+                if ch.data.size:
+                    # the name inside the file wins; the filename is a fallback
+                    out[(ch.raw_name or f.stem).strip()] = ch.data
         return out
 
-    df = pd.read_csv(path)
+    # A FAMOS ASCII export may carry metadata lines above the channel names, and
+    # the separator follows the machine's locale, so neither is assumed.
+    df = None
+    for skip in (0, 1, 2, 3, 4, 5):
+        for sep in (",", ";", "	"):
+            try:
+                cand = pd.read_csv(path, skiprows=skip, sep=sep, engine="python")
+            except Exception:                                    # noqa: BLE001
+                continue
+            names = [str(c).strip() for c in cand.columns]
+            if sum(n.startswith("gc_") for n in names) >= 2:
+                cand.columns = names
+                df = cand
+                break
+        if df is not None:
+            break
+    if df is None:
+        df = pd.read_csv(path)
+        df.columns = [str(c).strip() for c in df.columns]
+    # FAMOS writes a units row directly under the channel names. Left in, every
+    # channel shifts by one sample and the whole comparison silently misaligns,
+    # so drop any leading row that holds no numbers at all.
+    if len(df):
+        first = pd.to_numeric(df.iloc[0], errors="coerce")
+        if not np.isfinite(first.to_numpy(dtype=float)).any():
+            df = df.iloc[1:].reset_index(drop=True)
     for c in df.columns:
-        out[str(c).strip()] = pd.to_numeric(df[c], errors="coerce").to_numpy(float)
+        v = pd.to_numeric(df[c], errors="coerce").to_numpy(float)
+        # One wide export, one shared x-axis. A channel FAMOS decimated is
+        # written *sparsely* onto that axis -- for red(x,10), one value every
+        # tenth row with blanks between -- so the column has to be compacted
+        # back to the channel's own rate before it means anything. Comparing
+        # across the blanks reads as a total mismatch (r ~ 0) while the data is
+        # in fact identical, which is a very convincing way to be wrong.
+        finite = np.flatnonzero(np.isfinite(v))
+        if finite.size > 2:
+            step = np.diff(finite)
+            if step[0] > 1 and np.all(step == step[0]):
+                v = v[finite]                       # regular stride: compact
+            else:
+                v = v[:finite[-1] + 1]              # merely padded at the end
+        out[str(c).strip()] = v
     return out
 
 
@@ -115,9 +183,16 @@ def main() -> int:
                     help="samples to drop at each end for the settled score")
     ap.add_argument("--tol", type=float, default=1e-4,
                     help="max abs error allowed on the settled region")
+    ap.add_argument("--raw", default=None,
+                    help="the .raw file Stage 4 was run on, e.g. AccelY.raw; "
+                         "scores our reader and operators against FAMOS end to end")
     args = ap.parse_args()
 
     _register()
+    wft = _register_wft(Path(args.raw)) if args.raw else {}
+    if args.raw and not wft:
+        print(f"Could not read {args.raw} - Stage 4 will be skipped")
+    CASES.update(wft)
 
     src = pd.read_csv(args.inputs)
     inputs = {c: pd.to_numeric(src[c], errors="coerce").to_numpy(float)
@@ -138,11 +213,15 @@ def main() -> int:
         if name not in got:
             missing.append(name)
             continue
-        if src_name not in inputs:
-            missing.append(f"{name} (input {src_name} absent)")
-            continue
+        if isinstance(src_name, str):
+            if src_name not in inputs:
+                missing.append(f"{name} (input {src_name} absent)")
+                continue
+            src_data = inputs[src_name]
+        else:
+            src_data = src_name                 # Stage 4 hands the array itself
         try:
-            ours = np.asarray(fn(inputs[src_name]), dtype=float)
+            ours = np.asarray(fn(src_data), dtype=float)
         except Exception as exc:                                 # noqa: BLE001
             print(f"{name:24s} {'':>8s} {'':>12s} {'':>12s} {'':>12s}  ERROR {exc}")
             failed.append(name)
