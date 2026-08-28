@@ -94,17 +94,19 @@ def run(
     output_dir: Path        = None,
     raw_folder: Path        = None,
     raw_files:  list        = None,
+    raw_folders: list       = None,
     vehicle_type: str       = "",
     famos_mode: bool        = True,
     deglitch:   bool        = False,
 ) -> Path:
-    if csv_path is None and raw_folder is None and not raw_files:
-        raise ValueError("Provide csv_path, raw_folder, or raw_files")
+    if csv_path is None and raw_folder is None and not raw_files and not raw_folders:
+        raise ValueError("Provide csv_path, raw_folder, raw_folders, or raw_files")
 
     kwargs = dict(
         csv_path     = Path(csv_path) if csv_path else None,
         raw_folder   = Path(raw_folder) if raw_folder else None,
         raw_files    = [Path(f) for f in raw_files] if raw_files else None,
+        raw_folders  = [Path(f) for f in raw_folders] if raw_folders else None,
         vehicle_type = vehicle_type,
         vehicle_name = vehicle_name,
         study_name   = study_name,
@@ -122,7 +124,8 @@ def run(
     _setup_logging(config)
     logger = logging.getLogger("pipeline")
 
-    source = (f"{len(config.raw_files)} raw files" if config.raw_files
+    source = (f"{len(config.raw_folders)} raw sessions" if getattr(config, "raw_folders", None)
+              else f"{len(config.raw_files)} raw files" if config.raw_files
               else config.raw_folder or config.csv_path)
     logger.info("=" * 60)
     logger.info("DTT WFT Automation Pipeline  –  Starting")
@@ -137,7 +140,10 @@ def run(
     t0 = time.perf_counter()
 
     logger.info("[1/9]  Data Ingestion")
-    if config.raw_files:
+    if getattr(config, "raw_folders", None):
+        from dtt.ingestion.loader import load_raw_sessions
+        df, metadata = load_raw_sessions(config.raw_folders, config)
+    elif config.raw_files:
         from dtt.ingestion.loader import load_raw_files
         df, metadata = load_raw_files(config.raw_files, config)
     elif config.raw_folder is not None:
@@ -152,6 +158,10 @@ def run(
     # A DataFrame must not travel in metadata: that dict is handed to validation
     # and the report builder, both of which treat it as plain descriptive values.
     raw_frame = metadata.pop("raw_frame", None)
+    if metadata.get("sessions", 1) > 1:
+        logger.info("Joined %d recording sessions -> %.0f s; seams at %s s",
+                    metadata["sessions"], metadata.get("duration_s", 0),
+                    ", ".join(f"{t:.0f}" for t in metadata.get("seam_times_s", [])))
     config.famos_applied = bool(metadata.get("famos_recipe"))
     if config.famos_applied:
         # Report how many channels were actually *conditioned*, not how many the
@@ -263,6 +273,9 @@ def _cli() -> None:
     src.add_argument("--csv",                               help="Path to WFT CSV file")
     src.add_argument("--raw",                               help="Path to imc STUDIO .raw channel folder")
     src.add_argument("--raw-files", nargs="+",              help="Specific imc .raw files")
+    src.add_argument("--raw-folders", nargs="+",
+                     help="Several imc .raw session folders, joined end to end "
+                          "in recording order (one route captured over several runs)")
     parser.add_argument("--vehicle",  default="Vehicle",    help="Vehicle name for report naming")
     parser.add_argument("--vehicle-type", default="",       help="Vehicle-type preset ('' = auto-detect)")
     parser.add_argument("--study",    default="",           help="Study identifier (default: timestamp)")
@@ -281,6 +294,7 @@ def _cli() -> None:
     run(
         csv_path         = args.csv,
         raw_folder       = args.raw,
+        raw_folders      = args.raw_folders,
         raw_files        = args.raw_files,
         vehicle_type     = args.vehicle_type,
         vehicle_name     = args.vehicle,

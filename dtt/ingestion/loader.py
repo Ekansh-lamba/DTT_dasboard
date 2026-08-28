@@ -306,6 +306,11 @@ def _finalize_raw(df, imeta, config, name) -> Tuple[pd.DataFrame, dict]:
         "despike":          imeta.get("despike", False),
         # Carried through so the pipeline can publish the study's "before".
         "raw_frame":        imeta.get("raw_frame"),
+        # Session join facts, for the log, the report and the seam markers.
+        "sessions":         imeta.get("sessions", 1),
+        "seam_times_s":     imeta.get("seam_times_s", []),
+        "session_durations_s": imeta.get("session_durations_s", []),
+        "session_sources":  imeta.get("session_sources", []),
     }
     logger.info(
         "Loaded imc raw: %d rows, %d cols, raw %.0f Hz -> %.0f Hz, %d force channels",
@@ -331,6 +336,80 @@ def load_raw_folder(folder: Path, config: RunConfig) -> Tuple[pd.DataFrame, dict
                             despike_net_nsigma=getattr(config, "despike_net_nsigma", 6.0),
                             despike_net_window_s=getattr(config, "despike_net_window_s", 0.011))
     return _finalize_raw(df, imeta, config, folder.name)
+
+
+
+def _read_one_session(folder: Path, config: RunConfig):
+    """Read and condition a single session folder. Returns ``(df, imeta)``."""
+    from dtt.ingestion.imc_reader import read_folder
+    target = config.sampling_rate or DEFAULT_SAMPLING_RATE
+    return read_folder(
+        folder, target_fs=target,
+        famos=getattr(config, "famos_mode", True),
+        deglitch=getattr(config, "deglitch", False),
+        despike=getattr(config, "despike", False),
+        despike_rail_min_run=getattr(config, "despike_rail_min_run", 3),
+        despike_dropout_max_run=getattr(config, "despike_dropout_max_run", 5),
+        despike_hw_cutoff_hz=getattr(config, "despike_hw_cutoff_hz", 200.0),
+        despike_net=getattr(config, "despike_net", False),
+        despike_net_nsigma=getattr(config, "despike_net_nsigma", 6.0),
+        despike_net_window_s=getattr(config, "despike_net_window_s", 0.011))
+
+
+def load_raw_sessions(folders, config: RunConfig) -> Tuple[pd.DataFrame, dict]:
+    """Load several imc raw folders as one continuous recording.
+
+    For a route captured in legs -- 1-50 km one day, 50-100 km the next -- each
+    landing in its own folder with its own time base starting at zero.
+
+    Each session is read and conditioned on its own (filtering across a seam
+    would ring one day's tail into the next day's head), then joined, and only
+    then scaled. Scaling last is what keeps the legs comparable: the N-to-daN
+    conversion is a magnitude heuristic, and run per session it can reach
+    different verdicts on two halves of one drive, stepping the joined trace by
+    a factor of ten at the seam.
+    """
+    from dtt.ingestion.sessions import (concat_sessions, merge_metadata,
+                                        order_sessions)
+
+    folders = [Path(f) for f in folders]
+    if not folders:
+        raise ValueError("No session folders given")
+    if len(folders) == 1:
+        return load_raw_folder(folders[0], config)
+
+    logger.info("Loading %d imc raw sessions", len(folders))
+    frames, metas = [], []
+    for folder in folders:
+        from dtt.ingestion.imc_reader import resolve_raw_folder
+        resolved = resolve_raw_folder(folder)
+        df, imeta = _read_one_session(resolved, config)
+        if df.empty:
+            logger.warning("Session has no readable channels, skipped: %s", folder)
+            continue
+        imeta["source"] = str(folder)
+        frames.append(df)
+        metas.append(imeta)
+    if not frames:
+        raise ValueError("None of the given folders held readable imc channels")
+
+    order = order_sessions(metas)
+    frames = [frames[i] for i in order]
+    metas = [metas[i] for i in order]
+    for n, m in enumerate(metas, 1):
+        logger.info("  session %d: %s  (%.1f s%s)", n, m.get("source", "?"),
+                    m.get("duration_s", 0.0),
+                    "" if m.get("start_epoch") else ", undated - kept in given order")
+
+    fs = metas[0].get("output_fs_hz") or (config.sampling_rate or DEFAULT_SAMPLING_RATE)
+    raws = [m.pop("raw_frame", None) for m in metas]
+    joined, joined_raw, report = concat_sessions(frames, fs, metas, raws)
+
+    meta = merge_metadata(metas, report)
+    meta["raw_frame"] = joined_raw
+    meta["rows"] = len(joined)
+    # Scaled here, once, across the whole joined record.
+    return _finalize_raw(joined, meta, config, f"{len(frames)} sessions")
 
 
 def load_raw_files(files, config: RunConfig) -> Tuple[pd.DataFrame, dict]:

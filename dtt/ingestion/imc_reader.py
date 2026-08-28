@@ -442,8 +442,13 @@ def _assemble(channels, target_fs, source, famos: bool = True,
         fs_out = fs / step
         df["Time"] = np.arange(len(df)) / fs_out
 
+    # Earliest channel start, from Storage.imcdbc. This is how several sessions
+    # of one route get put back in the order they were driven.
+    epochs = [c.start_epoch for c in channels
+              if getattr(c, "start_epoch", 0) and np.isfinite(c.start_epoch)]
     meta = {
         "source": str(source),
+        "start_epoch": min(epochs) if epochs else None,
         "n_channels": len(channels),
         "raw_fs_hz": round(fs, 3),
         "output_fs_hz": round(fs_out, 3),

@@ -32,6 +32,7 @@ class RunRequest:
     csv_path: Optional[Path] = None
     raw_folder: Optional[Path] = None
     raw_files: Optional[List[Path]] = None
+    raw_folders: Optional[List[Path]] = None   # several sessions, joined in order
     vehicle: str = "Vehicle"
     vehicle_type: str = ""
     study: str = ""
@@ -49,7 +50,9 @@ class RunRequest:
             cmd = [sys.executable, "--run-pipeline"]
         else:
             cmd = [sys.executable, "-m", "dtt.pipeline"]
-        if self.raw_files:
+        if self.raw_folders:
+            cmd += ["--raw-folders"] + [str(f) for f in self.raw_folders]
+        elif self.raw_files:
             cmd += ["--raw-files"] + [str(f) for f in self.raw_files]
         elif self.raw_folder:
             cmd += ["--raw", str(self.raw_folder)]

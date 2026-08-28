@@ -83,9 +83,21 @@ class NewStudyPage(BasePage):
         files_raw = QPushButton("Files…")
         files_raw.setObjectName("Secondary")
         files_raw.clicked.connect(self._browse_raw_files)
+        add_session = QPushButton("+ Session")
+        add_session.setObjectName("Secondary")
+        add_session.setToolTip(
+            "Add another recording session of the same route. One drive "
+            "captured over several runs — 1-50 km today, 50-100 km tomorrow — "
+            "arrives as one folder per run. Add each and they are joined end "
+            "to end into a single continuous record: every session is "
+            "conditioned on its own, then appended where the last one "
+            "finished. Sessions carrying an imc timestamp are ordered by when "
+            "they were recorded; undated ones stay in the order you add them.")
+        add_session.clicked.connect(self._add_session)
         raw_row.addWidget(self.raw_edit, 1)
         raw_row.addWidget(browse_raw)
         raw_row.addWidget(files_raw)
+        raw_row.addWidget(add_session)
         form.addRow("Raw source", self.raw_container)
 
         # Detected configuration (auto)
@@ -218,6 +230,7 @@ class NewStudyPage(BasePage):
 
         self._raw_folder: Path | None = None
         self._raw_files: list[Path] = []
+        self._raw_sessions: list[Path] = []
         self.reload_csvs()
         self._on_source_type()
         self._toggle_filter()
@@ -255,12 +268,34 @@ class NewStudyPage(BasePage):
             self.csv_combo.setCurrentIndex(0)
             self._update_detection()
 
+    def _add_session(self) -> None:
+        """Append another session folder to the join list."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Add an imc raw session folder", str(self.repo.csv_dir.parent))
+        if not folder:
+            return
+        if self._raw_folder and not self._raw_sessions:
+            self._raw_sessions = [self._raw_folder]      # promote the first pick
+        self._raw_sessions.append(Path(folder))
+        self._raw_folder = None
+        self._raw_files = []
+        self._describe_sessions()
+        self._update_detection()
+
+    def _describe_sessions(self) -> None:
+        n = len(self._raw_sessions)
+        names = " → ".join(f.name for f in self._raw_sessions[:3])
+        if n > 3:
+            names += f" → … (+{n - 3})"
+        self.raw_edit.setText(f"{n} sessions, joined in order:  {names}")
+
     def _browse_raw(self) -> None:
         folder = QFileDialog.getExistingDirectory(
             self, "Select imc raw channel folder", str(self.repo.csv_dir.parent))
         if folder:
             self._raw_folder = Path(folder)
             self._raw_files = []
+            self._raw_sessions = []
             self.raw_edit.setText(folder)
             self._update_detection()
 
@@ -271,6 +306,7 @@ class NewStudyPage(BasePage):
         if paths:
             self._raw_files = [Path(p) for p in paths]
             self._raw_folder = None
+            self._raw_sessions = []
             self.raw_edit.setText(f"{len(self._raw_files)} files: "
                                   + ", ".join(p.name for p in self._raw_files[:4])
                                   + (" …" if len(self._raw_files) > 4 else ""))
@@ -281,6 +317,11 @@ class NewStudyPage(BasePage):
         if self.source_type.currentIndex() == 1:      # raw source
             if self._raw_files:
                 stems = [f.stem for f in self._raw_files]
+            elif self._raw_sessions:
+                # Channels are the intersection across sessions; the first is a
+                # fair preview and avoids reading every folder on each keystroke.
+                found = resolve_raw_folder(self._raw_sessions[0])
+                stems = [f.stem for f in sorted(found.glob("*.raw"))]
             elif self._raw_folder and self._raw_folder.exists():
                 found = resolve_raw_folder(self._raw_folder)
                 stems = [f.stem for f in sorted(found.glob("*.raw"))]
@@ -386,7 +427,16 @@ class NewStudyPage(BasePage):
         )
 
         if is_raw:
-            if self._raw_files:
+            if self._raw_sessions:
+                missing = [f for f in self._raw_sessions if not f.exists()]
+                if missing:
+                    self.error_label.setText(
+                        f"Session folder not found: {missing[0]}")
+                    return
+                req = RunRequest(
+                    raw_folders=[resolve_raw_folder(f) for f in self._raw_sessions],
+                    **common)
+            elif self._raw_files:
                 existing = [f for f in self._raw_files if f.exists()]
                 if not existing:
                     self.error_label.setText("Selected .raw files not found.")

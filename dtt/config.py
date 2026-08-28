@@ -133,6 +133,7 @@ class RunConfig:
     csv_path:       Optional[Path] = None
     raw_folder:     Optional[Path] = None      # imc STUDIO .raw folder (alt source)
     raw_files:      Optional[list] = None       # explicit subset of .raw files
+    raw_folders:    Optional[list] = None       # several session folders, joined end to end
     vehicle_type:   str   = ""                 # chosen preset name ("" = auto-detect)
     vehicle_name:   str   = "Vehicle"
     study_name:     str   = ""
