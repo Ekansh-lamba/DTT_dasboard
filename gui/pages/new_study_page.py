@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout, QFormLayout, QLineEdit, QComboBox, QPushButton, QDoubleSpinBox,
     QSpinBox, QCheckBox, QLabel, QFileDialog, QGridLayout, QWidget, QScrollArea,
+    QListWidget, QVBoxLayout,
 )
 
 from gui import theme
@@ -83,10 +84,55 @@ class NewStudyPage(BasePage):
         files_raw = QPushButton("Files…")
         files_raw.setObjectName("Secondary")
         files_raw.clicked.connect(self._browse_raw_files)
+        add_session = QPushButton("+ Session")
+        add_session.setObjectName("Secondary")
+        add_session.setToolTip(
+            "Add another recording session of the same route. One drive "
+            "captured over several runs — 1-50 km today, 50-100 km tomorrow — "
+            "arrives as one folder per run. Add each and they are joined end "
+            "to end into a single continuous record: every session is "
+            "conditioned on its own, then appended where the last one "
+            "finished. Sessions carrying an imc timestamp are ordered by when "
+            "they were recorded; undated ones stay in the order you add them.")
+        add_session.clicked.connect(self._add_session)
         raw_row.addWidget(self.raw_edit, 1)
         raw_row.addWidget(browse_raw)
         raw_row.addWidget(files_raw)
+        raw_row.addWidget(add_session)
         form.addRow("Raw source", self.raw_container)
+
+        # The join list, shown only once there is more than one leg. Order is
+        # the join order, so it has to be editable: an undated session (no
+        # Storage.imcdbc) cannot be placed automatically, and the operator is
+        # the only one who knows which leg was driven first.
+        self.sessions_box = QWidget()
+        sess_col = QVBoxLayout(self.sessions_box)
+        sess_col.setContentsMargins(0, 0, 0, 0)
+        sess_col.setSpacing(6)
+        self.sessions_list = QListWidget()
+        self.sessions_list.setMaximumHeight(120)
+        self.sessions_list.setToolTip(
+            "Sessions are joined top to bottom. Dated recordings are sorted by "
+            "their imc timestamp at load; undated ones keep this order.")
+        sess_col.addWidget(self.sessions_list)
+        sess_btns = QHBoxLayout()
+        sess_btns.setSpacing(6)
+        for label, slot, tip in (
+                ("↑", self._session_up, "Move the selected session earlier"),
+                ("↓", self._session_down, "Move the selected session later"),
+                ("Remove", self._session_remove, "Drop the selected session"),
+                ("Clear", self._session_clear, "Drop every session")):
+            b = QPushButton(label)
+            b.setObjectName("Secondary")
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            if label in ("↑", "↓"):
+                b.setMaximumWidth(40)
+            sess_btns.addWidget(b)
+        sess_btns.addStretch(1)
+        sess_col.addLayout(sess_btns)
+        self.sessions_box.setVisible(False)
+        form.addRow("", self.sessions_box)
 
         # Detected configuration (auto)
         self.detect_label = QLabel("—")
@@ -164,6 +210,34 @@ class NewStudyPage(BasePage):
             "the raw traces show isolated out-of-family spikes.")
         right.layout().addWidget(self.deglitch_check)
 
+        self.stops_check = QCheckBox("Remove stationary periods")
+        self.stops_check.setChecked(False)
+        self.stops_check.setToolTip(
+            "Cut out the stretches where the vehicle was parked or paused, so "
+            "they are not counted as road load. Detected from the collapse in "
+            "road input rather than the signal level — a parked wheel still "
+            "carries its full static weight. On the reference recording this "
+            "removes 343 s (6.2%): the pre-drive wait, one mid-route stop and "
+            "the end of the run. It matters more than it sounds — a standstill "
+            "carries a static Fx/Fz that an RMS severity is dominated by, and "
+            "keeping it inflated Gx from 0.045 to 0.116 on that recording.")
+        right.layout().addWidget(self.stops_check)
+        stop_row = QHBoxLayout()
+        stop_row.addSpacing(22)
+        stop_row.addWidget(QLabel("Shortest stop to cut"))
+        self.stop_min_spin = QDoubleSpinBox()
+        self.stop_min_spin.setRange(1.0, 120.0)
+        self.stop_min_spin.setValue(5.0)
+        self.stop_min_spin.setSuffix(" s")
+        self.stop_min_spin.setToolTip(
+            "Anything shorter is treated as traffic rather than a stop.")
+        self.stop_min_spin.setMaximumWidth(110)
+        stop_row.addWidget(self.stop_min_spin)
+        stop_row.addStretch(1)
+        right.layout().addLayout(stop_row)
+        self.stops_check.toggled.connect(self.stop_min_spin.setEnabled)
+        self.stop_min_spin.setEnabled(False)
+
         self.cutoff_spin = QDoubleSpinBox()
         self.cutoff_spin.setRange(0.1, 1000.0)
         self.cutoff_spin.setValue(10.0)
@@ -218,6 +292,7 @@ class NewStudyPage(BasePage):
 
         self._raw_folder: Path | None = None
         self._raw_files: list[Path] = []
+        self._raw_sessions: list[Path] = []
         self.reload_csvs()
         self._on_source_type()
         self._toggle_filter()
@@ -255,12 +330,74 @@ class NewStudyPage(BasePage):
             self.csv_combo.setCurrentIndex(0)
             self._update_detection()
 
+    def _add_session(self) -> None:
+        """Append another session folder to the join list."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Add an imc raw session folder", str(self.repo.csv_dir.parent))
+        if not folder:
+            return
+        if self._raw_folder and not self._raw_sessions:
+            self._raw_sessions = [self._raw_folder]      # promote the first pick
+        self._raw_sessions.append(Path(folder))
+        self._raw_folder = None
+        self._raw_files = []
+        self._describe_sessions()
+        self._update_detection()
+
+    def _describe_sessions(self) -> None:
+        """Redraw the join list and the one-line summary from ``_raw_sessions``."""
+        n = len(self._raw_sessions)
+        self.sessions_box.setVisible(n > 0)
+        keep = self.sessions_list.currentRow()
+        self.sessions_list.clear()
+        for i, f in enumerate(self._raw_sessions, 1):
+            self.sessions_list.addItem(f"{i}.  {f.name}")
+            self.sessions_list.item(self.sessions_list.count() - 1).setToolTip(str(f))
+        if 0 <= keep < n:
+            self.sessions_list.setCurrentRow(keep)
+        if not n:
+            self.raw_edit.clear()
+            return
+        total = f"{n} session{'s' if n != 1 else ''}, joined in listed order"
+        self.raw_edit.setText(total)
+
+    def _move_session(self, delta: int) -> None:
+        i = self.sessions_list.currentRow()
+        j = i + delta
+        if i < 0 or not (0 <= j < len(self._raw_sessions)):
+            return
+        s = self._raw_sessions
+        s[i], s[j] = s[j], s[i]
+        self._describe_sessions()
+        self.sessions_list.setCurrentRow(j)
+        self._update_detection()
+
+    def _session_up(self) -> None:
+        self._move_session(-1)
+
+    def _session_down(self) -> None:
+        self._move_session(+1)
+
+    def _session_remove(self) -> None:
+        i = self.sessions_list.currentRow()
+        if 0 <= i < len(self._raw_sessions):
+            self._raw_sessions.pop(i)
+            self._describe_sessions()
+            self.sessions_list.setCurrentRow(min(i, len(self._raw_sessions) - 1))
+            self._update_detection()
+
+    def _session_clear(self) -> None:
+        self._raw_sessions = []
+        self._describe_sessions()
+        self._update_detection()
+
     def _browse_raw(self) -> None:
         folder = QFileDialog.getExistingDirectory(
             self, "Select imc raw channel folder", str(self.repo.csv_dir.parent))
         if folder:
             self._raw_folder = Path(folder)
             self._raw_files = []
+            self._raw_sessions = []
             self.raw_edit.setText(folder)
             self._update_detection()
 
@@ -271,6 +408,7 @@ class NewStudyPage(BasePage):
         if paths:
             self._raw_files = [Path(p) for p in paths]
             self._raw_folder = None
+            self._raw_sessions = []
             self.raw_edit.setText(f"{len(self._raw_files)} files: "
                                   + ", ".join(p.name for p in self._raw_files[:4])
                                   + (" …" if len(self._raw_files) > 4 else ""))
@@ -281,6 +419,11 @@ class NewStudyPage(BasePage):
         if self.source_type.currentIndex() == 1:      # raw source
             if self._raw_files:
                 stems = [f.stem for f in self._raw_files]
+            elif self._raw_sessions:
+                # Channels are the intersection across sessions; the first is a
+                # fair preview and avoids reading every folder on each keystroke.
+                found = resolve_raw_folder(self._raw_sessions[0])
+                stems = [f.stem for f in sorted(found.glob("*.raw"))]
             elif self._raw_folder and self._raw_folder.exists():
                 found = resolve_raw_folder(self._raw_folder)
                 stems = [f.stem for f in sorted(found.glob("*.raw"))]
@@ -383,10 +526,22 @@ class NewStudyPage(BasePage):
             no_filter=not self.filter_check.isChecked(),
             no_famos=not self.famos_check.isChecked(),
             deglitch=self.deglitch_check.isChecked(),
+            remove_stops=self.stops_check.isChecked(),
+            stop_min_s=(self.stop_min_spin.value()
+                        if self.stops_check.isChecked() else None),
         )
 
         if is_raw:
-            if self._raw_files:
+            if self._raw_sessions:
+                missing = [f for f in self._raw_sessions if not f.exists()]
+                if missing:
+                    self.error_label.setText(
+                        f"Session folder not found: {missing[0]}")
+                    return
+                req = RunRequest(
+                    raw_folders=[resolve_raw_folder(f) for f in self._raw_sessions],
+                    **common)
+            elif self._raw_files:
                 existing = [f for f in self._raw_files if f.exists()]
                 if not existing:
                     self.error_label.setText("Selected .raw files not found.")

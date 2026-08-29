@@ -32,6 +32,7 @@ class RunRequest:
     csv_path: Optional[Path] = None
     raw_folder: Optional[Path] = None
     raw_files: Optional[List[Path]] = None
+    raw_folders: Optional[List[Path]] = None   # several sessions, joined in order
     vehicle: str = "Vehicle"
     vehicle_type: str = ""
     study: str = ""
@@ -41,6 +42,8 @@ class RunRequest:
     no_filter: bool = False
     no_famos: bool = False        # fall back to the legacy Butterworth LPF
     deglitch: bool = False        # rolling-median removal of DAQ artifact spikes
+    remove_stops: bool = False    # excise stationary/paused stretches
+    stop_min_s: Optional[float] = None
 
     def to_cmd(self) -> List[str]:
         # A frozen .exe re-invokes itself in pipeline mode; from source we call
@@ -49,7 +52,9 @@ class RunRequest:
             cmd = [sys.executable, "--run-pipeline"]
         else:
             cmd = [sys.executable, "-m", "dtt.pipeline"]
-        if self.raw_files:
+        if self.raw_folders:
+            cmd += ["--raw-folders"] + [str(f) for f in self.raw_folders]
+        elif self.raw_files:
             cmd += ["--raw-files"] + [str(f) for f in self.raw_files]
         elif self.raw_folder:
             cmd += ["--raw", str(self.raw_folder)]
@@ -70,6 +75,10 @@ class RunRequest:
             cmd += ["--no-filter"]
         if self.no_famos:
             cmd += ["--no-famos"]
+        if self.remove_stops:
+            cmd += ["--remove-stops"]
+            if self.stop_min_s:
+                cmd += ["--stop-min-s", str(self.stop_min_s)]
         if self.deglitch:
             cmd += ["--deglitch"]
         return cmd

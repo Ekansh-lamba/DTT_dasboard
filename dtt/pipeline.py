@@ -95,6 +95,40 @@ def _write_raw_csv(raw_frame, config, metadata, scale_meta) -> None:
                 "scaled by 1/%g)", path, len(out), len(out.columns) - 1, divisor)
 
 
+
+
+def _warn_if_stationary(df, config) -> None:
+    """Say so when a recording holds stops and they are being kept.
+
+    Silence here would be the dangerous option. A parked vehicle still reads a
+    static longitudinal load -- on the reference recording |Fx/Fz| sits at 0.667
+    while stopped against 0.026 while driving -- and because G-severity is an RMS
+    it is dominated by those large ratios. 280 s of standstill in a 5548 s record,
+    5% of it, inflated Gx from 0.045 to 0.116. The number is not wrong so much as
+    answering a different question, and nothing on the report says which.
+    """
+    from dtt.preprocessing import stop_mask_frame
+
+    try:
+        fs = config.sampling_rate
+        speed = next((c for c in ("Vehicle_Speed", "Speed_kmph", "Speed2D")
+                      if c in df.columns), None)
+        mask, basis = stop_mask_frame(df, fs, speed_column=speed,
+                                      min_stop_s=getattr(config, "stop_min_s", 3.0))
+    except Exception:                                            # noqa: BLE001
+        return
+    if mask is None or not mask.any():
+        return
+    seconds = float(mask.sum()) / fs
+    pct = 100.0 * seconds / (len(df) / fs) if len(df) else 0.0
+    logger.warning(
+        "%.0f s stationary (%.1f%% of the recording, from %s) is being kept. "
+        "Standstill carries a static Fx/Fz that an RMS severity is dominated by, "
+        "so Gx/Gy/Gxy and the histograms describe the parked vehicle as much as "
+        "the road. Re-run with --remove-stops to exclude it.",
+        seconds, pct, basis)
+
+
 def run(
     csv_path: Path = None,
     vehicle_name: str = "Vehicle",
@@ -107,17 +141,20 @@ def run(
     output_dir: Path        = None,
     raw_folder: Path        = None,
     raw_files:  list        = None,
+    raw_folders: list       = None,
+    remove_stops: bool      = False,
     vehicle_type: str       = "",
     famos_mode: bool        = True,
     deglitch:   bool        = False,
 ) -> Path:
-    if csv_path is None and raw_folder is None and not raw_files:
-        raise ValueError("Provide csv_path, raw_folder, or raw_files")
+    if csv_path is None and raw_folder is None and not raw_files and not raw_folders:
+        raise ValueError("Provide csv_path, raw_folder, raw_folders, or raw_files")
 
     kwargs = dict(
         csv_path     = Path(csv_path) if csv_path else None,
         raw_folder   = Path(raw_folder) if raw_folder else None,
         raw_files    = [Path(f) for f in raw_files] if raw_files else None,
+        raw_folders  = [Path(f) for f in raw_folders] if raw_folders else None,
         vehicle_type = vehicle_type,
         vehicle_name = vehicle_name,
         study_name   = study_name,
@@ -130,12 +167,14 @@ def run(
     kwargs["apply_filter"] = apply_filter_flag
     kwargs["famos_mode"]   = famos_mode
     kwargs["deglitch"]     = deglitch
+    kwargs["remove_stops"] = remove_stops
 
     config = RunConfig(**kwargs)
     _setup_logging(config)
     logger = logging.getLogger("pipeline")
 
-    source = (f"{len(config.raw_files)} raw files" if config.raw_files
+    source = (f"{len(config.raw_folders)} raw sessions" if getattr(config, "raw_folders", None)
+              else f"{len(config.raw_files)} raw files" if config.raw_files
               else config.raw_folder or config.csv_path)
     logger.info("=" * 60)
     logger.info("DTT WFT Automation Pipeline  –  Starting")
@@ -150,7 +189,10 @@ def run(
     t0 = time.perf_counter()
 
     logger.info("[1/9]  Data Ingestion")
-    if config.raw_files:
+    if getattr(config, "raw_folders", None):
+        from dtt.ingestion.loader import load_raw_sessions
+        df, metadata = load_raw_sessions(config.raw_folders, config)
+    elif config.raw_files:
         from dtt.ingestion.loader import load_raw_files
         df, metadata = load_raw_files(config.raw_files, config)
     elif config.raw_folder is not None:
@@ -165,6 +207,10 @@ def run(
     # A DataFrame must not travel in metadata: that dict is handed to validation
     # and the report builder, both of which treat it as plain descriptive values.
     raw_frame = metadata.pop("raw_frame", None)
+    if metadata.get("sessions", 1) > 1:
+        logger.info("Joined %d recording sessions -> %.0f s; seams at %s s",
+                    metadata["sessions"], metadata.get("duration_s", 0),
+                    ", ".join(f"{t:.0f}" for t in metadata.get("seam_times_s", [])))
     config.famos_applied = bool(metadata.get("famos_recipe"))
     if config.famos_applied:
         # Report how many channels were actually *conditioned*, not how many the
@@ -197,6 +243,9 @@ def run(
     df, scale_meta = normalise_force_units(df, config)
     metadata.update(scale_meta)
 
+    if not getattr(config, "remove_stops", False):
+        _warn_if_stationary(df, config)
+
     logger.info("[2/9]  Channel Validation")
     validation_report = validate(df, metadata, config)
 
@@ -223,13 +272,18 @@ def run(
     df.to_csv(processed_csv, index=False, float_format=CSV_FLOAT_FORMAT)
     logger.info("Processed data saved: %s  (%d rows)", processed_csv, len(df))
 
-    # Stop removal produces a *derived* series for rainflow and statistics
-    # only -- processed_data.csv above is already saved from the full `df`,
-    # which stays the canonical processed artifact. This keeps the feature
-    # reversible (nothing downstream of `df` itself depends on it) and keeps
-    # a stop-containing study's "study data" file showing everything that
-    # was actually measured.
-    stats_df = df
+    # Stop removal produces a *derived* series for every analysis stage below
+    # -- processed_data.csv above is already saved from the full `df`, which
+    # stays the canonical processed artifact regardless. This keeps the
+    # feature reversible (nothing upstream of this point depends on it) and
+    # keeps a stop-containing study's "study data" file showing everything
+    # that was actually measured, while statistics/severity/histograms/
+    # heatmaps/boxplots/rainflow all see the moving-only view: a parked
+    # vehicle still carries a static Fx/Fz that distorts more than just
+    # rainflow -- on the reference recording it inflated FR Gx from 0.045 to
+    # 0.116 (G-severity is an RMS, dominated by those few large standstill
+    # ratios) and would skew every histogram's near-zero bin too.
+    analysis_df = df
     if getattr(config, "remove_stops", False):
         from dtt.preprocessing import remove_stops_frame
         speed_col = _find_speed_column(df)
@@ -245,42 +299,42 @@ def run(
                 "Stop removal: %d stop(s), %.1fs removed (%s), basis=%s",
                 stop_meta["stops_removed"], stop_meta["stop_seconds"],
                 stop_meta.get("removed_intervals"), stop_meta.get("stop_basis"))
-            stats_df = moving_df
+            analysis_df = moving_df
         else:
             logger.info("Stop removal enabled but found nothing to cut")
 
     logger.info("[5/9]  Statistical Analysis")
-    stats = compute_statistics(stats_df, config)
+    stats = compute_statistics(analysis_df, config)
 
     logger.info("[5b/9] Load Severity  (Gx, Gy, Gxy, DLC)")
     try:
         from dtt.analysis.severity import compute_severity, generate_severity_figure
-        severity = compute_severity(df, config)
+        severity = compute_severity(analysis_df, config)
         generate_severity_figure(severity, config)
     except Exception as exc:
         logger.error("Severity analysis failed: %s", exc, exc_info=True)
 
     logger.info("[6/9]  Histogram Generation")
     try:
-        generate_histograms(df, config)
+        generate_histograms(analysis_df, config)
     except Exception as exc:
         logger.error("Histogram generation failed: %s", exc, exc_info=True)
 
     logger.info("[7/9]  Heatmap Generation")
     try:
-        generate_heatmaps(df, config)
+        generate_heatmaps(analysis_df, config)
     except Exception as exc:
         logger.error("Heatmap generation failed: %s", exc, exc_info=True)
 
     logger.info("[8/9]  Boxplot Generation")
     try:
-        generate_boxplots(df, config)
+        generate_boxplots(analysis_df, config)
     except Exception as exc:
         logger.error("Boxplot generation failed: %s", exc, exc_info=True)
 
     logger.info("[9/9]  Rainflow Analysis")
     try:
-        generate_rainflow(stats_df, config)
+        generate_rainflow(analysis_df, config)
     except Exception as exc:
         logger.error("Rainflow generation failed: %s", exc, exc_info=True)
 
@@ -302,6 +356,9 @@ def _cli() -> None:
     src.add_argument("--csv",                               help="Path to WFT CSV file")
     src.add_argument("--raw",                               help="Path to imc STUDIO .raw channel folder")
     src.add_argument("--raw-files", nargs="+",              help="Specific imc .raw files")
+    src.add_argument("--raw-folders", nargs="+",
+                     help="Several imc .raw session folders, joined end to end "
+                          "in recording order (one route captured over several runs)")
     parser.add_argument("--vehicle",  default="Vehicle",    help="Vehicle name for report naming")
     parser.add_argument("--vehicle-type", default="",       help="Vehicle-type preset ('' = auto-detect)")
     parser.add_argument("--study",    default="",           help="Study identifier (default: timestamp)")
@@ -311,6 +368,11 @@ def _cli() -> None:
     parser.add_argument("--no-filter", action="store_true", help="Disable all filtering")
     parser.add_argument("--no-famos",  action="store_true",
                         help="Use the legacy Butterworth LPF instead of the imc/FAMOS recipe")
+    parser.add_argument("--remove-stops", action="store_true",
+                        help="Excise stationary/paused stretches so stops are not "
+                             "counted as road load")
+    parser.add_argument("--stop-min-s", type=float,
+                        help="Shortest stationary stretch to remove (default 3 s)")
     parser.add_argument("--deglitch",  action="store_true",
                         help="Rolling-median de-glitch of DAQ artifact spikes before filtering")
     parser.add_argument("--miner",    type=float,           help="Miner's rule exponent (default 8)")
@@ -320,6 +382,7 @@ def _cli() -> None:
     run(
         csv_path         = args.csv,
         raw_folder       = args.raw,
+        raw_folders      = args.raw_folders,
         raw_files        = args.raw_files,
         vehicle_type     = args.vehicle_type,
         vehicle_name     = args.vehicle,
@@ -330,6 +393,7 @@ def _cli() -> None:
         apply_filter_flag= not args.no_filter,
         famos_mode       = not args.no_famos,
         deglitch         = args.deglitch,
+        remove_stops     = args.remove_stops,
         miner_exponent   = args.miner,
         output_dir       = args.outdir,
     )

@@ -133,6 +133,7 @@ class RunConfig:
     csv_path:       Optional[Path] = None
     raw_folder:     Optional[Path] = None      # imc STUDIO .raw folder (alt source)
     raw_files:      Optional[list] = None       # explicit subset of .raw files
+    raw_folders:    Optional[list] = None       # several session folders, joined end to end
     vehicle_type:   str   = ""                 # chosen preset name ("" = auto-detect)
     vehicle_name:   str   = "Vehicle"
     study_name:     str   = ""
@@ -156,7 +157,7 @@ class RunConfig:
     transient_despike_window_s:      float = 1.0
     transient_despike_noise_floor_mult: float = 10.0
     transient_despike_max_spike_frac:   float = 0.4
-    remove_stops:            bool  = False  # cut stationary stretches ahead of rainflow/statistics only
+    remove_stops:            bool  = False  # cut stationary stretches for every analysis stage (stats/severity/histograms/heatmaps/boxplots/rainflow); processed_data.csv/raw_data.csv stay the full recording
     stop_speed_kph:           float = 1.5   # below this reads as "stopped", not literal zero
     stop_min_s:                float = 3.0   # shorter than this is traffic, not a stop worth cutting
     stop_seam_search_s:        float = 1.0   # nudge each cut boundary up to this many seconds to a quiet moment

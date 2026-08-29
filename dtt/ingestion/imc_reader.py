@@ -281,6 +281,74 @@ def _parse_famos_keys(raw: bytes):
     return keys
 
 
+def read_famos_all(path: Path) -> List[ImcChannel]:
+    """Every channel in a FAMOS file, in file order.
+
+    A FAMOS ``.dat`` holds as many channels as you save into it, which is what
+    FAMOS itself writes when several variables are selected at once. The per-file
+    reader below assumes one, because the imc raw exports this project started
+    from happen to ship one channel each -- an assumption that quietly truncates
+    a real FAMOS save to its first channel.
+
+    The keys arrive as one flat stream, so channel boundaries are inferred: the
+    describing keys (``CD`` sample step, ``CP`` number format, ``CR`` scaling,
+    ``CN`` name) accumulate, and each ``CS`` block closes a channel using
+    whatever is current. ``CD`` is not repeated per channel in every writer, so
+    it persists across channels rather than resetting.
+    """
+    raw = Path(path).read_bytes()
+    if not raw.startswith(b"|CF"):
+        return []
+
+    out: List[ImcChannel] = []
+    dx = None
+    factor, offset, unit = 1.0, 0.0, ""
+    dtype = "<i2"
+    name = ""
+    index = 0
+
+    for key, content in _parse_famos_keys(raw):
+        fields = content.split(b",")
+        if key == "CD":
+            try:
+                dx = float(fields[0])
+            except (ValueError, IndexError):
+                pass
+        elif key == "CP" and len(fields) >= 3:
+            try:
+                dtype = _FAMOS_DT.get(int(fields[2]), "<i2")
+            except ValueError:
+                pass
+        elif key == "CR" and len(fields) >= 3:
+            try:
+                factor, offset = float(fields[1]), float(fields[2])
+            except ValueError:
+                pass
+            unit = fields[-1].decode("latin1").strip()
+        elif key == "CN" and len(fields) >= 5:
+            name = fields[4].decode("latin1").strip()
+        elif key == "CS":
+            ci = content.find(b",")
+            blob = content[ci + 1:] if ci >= 0 else content
+            if not blob or not dx:
+                continue
+            size = np.dtype(dtype).itemsize
+            count = len(blob) // size
+            if count == 0:
+                continue
+            samples = np.frombuffer(blob[:count * size],
+                                    dtype=dtype).astype(np.float64)
+            index += 1
+            label = name or f"{Path(path).stem}_{index}"
+            out.append(ImcChannel(
+                name=_map_name(label), raw_name=label, unit=unit,
+                factor=factor, data=samples * factor + offset, fs=1.0 / dx))
+            # Name belongs to the channel just closed; the next must supply
+            # its own or be numbered, rather than inheriting this one.
+            name = ""
+    return out
+
+
 def read_famos(path: Path) -> Optional[ImcChannel]:
     raw = Path(path).read_bytes()
     if not raw.startswith(b"|CF"):
@@ -451,8 +519,13 @@ def _assemble(channels, target_fs, source, famos: bool = True,
         fs_out = fs / step
         df["Time"] = np.arange(len(df)) / fs_out
 
+    # Earliest channel start, from Storage.imcdbc. This is how several sessions
+    # of one route get put back in the order they were driven.
+    epochs = [c.start_epoch for c in channels
+              if getattr(c, "start_epoch", 0) and np.isfinite(c.start_epoch)]
     meta = {
         "source": str(source),
+        "start_epoch": min(epochs) if epochs else None,
         "n_channels": len(channels),
         "raw_fs_hz": round(fs, 3),
         "output_fs_hz": round(fs_out, 3),
