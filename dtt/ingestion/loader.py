@@ -405,6 +405,21 @@ def load_raw_sessions(folders, config: RunConfig) -> Tuple[pd.DataFrame, dict]:
     raws = [m.pop("raw_frame", None) for m in metas]
     joined, joined_raw, report = concat_sessions(frames, fs, metas, raws)
 
+    # Say why before _finalize_raw reports the symptom. Two legs of one route
+    # can be named differently by the recorder, and the canonical matching in
+    # sessions.py handles that; genuinely different vehicles cannot be joined,
+    # and "No force channels detected" is not a useful way to learn it.
+    if not _detect_force_channels(joined):
+        per = [f"{m.get('source', '?')}: "
+               f"{sum(1 for c in fr.columns if _detect_force_channels(fr[[c]]))} force ch"
+               for m, fr in zip(metas, frames)]
+        raise ValueError(
+            "Sessions share no wheel-force channel, so there is nothing to join. "
+            "Channels are matched by wheel position, so different spellings of "
+            "the same wheel are fine - but these recordings have no position in "
+            "common, which usually means they are different vehicles or "
+            "instrumentation. Per session: " + "; ".join(per))
+
     meta = merge_metadata(metas, report)
     meta["raw_frame"] = joined_raw
     meta["rows"] = len(joined)

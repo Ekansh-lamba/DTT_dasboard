@@ -70,20 +70,130 @@ def order_sessions(metas: Sequence[dict]) -> List[int]:
     return [i for _, i in sorted(dated)] + undated
 
 
-def common_channels(frames: Sequence[pd.DataFrame]) -> List[str]:
-    """Channels present in every session, in the first session's order.
+def _canonical(name: str):
+    """``A1R_Fx`` for any spelling of a wheel channel, else ``None``."""
+    from dtt.channels import parse_channel
+    parsed = parse_channel(name)
+    if parsed is None:
+        return None
+    pos, comp = parsed
+    return pos.channel(comp)
+
+
+def common_channels(frames: Sequence[pd.DataFrame]) -> Tuple[List[str], List[Dict[str, str]]]:
+    """``(names, renames)`` -- the channels every session has, and how to get them.
+
+    Wheel channels are matched **canonically**, not by spelling. The same wheel
+    arrives as ``FR_Fx_2`` from one export and ``FR_Fx`` from another depending
+    on how the recorder was configured, and a literal intersection of those two
+    sessions finds no force channels at all -- which is a confusing way to
+    discover that two legs of one route were named differently.
+    ``dtt.channels.parse_channel`` resolves both to position A1R component Fx,
+    which is the identity that actually matters.
+
+    Everything else -- speed, GPS, angles -- is matched literally, having no
+    canonical form to appeal to.
 
     An intersection rather than a union: a channel missing from one leg would
-    otherwise arrive as a column that is real for 40 km and NaN for the next 50,
-    and every statistic computed from it would silently describe only part of
-    the drive.
+    otherwise be real for 40 km and NaN for the next 50, and every statistic
+    computed from it would silently describe only part of the drive.
+
+    ``renames`` maps each session's own column names to the shared names, which
+    are the first session's, so the ordinary case of identical naming is a no-op.
     """
     if not frames:
-        return []
-    shared = set(frames[0].columns)
-    for f in frames[1:]:
-        shared &= set(f.columns)
-    return [c for c in frames[0].columns if c in shared]
+        return [], []
+
+    # canonical id -> that session's column name, per session
+    canon = [{c: _canonical(c) for c in f.columns} for f in frames]
+    per_session = [{v: k for k, v in m.items() if v} for m in canon]
+    shared_canon = set(per_session[0])
+    for m in per_session[1:]:
+        shared_canon &= set(m)
+
+    plain = [set(c for c in f.columns if canon[i][c] is None)
+             for i, f in enumerate(frames)]
+    shared_plain = set(plain[0])
+    for pl in plain[1:]:
+        shared_plain &= pl
+
+    names: List[str] = []
+    renames: List[Dict[str, str]] = [{} for _ in frames]
+    for c in frames[0].columns:
+        cid = canon[0][c]
+        if cid is not None and cid in shared_canon:
+            names.append(c)
+            for i, m in enumerate(per_session):
+                renames[i][m[cid]] = c          # each session's spelling -> ours
+        elif cid is None and c in shared_plain:
+            names.append(c)
+            for i in range(len(frames)):
+                renames[i][c] = c
+    return names, renames
+
+
+
+def _static_fz(df: pd.DataFrame) -> float:
+    """Median |Fz| across a session's vertical channels, or NaN."""
+    from dtt.channels import parse_channel
+    mags = []
+    for c in df.columns:
+        parsed = parse_channel(c)
+        if parsed is None or parsed[1] != "Fz":
+            continue
+        v = pd.to_numeric(df[c], errors="coerce").abs()
+        v = v[np.isfinite(v) & (v > 0)]
+        if len(v):
+            mags.append(float(v.median()))
+    return float(np.median(mags)) if mags else float("nan")
+
+
+def align_session_scales(frames: Sequence[pd.DataFrame],
+                         renames: Sequence[Dict[str, str]]) -> List[float]:
+    """Put every session's forces on the first session's scale. Returns the factors.
+
+    Sessions of one route can still be recorded through different calibrations:
+    in the reference pair, one file carries a ``CR`` factor of 1.37 and stores a
+    correct 5,856 N static wheel load, the other a factor of 10 and stores
+    79,120 N for the same physical quantity. Joining those and applying a single
+    correction afterwards -- which is right when the legs agree -- divides both
+    by the same number and leaves one of them a decade wrong, at 60 kg on a
+    wheel.
+
+    Static Fz is the anchor again: it is the corner weight, so two legs of one
+    route must agree on it. Only clean decades are corrected, because that is
+    what a calibration difference looks like; anything else is a different
+    vehicle, and quietly rescaling one to match the other would manufacture
+    agreement rather than find it.
+    """
+    ref = _static_fz(frames[0].rename(columns=renames[0]))
+    factors = [1.0]
+    for f, rn in zip(frames[1:], renames[1:]):
+        mag = _static_fz(f.rename(columns=rn))
+        if not (np.isfinite(ref) and np.isfinite(mag)) or ref <= 0 or mag <= 0:
+            factors.append(1.0)
+            continue
+        decades = int(round(np.log10(mag / ref)))
+        if decades == 0:
+            factors.append(1.0)
+            continue
+        factor = 10.0 ** decades
+        # A clean decade is a calibration difference; anything else is not.
+        if abs(np.log10(mag / ref) - decades) > 0.25:
+            logger.warning(
+                "Session static |Fz| is %.0f against %.0f in the first session, "
+                "a factor of %.2f that is not a clean decade. These are probably "
+                "different vehicles or instrumentation; joining them anyway, "
+                "unscaled, but the result will step at the seam.",
+                mag, ref, mag / ref)
+            factors.append(1.0)
+            continue
+        logger.warning(
+            "Session static |Fz| is %.0f against %.0f in the first session - "
+            "a 10^%d calibration difference; scaling its forces to match so the "
+            "joined record sits on one scale.", mag, ref, decades)
+        factors.append(factor)
+    return factors
 
 
 def concat_sessions(frames: Sequence[pd.DataFrame], fs: float,
@@ -104,11 +214,15 @@ def concat_sessions(frames: Sequence[pd.DataFrame], fs: float,
             "sessions": 1, "seam_times_s": [], "session_durations_s":
                 [round(len(frames[0]) / fs, 2)] if fs else []}
 
-    cols = common_channels(frames)
+    cols, renames = common_channels(frames)
     if TIME_COLUMN in cols:
         cols = [c for c in cols if c != TIME_COLUMN]
     dropped = sorted(set().union(*(set(f.columns) for f in frames)) - set(cols)
-                     - {TIME_COLUMN})
+                     - set().union(*(set(r) for r in renames)) - {TIME_COLUMN})
+
+    # Bring every leg onto the first leg's scale before appending.
+    from dtt.channels import parse_channel
+    scale_factors = align_session_scales(frames, renames)
 
     pieces: List[pd.DataFrame] = []
     seams: List[float] = []
@@ -116,8 +230,18 @@ def concat_sessions(frames: Sequence[pd.DataFrame], fs: float,
     offsets: Dict[str, float] = {c: 0.0 for c in cols if _is_cumulative(c)}
     n_total = 0
 
-    for f in frames:
-        part = f[cols].reset_index(drop=True).copy()
+    for f, rename, sf in zip(frames, renames, scale_factors):
+        # Each session is relabelled to the shared names before it is appended,
+        # so a wheel keeps one column whatever the recorder called it.
+        own = {src: dst for src, dst in rename.items() if dst in cols}
+        part = f[list(own)].rename(columns=own).reset_index(drop=True)
+        part = part[[c for c in cols if c in part.columns]].copy()
+        if sf != 1.0:
+            # Forces and moments only: the aux channels carry their own units
+            # and are unaffected by a force-transducer calibration.
+            for c in part.columns:
+                if parse_channel(c) is not None:
+                    part[c] = pd.to_numeric(part[c], errors="coerce") / sf
         for c in list(offsets):
             v = pd.to_numeric(part[c], errors="coerce")
             # Distance restarts at zero each session; carry the running total so
@@ -147,6 +271,7 @@ def concat_sessions(frames: Sequence[pd.DataFrame], fs: float,
         "total_duration_s": round(n_total / fs, 2) if fs else 0.0,
         "channels_joined": len(cols),
         "channels_dropped": dropped,
+        "session_scale_factors": scale_factors,
     }
     if dropped:
         logger.warning("Joined on %d channels common to all %d sessions; "
@@ -163,12 +288,16 @@ def _concat_raw(raw_frames, fs: float) -> Optional[pd.DataFrame]:
     present = [r for r in raw_frames if r is not None and len(r)]
     if not present:
         return None
-    cols = common_channels(present)
+    cols, renames = common_channels(present)
     cols = [c for c in cols if c != TIME_COLUMN]
     if not cols:
         return None
-    out = pd.concat([r[cols].reset_index(drop=True) for r in present],
-                    ignore_index=True)
+    parts = []
+    for r, rename in zip(present, renames):
+        own = {src: dst for src, dst in rename.items() if dst in cols}
+        q = r[list(own)].rename(columns=own).reset_index(drop=True)
+        parts.append(q[[c for c in cols if c in q.columns]])
+    out = pd.concat(parts, ignore_index=True)
     out.insert(0, TIME_COLUMN, np.arange(len(out)) / fs if fs else
                np.arange(len(out), dtype=float))
     return out
