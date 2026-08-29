@@ -9,10 +9,11 @@ import warnings
 import numpy as np
 import pandas as pd
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QObject, QEvent
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QFormLayout, QComboBox, QDoubleSpinBox, QSpinBox,
     QCheckBox, QLabel, QPushButton, QScrollArea, QFileDialog, QMessageBox,
-    QApplication, QAbstractSpinBox, QSlider,
+    QApplication, QAbstractSpinBox, QListWidget, QListWidgetItem, QSlider,
 )
 
 from gui import theme
@@ -374,6 +375,24 @@ class PreprocessPage(BasePage):
         self.ctrl_scroll.setWidget(ctrl)
         self.ctrl_scroll.setMinimumWidth(300)
         self.ctrl_scroll.setMaximumWidth(340)
+        # Every channel in the study, listed rather than hidden in a dropdown.
+        # A recording carries 38 of them; a combo box shows one at a time and
+        # gives no sense of what the study contains, which is the first thing
+        # you want to know when you open it.
+        ctrl.layout().addWidget(_title("Channels"))
+        self.channel_list = QListWidget()
+        self.channel_list.setToolTip(
+            "Click a channel to plot it. Wheel force and moment channels are "
+            "listed first, then everything else the recording carries.")
+        self.channel_list.setMinimumHeight(190)
+        self.channel_list.setAlternatingRowColors(True)
+        self.channel_list.currentTextChanged.connect(self._on_channel_picked)
+        ctrl.layout().addWidget(self.channel_list)
+        self.channel_count = QLabel("")
+        self.channel_count.setStyleSheet(
+            f"color:{theme.TEXT_MUTED}; font-size:11px;")
+        ctrl.layout().addWidget(self.channel_count)
+
         ctrl.layout().addWidget(_title("Sanitization"))
         form = QFormLayout(); form.setSpacing(10)
 
@@ -576,6 +595,7 @@ class PreprocessPage(BasePage):
         self._data = np.array([])
         self._raw = None                 # true unconditioned channel, if kept
         self._raw_time = None
+        self._syncing_channels = False   # list <-> combo, without an echo
         self._cache = {}                 # (study, channel) -> loaded arrays
         self._workers = set()            # keep QThreads alive while running
         self._pending_channel = None
@@ -665,13 +685,18 @@ class PreprocessPage(BasePage):
         self._syncing = True
         self.famos_auto.setChecked(not self._conditioned)
         self._syncing = False
+        names = self._channel_names()
         self.channel_combo.blockSignals(True)
         self.channel_combo.clear()
-        self.channel_combo.addItems(self._channel_names())
+        self.channel_combo.addItems(names)
         self.channel_combo.blockSignals(False)
+        self._fill_channel_list(names)
         if self.channel_combo.count():
-            self._load_channel(self.channel_combo.currentText())
+            current = self.channel_combo.currentText()
+            self._select_in_list(current)
+            self._load_channel(current)
         else:
+            self.channel_count.setText("")
             self.canvas.clear(); self.canvas.draw_idle()
             self.stats_label.setText("No processed data for this study.")
     def _channel_names(self) -> list:
@@ -716,9 +741,50 @@ class PreprocessPage(BasePage):
              if "Time" in df.columns else None)
         return t, y
 
+    def _on_channel_picked(self, text: str) -> None:
+        """List selection -> the combo, which owns the actual load."""
+        name = text.strip()
+        if not name or self._syncing_channels:
+            return
+        if self.channel_combo.currentText() != name:
+            self.channel_combo.setCurrentText(name)
+
+    def _fill_channel_list(self, names) -> None:
+        """Rebuild the list: force/moment channels first, then the rest."""
+        self._syncing_channels = True
+        try:
+            self.channel_list.clear()
+            wft = [c for c in names if is_wft_channel(c)]
+            other = [c for c in names if c not in set(wft)]
+            for group, label in ((wft, "wheel force / moment"), (other, "other")):
+                if not group:
+                    continue
+                head = QListWidgetItem(f"— {label} —")
+                head.setFlags(Qt.NoItemFlags)          # a divider, not a choice
+                head.setForeground(QColor(theme.TEXT_FAINT))
+                self.channel_list.addItem(head)
+                for c in group:
+                    self.channel_list.addItem(QListWidgetItem(c))
+            self.channel_count.setText(
+                f"{len(names)} channels  ·  {len(wft)} wheel force/moment")
+        finally:
+            self._syncing_channels = False
+
+    def _select_in_list(self, name: str) -> None:
+        """Highlight ``name`` without re-triggering a load."""
+        self._syncing_channels = True
+        try:
+            for i in range(self.channel_list.count()):
+                if self.channel_list.item(i).text().strip() == name:
+                    self.channel_list.setCurrentRow(i)
+                    break
+        finally:
+            self._syncing_channels = False
+
     def _load_channel(self, ch: str) -> None:
         if not ch or not self.study or not self.study.processed_csv.exists():
             return
+        self._select_in_list(ch)
         key = (str(self.study.path), ch)
         hit = self._cache.get(key)
         if hit is not None:
