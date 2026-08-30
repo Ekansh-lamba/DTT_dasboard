@@ -794,3 +794,35 @@ studies is correctly flagged, and confirmed a study with no
 case (one study missing most channels) skips the non-overlapping wheels
 with a logged warning instead of crashing. JSON and PNG both write
 successfully to a `_comparisons/` folder.
+
+## Step 5 — A4: RF Compare (2026-08-31)
+
+**Fix:** extended `dtt/analysis/study_compare.py` (belongs with A3, per the
+plan) rather than a new module. `_axle_labels(rc, axle)` generalizes
+"front axle (FL+FR)" beyond a hardcoded 2-axle car: front = the first half
+of `RunChannels.labels` in the order the platform's own axle-dynamic model
+reports them, rear = the rest — works for any axle count, not just a
+4-wheel car. `compare_rainflow(study_a_dir, study_b_dir, component, axle)`
+combines the axle's wheels' cycles within each study and computes Miner
+damage via `rainflow.py::_miner_damage` **unchanged** — this step adds no
+new rainflow math, only the axle-grouping-across-two-studies orchestration
+the brief specified. `generate_rf_compare` renders the range-distribution
+KDE overlay via the Step 4 `draw_comparison_kde`/`draw_stats_strip` helpers
+(same shared styling as A3, not a separate look) with the Miner damage
+ratio (`damage_b / damage_a`) and both raw damage numbers in the title, and
+saves `rf_compare_{axle}_{component}_{a}_vs_{b}.png` into the same
+`outputs/_comparisons/` folder A3 uses.
+
+**Validated:** two synthetic studies with an oscillating Fx signal on
+FL+FR (amplitude 50 vs. 90, everything else noise) — `_axle_labels`
+correctly resolves `axle="front"` to `['FL', 'FR']`. Independently
+recomputed the front axle's combined Miner damage by calling
+`_extract_cycles`/`_miner_damage` directly (bypassing `compare_rainflow`
+entirely) and confirmed it matches `result.damage_a` to 1e-6 — the
+cross-check the brief's validation step asked for ("the Miner ratio equals
+the two studies' individual damage numbers divided"). Confirmed
+`damage_ratio == damage_b / damage_a` exactly, confirmed the higher-amplitude
+study (90 vs. 50) produced the larger damage number as physically expected
+(ratio ≈ 104x, consistent with Miner's `range^m` at `m=8` amplifying a
+1.8x amplitude difference sharply), and confirmed the PNG renders
+successfully.
