@@ -663,3 +663,32 @@ exactly matches the recording's known distance (`20 m/s * 5000 samples /
 stuck-at-zero speed channel correctly returns `None` (all-zero rejection
 already in `_speed_as_mps`), and `generate_heatmaps` completes without
 error, falling back to count-weighting with the labelled title.
+
+## Step 3 — A2: Welch PSD (2026-08-31)
+
+**Issue:** `dtt/spectral.py` had `amplitude_spectrum_db` (single windowed FFT,
+dB magnitude — the FAMOS-style spectral-line view) but no Welch PSD anywhere
+in the codebase (confirmed by grep, zero hits for "welch" outside the
+standalone script). These answer different questions: Welch's segment
+averaging gives a statistically stable noise floor; a single FFT shows exact
+spectral lines. Durability/fatigue work commonly wants both.
+
+**Fix:** `spectral.py::welch_psd(x, fs, nperseg=None)` wraps
+`scipy.signal.welch`. Default `nperseg = min(len(x), max(256, fs*4))` — a
+longer segment than a live-GUI tool would pick (the standalone script used
+`min(len, max(64, fs*2))` for interactive responsiveness), documented in the
+function's own docstring as a deliberate batch-pipeline accuracy choice, not
+a value inherited from the script. New `dtt/analysis/psd.py::generate_psd`
+follows the same per-wheel-figure pattern as `rainflow.py`/`histograms.py`
+(iterates `config.run_channels.wheel_groups`, not hardcoded FL/FR/RL/RR;
+sample rate from `config.sampling_rate`, never typed), saves `psd_{wheel}.png`
+into `config.figures_dir`. Wired into `pipeline.py` as stage `[9b/9]`,
+same try/except-and-log pattern as every other analysis stage so a PSD
+failure can't take down the run.
+
+**Validated:** a synthetic 5 Hz tone (buried in noise, 100 Hz sample rate,
+200 s) — `welch_psd`'s returned frequency axis tops out at exactly `fs/2 =
+50 Hz` as expected, and the PSD's peak lands at 5.0 Hz, recovering the known
+tone. `generate_psd` on synthetic 4-wheel data produces one `psd_{wheel}.png`
+per wheel (4 files). Confirmed `dtt.pipeline` still imports cleanly with the
+new stage wired in.

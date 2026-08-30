@@ -338,6 +338,13 @@ def run(
     except Exception as exc:
         logger.error("Rainflow generation failed: %s", exc, exc_info=True)
 
+    logger.info("[9b/9] Welch PSD")
+    try:
+        from dtt.analysis.psd import generate_psd
+        generate_psd(analysis_df, config)
+    except Exception as exc:
+        logger.error("PSD generation failed: %s", exc, exc_info=True)
+
     logger.info("[Report]  Building PowerPoint")
     report_path = build_report(config, validation_report, stats, metadata)
 

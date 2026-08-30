@@ -3,13 +3,18 @@ Frequency analysis + time-synchronisation helpers (FAMOS-style).
 
 * ``amplitude_spectrum_db`` — single-sided FFT amplitude in dB vs frequency,
   the plot FAMOS shows (|dB| against a log-frequency axis).
+* ``welch_psd`` — Welch's averaged-periodogram power spectral density. A
+  distinct, complementary view to ``amplitude_spectrum_db``: segment
+  averaging trades exact spectral lines for a smoothed, statistically
+  stable noise floor, which is what a durability/fatigue read of "where is
+  the energy" usually wants rather than a single windowed FFT's line detail.
 * ``estimate_lag`` — cross-correlation lag (in samples) that best aligns one
   channel to a reference, for time-synchronising channels on a shared axis.
 """
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -35,6 +40,31 @@ def amplitude_spectrum_db(x: np.ndarray, fs: float,
     freq = np.fft.rfftfreq(n, d=1.0 / fs)
     db = 20.0 * np.log10(mag + 1e-12)
     return freq, db
+
+
+def welch_psd(x: np.ndarray, fs: float,
+             nperseg: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
+    """Welch power spectral density: ``(frequencies_hz, psd)``.
+
+    ``nperseg`` defaults to a batch-pipeline-appropriate segment length
+    derived from ``fs`` (``min(n, max(256, fs*4))``) — a longer segment than
+    a live-GUI tool would use, trading update latency (irrelevant here, this
+    runs once per study) for a smoother, more resolved PSD estimate. This is
+    an explicit accuracy choice, not a default inherited from anywhere else.
+
+    NaNs are dropped first. Returns a flat near-zero spectrum for input too
+    short to window meaningfully.
+    """
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size < 8 or fs <= 0:
+        return np.array([0.0]), np.array([0.0])
+    from scipy.signal import welch
+    if nperseg is None:
+        nperseg = int(min(x.size, max(256, fs * 4)))
+    nperseg = max(8, min(nperseg, x.size))
+    freq, psd = welch(x, fs=fs, nperseg=nperseg)
+    return freq, psd
 
 
 def log_downsample(f: np.ndarray, db: np.ndarray, n: int = 2000
