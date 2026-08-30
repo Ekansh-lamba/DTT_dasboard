@@ -739,3 +739,58 @@ between two synthetic records, returns no warnings for two identical
 records, and correctly reports "no provenance recorded" (as a warning, not
 an exception) when one side is `None`. Confirmed `dtt.pipeline` still
 imports cleanly with the write wired in.
+
+## Step 4 — A3: two-run comparison tables (2026-08-31)
+
+**Issue:** no concept of comparing two *finished* studies existed anywhere.
+`dtt/comparison.py` compares two raw imc folders (bypasses the whole
+FAMOS/despike/stop-removal pipeline — its `comparison_page.py` worker calls
+`dtt.comparison_io.load_recording` directly), which is a different data
+source than two already-processed studies.
+
+**Fix:** new `dtt/analysis/study_compare.py`. `load_study(study_dir)` reads
+`processed_data.csv` and re-derives `RunChannels` from its columns via
+`build_run_channels` — the same call `pipeline.py` makes at run time, so a
+study's channel labels are recovered exactly as the pipeline saw them, no
+FL/FR/RL/RR hardcoding. `compare_studies(study_a_dir, study_b_dir)`
+orchestrates three delta tables, each reusing an existing, already-validated
+formula rather than reimplementing it:
+
+- **RMS** — `dtt.analysis.statistics.rms` (Step 4a), per channel
+  (`{label}_{Fx,Fy,Fz}`).
+- **DLC** — `dtt.analysis.severity.dynamic_load_coefficient`, per wheel.
+- **G-severity** — `dtt.analysis.severity.g_severity`, per wheel, one row
+  each for Gx/Gy/Gxy.
+
+Each row is a `MetricDelta(label, metric, a, b, delta, pct)` —
+`delta = b - a` and `pct = 100*delta/|a|`, mirroring `dtt/comparison.py`'s
+`ChannelDelta` shape for consistency without reusing its raw-folder-specific
+loading code. Wheel labels not present in *both* studies are skipped with a
+logged warning rather than raising — lets a comparison still run on the
+channels that do overlap. Provenance (Step 4a) is checked via
+`compare_provenance` and surfaced as `result.warnings`; the comparison still
+computes and returns all the numbers even when provenance disagrees or is
+missing — warn, don't block, same as the RMS-delta shape it mirrors.
+
+Output: `save_comparison` writes `study_comparison_{a}_vs_{b}.json`;
+`generate_comparison_figure` renders all three tables as one PNG in the
+`severity.py::generate_severity_figure` visual style (dark theme, same
+banded-row table look), generalized from one table to three, with any
+provenance warnings printed across the top in the danger colour. Both go
+into a new `outputs/_comparisons/` folder — a comparison belongs to neither
+study's own output directory. No GUI entry point this round (explicit
+decision — backend-only, deferred to the GUI-restructure round); reviewed
+via the saved JSON/PNG for now.
+
+**Validated:** two synthetic 4-wheel studies (20,000 samples each, one with
+an 80 daN Fz offset simulating a heavier vehicle) — `compare_studies`
+produces 12 RMS rows (4 wheels × 3 components), 4 DLC rows, 12 G-severity
+rows (4 wheels × Gx/Gy/Gxy); confirmed `DS2 - DS1 == delta` to 1e-9 for
+every one of the 28 rows. Confirmed no warnings when both studies share
+identical provenance, confirmed a `famos_applied` mismatch between two
+studies is correctly flagged, and confirmed a study with no
+`run_provenance.json` (simulating an older study) is reported as
+"no provenance recorded" rather than raising. Confirmed a partial-overlap
+case (one study missing most channels) skips the non-overlapping wheels
+with a logged warning instead of crashing. JSON and PNG both write
+successfully to a `_comparisons/` folder.

@@ -17,7 +17,7 @@ the bound.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 from matplotlib.colors import to_rgb
@@ -199,3 +199,115 @@ def draw_histogram(ax, values: np.ndarray, bins: np.ndarray,
     ax.plot(x_grid, curve, color=KDE_COLOR, linewidth=1.7, zorder=5)
 
     return heights, shape
+
+
+# --------------------------------------------------------------------------
+# Two-run comparison styling (study-to-study, RF Compare)
+#
+# Unlike auc.py's compare_distributions/auc_grid (built around a fixed
+# "reference vs current" pair), these two are for comparing two independent,
+# equally-weighted finished studies -- callers name each run explicitly
+# rather than the plot assuming a temporal order. Cross-position overlays
+# (e.g. RL of run A vs FL of run B) need no special handling here: the
+# caller just extracts values from whatever channel it likes for each side.
+# --------------------------------------------------------------------------
+
+_STATS_COLS = ("Min", "P5", "Q1", "Median", "Mean", "Q3", "P95", "Max")
+
+
+def draw_comparison_kde(ax, values_a: np.ndarray, values_b: np.ndarray,
+                        label_a: str, label_b: str,
+                        color_a: str, color_b: str,
+                        weights_a: Optional[np.ndarray] = None,
+                        weights_b: Optional[np.ndarray] = None,
+                        xlim: Optional[Tuple[float, float]] = None,
+                        n: int = 500) -> dict:
+    """Filled KDE overlay of two runs on one axis, with dashed P5/P95 lines
+    per run and a legend naming each run. Returns the P5/P95 values used, so
+    a caller building a Miner-ratio-style summary line can reuse them.
+
+    ``weights_a``/``weights_b`` (e.g. per-sample distance) make each curve a
+    weighted density via :func:`dtt.analysis.auc.kde_curve` -- pass ``None``
+    for a plain sample-count KDE.
+    """
+    a = np.asarray(values_a, dtype=float)
+    a = a[np.isfinite(a)]
+    b = np.asarray(values_b, dtype=float)
+    b = b[np.isfinite(b)]
+    if a.size < 2 or b.size < 2:
+        ax.text(0.5, 0.5, "insufficient data", ha="center", va="center", transform=ax.transAxes)
+        return {}
+
+    if xlim is None:
+        both = np.concatenate([a, b])
+        lo = float(np.percentile(both, 0.5))
+        hi = float(np.percentile(both, 99.5))
+        if not (hi > lo):
+            lo, hi = float(both.min()), float(both.max()) or 1.0
+    else:
+        lo, hi = xlim
+    x = np.linspace(lo, hi, n)
+
+    ka = kde_curve(a, x, weights=weights_a)
+    kb = kde_curve(b, x, weights=weights_b)
+    ax.fill_between(x, ka, alpha=0.28, color=color_a)
+    ax.fill_between(x, kb, alpha=0.28, color=color_b)
+    ax.plot(x, ka, color=color_a, linewidth=1.8, label=label_a)
+    ax.plot(x, kb, color=color_b, linewidth=1.8, linestyle="--", label=label_b)
+
+    p5a, p95a = float(np.percentile(a, 5)), float(np.percentile(a, 95))
+    p5b, p95b = float(np.percentile(b, 5)), float(np.percentile(b, 95))
+    ax.axvline(p5a, color=color_a, linewidth=1.1, linestyle=":")
+    ax.axvline(p95a, color=color_a, linewidth=1.6, linestyle="--",
+               label=f"{label_a} P95 {p95a:.0f}")
+    ax.axvline(p5b, color=color_b, linewidth=1.1, linestyle=":")
+    ax.axvline(p95b, color=color_b, linewidth=1.6, linestyle="--",
+               label=f"{label_b} P95 {p95b:.0f}")
+    ax.legend(fontsize=7, facecolor=PLOT_COLORS["bg"], labelcolor="white", framealpha=0.85)
+
+    return {"p5_a": p5a, "p95_a": p95a, "p5_b": p5b, "p95_b": p95b}
+
+
+def stats_strip_rows(series: Sequence[Tuple[str, np.ndarray]]) -> Tuple[List[str], List[List[str]]]:
+    """``(header, rows)`` for the Min/P5/Q1/Median/Mean/Q3/P95/Max strip, one
+    row per ``(label, values)`` pair. Matplotlib-free so it is independently
+    testable; :func:`draw_stats_strip` renders it under a plot.
+    """
+    header = ["Run", *_STATS_COLS]
+    rows: List[List[str]] = []
+    for label, vals in series:
+        v = np.asarray(vals, dtype=float)
+        v = v[np.isfinite(v)]
+        if v.size == 0:
+            rows.append([label] + ["—"] * len(_STATS_COLS))
+            continue
+        stats = [v.min(), np.percentile(v, 5), np.percentile(v, 25), np.median(v),
+                 v.mean(), np.percentile(v, 75), np.percentile(v, 95), v.max()]
+        rows.append([label] + [f"{s:.1f}" for s in stats])
+    return header, rows
+
+
+def draw_stats_strip(ax, series: Sequence[Tuple[str, np.ndarray]],
+                     colors: Optional[Sequence[str]] = None) -> None:
+    """Render the Min/P5/Q1/Median/Mean/Q3/P95/Max strip as a small table
+    directly under ``ax`` — the "more informative" element the reference
+    EV-vs-IC slides carry below their comparison plots, standardised here so
+    every two-run comparison plot in the app gets the same one.
+    """
+    header, rows = stats_strip_rows(series)
+    if not rows:
+        return
+    tbl = ax.table(cellText=rows, colLabels=header, loc="bottom",
+                   bbox=[0.0, -0.46, 1.0, 0.32], cellLoc="center")
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(7)
+    for (r, c), cell in tbl.get_celld().items():
+        cell.set_edgecolor(PLOT_COLORS["panel"])
+        if r == 0:
+            cell.set_facecolor(PLOT_COLORS["entry_bg"])
+            cell.get_text().set_color(PLOT_COLORS["btn_bg"])
+            cell.get_text().set_fontweight("bold")
+        else:
+            cell.set_facecolor(PLOT_COLORS["entry_bg"] if r % 2 else PLOT_COLORS["panel"])
+            row_color = colors[r - 1] if colors and (r - 1) < len(colors) else "white"
+            cell.get_text().set_color(row_color if c == 0 else "white")
