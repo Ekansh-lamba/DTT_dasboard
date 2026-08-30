@@ -692,3 +692,50 @@ failure can't take down the run.
 tone. `generate_psd` on synthetic 4-wheel data produces one `psd_{wheel}.png`
 per wheel (4 files). Confirmed `dtt.pipeline` still imports cleanly with the
 new stage wired in.
+
+## Step 4a — A3 prerequisites: RMS helper + processing provenance (2026-08-31)
+
+Two small additions ahead of the two-run comparison tables themselves,
+both requested explicitly rather than left to judgment call:
+
+**RMS helper.** `dtt/analysis/statistics.py::rms(x)` — a basic statistic
+placed alongside `mean`/`median`/`std` (not inside the new comparison
+module), so there is exactly one RMS implementation to import from, not a
+second one that could drift. Also added to `compute_statistics`'s per-channel
+`stats_summary.json` entry, since it belongs there for the same reason.
+Validated: `rms([3,4]) == sqrt((9+16)/2) == 3.5355...`, matches
+`np.sqrt(np.mean(x**2))` to float precision; all-NaN input returns NaN
+rather than raising.
+
+**Processing provenance.** Confirmed by reading the code: no per-study
+metadata is persisted anywhere today — `pipeline.py`'s `metadata` dict only
+feeds text into the PPTX report and is discarded, and `famos/audit.py`'s
+`RunManifest` (a full checksum/git/library-version audit manifest) exists
+but has never been instantiated or written by `pipeline.py`. Comparing two
+studies without recording what produced each one would let a recipe-version
+or units difference between them look like a real EV-vs-IC load difference.
+
+New `dtt/provenance.py` — deliberately smaller than wiring up the full
+`RunManifest` (that would touch every pipeline stage and risks scope creep
+into ingestion territory this round explicitly excludes). `build_provenance`
+reuses `famos.audit.library_versions()`/`git_commit()` as-is rather than
+reimplementing them, and records `famos_applied`, `famos_mode`,
+`n_to_dan_applied` (the units signal, from `metadata`/`scale_meta`),
+`sampling_rate_hz`, `despike`/`transient_despike`/`remove_stops` flags,
+filter settings, and the famos/numpy/scipy/git versions. `write_provenance`
+saves `run_provenance.json` into each study's output dir — wired into
+`pipeline.py` right after `processed_data.csv` is saved, same point
+`metadata` and `config` are both in their final per-run state.
+`compare_provenance(a, b)` returns human-readable warning strings (not
+errors) when `famos_applied`/`n_to_dan_applied`/`famos_version`/`git` differ
+between two studies' records, or when one study predates provenance
+tracking — same warn-don't-block pattern `dtt/comparison.py::_add_scale_note`
+already established for its own Fz-ratio sanity check.
+
+**Validated:** round-tripped `build_provenance` -> `write_provenance` ->
+`load_provenance` and confirmed the loaded record matches exactly what was
+written. `compare_provenance` correctly flags a `famos_applied` mismatch
+between two synthetic records, returns no warnings for two identical
+records, and correctly reports "no provenance recorded" (as a warning, not
+an exception) when one side is `None`. Confirmed `dtt.pipeline` still
+imports cleanly with the write wired in.

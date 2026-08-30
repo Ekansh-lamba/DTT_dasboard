@@ -10,6 +10,15 @@ from dtt.config import MANDATORY_CHANNELS, PERCENTILES, RunConfig
 logger = logging.getLogger(__name__)
 
 
+def rms(x: np.ndarray) -> float:
+    """Root-mean-square of the finite values in ``x``, NaN if none."""
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return float("nan")
+    return float(np.sqrt(np.mean(x ** 2)))
+
+
 def compute_statistics(df: pd.DataFrame, config: RunConfig) -> Dict:
     if config.run_channels is not None:
         channels = [ch for ch in config.run_channels.mandatory_channels if ch in df.columns]
@@ -26,6 +35,7 @@ def compute_statistics(df: pd.DataFrame, config: RunConfig) -> Dict:
             "mean":   round(float(np.mean(vals)),   4),
             "median": round(float(np.median(vals)),  4),
             "std":    round(float(np.std(vals)),     4),
+            "rms":    round(rms(vals),                4),
             "min":    round(float(np.min(vals)),     4),
             "max":    round(float(np.max(vals)),     4),
         }

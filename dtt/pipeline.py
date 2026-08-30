@@ -272,6 +272,13 @@ def run(
     df.to_csv(processed_csv, index=False, float_format=CSV_FLOAT_FORMAT)
     logger.info("Processed data saved: %s  (%d rows)", processed_csv, len(df))
 
+    # Recorded so a later two-study comparison (dtt.analysis.study_compare)
+    # can tell whether both studies were produced by comparable processing --
+    # a recipe-version or units difference should not masquerade as a real
+    # load difference between two runs.
+    from dtt.provenance import build_provenance, write_provenance
+    write_provenance(config.run_output_dir, build_provenance(config, metadata))
+
     # Stop removal produces a *derived* series for every analysis stage below
     # -- processed_data.csv above is already saved from the full `df`, which
     # stays the canonical processed artifact regardless. This keeps the
