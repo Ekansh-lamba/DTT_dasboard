@@ -584,3 +584,82 @@ to
 **Not done, out of scope per your original brief**: no GUI checkbox / CLI
 flag, same scope decision as despike and the transient rule — `RunConfig`
 fields and full pipeline wiring are in place, off by default.
+
+---
+
+# Round 3: missing analysis features + histogram readability (2026-08-31)
+
+Ports the four confirmed gaps against the standalone WFT Analyzer script
+(distance-weighted heatmaps, Welch PSD, two-run comparison tables, RF
+Compare) plus a force-distribution histogram readability fix. Full plan in
+the session's plan file; two Round 2 premises turned out to already be
+resolved in code before this round started — noted where relevant below
+rather than redone.
+
+## Step 1 — B2: histogram x-axis range option (2026-08-31)
+
+**Confirmed first, not redone:** B1 (banded/KDE styling) and B3's
+speed-channel fallback labeling were already implemented in `histograms.py`
+as of Round 2's `685519e` — verified by reading the code, not assumed from
+the brief. The only real histogram-readability gap was the fixed axis.
+
+**Issue:** `_axis_range()` only escaped the configured `FORCE_RANGES_DAN`
+range (Fx/Fy ±300 daN, Fz 100-1000 daN) when more than 2% of samples fell
+outside it — a safety net for a different vehicle class. Normal in-range
+data (e.g. real Fx sitting ±40 daN inside the configured ±300) always got
+the full configured span, crushing the actual distribution shape into the
+middle third of the plot.
+
+**Fix:** `generate_histograms(df, config, range_mode="full")` — new
+`range_mode` parameter, `"full"` (default, byte-identical output/filenames
+to before) or `"autoscale"` (always uses the existing P0.5-P99.5 percentile
+range, previously only reached as an out-of-range fallback). Refactored the
+percentile computation into `_percentile_range()` so both paths share it.
+Non-default output gets a `_autoscale` filename suffix so both modes can be
+generated side by side without overwriting each other.
+
+**Validated:** synthetic Fx data (σ=15 daN, well inside the configured
+±300) — `full` mode returns exactly `(-300.0, 300.0)`; `autoscale` mode
+returns roughly `(-40, 40)`, matching the actual data spread. Confirmed
+`range_mode="full"` produces identical filenames to the pre-change code
+(no suffix), and an invalid `range_mode` raises `ValueError` rather than
+silently doing something unexpected.
+
+**Not wired to a `RunConfig` field or GUI toggle this round** — deliberate,
+per the plan: adding a config field now risks not matching whatever toggle
+the eventual GUI restructure round settles on. `range_mode` is exposed as a
+function parameter, ready for either a config field or a direct GUI call
+once that's scoped.
+
+## Step 2 — A1 + B3: distance-weighted heatmaps (2026-08-31)
+
+**Issue:** `heatmaps.py::generate_heatmaps` weighted its three force-pair
+heatmaps (Fy-Fx, Fx-Fz, Fy-Fz) by sample count only (`np.histogram2d` with
+no `weights=`), while the robust distance-weighting logic
+(`histograms.py::_get_speed_weights` — handles dead/stuck/negative/
+implausible speed channels, km/h vs m/s auto-detection) already existed one
+module over and was already wired into `histograms.py`.
+
+**Fix:** `heatmaps.py` imports `_get_speed_weights` from `histograms.py`
+(reused, not copied — no second implementation of the speed-channel
+validation logic). `generate_heatmaps` computes `weights_full` once and
+threads it through `_pair_heatmap` -> `_hist2d_pct` (now accepts an optional
+`weights=` array, applied via `np.histogram2d(..., weights=w[mask])` so each
+cell's percentage is a share of distance, not sample count). Colorbar label
+and figure suptitle switch between "% of Distance / Speed weighting: {unit}"
+and "% of Occurrence / Sample-count weighting — no usable speed channel"
+depending on whether a usable channel was found — same honest-fallback
+pattern `histograms.py` already used, not a new convention.
+
+**Deliberately left unweighted:** the per-wheel Fx/Fy hexbin density plot
+(`generate_heatmaps`'s second loop). Hexbin has no clean per-point weights
+API without manual pre-binning, and the brief's ask was specifically the
+three force-pair heatmaps, not the hexbin.
+
+**Validated:** synthetic 4-wheel data with a constant 72 km/h (20 m/s)
+speed channel — `_get_speed_weights` returns a total distance whose km sum
+exactly matches the recording's known distance (`20 m/s * 5000 samples /
+100 Hz / 1000 = 1.000 km`, confirmed to 1e-6). A second run with a
+stuck-at-zero speed channel correctly returns `None` (all-zero rejection
+already in `_speed_as_mps`), and `generate_heatmaps` completes without
+error, falling back to count-weighting with the labelled title.

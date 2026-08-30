@@ -125,29 +125,10 @@ def _get_force_type(ch: str) -> Optional[str]:
 # Keep the configured axis while it still holds this much of the data.
 _RANGE_FIT_FRACTION = 0.98
 
+RANGE_MODES = ("full", "autoscale")
 
-def _axis_range(vals: np.ndarray, force_type: Optional[str], ch: str = "") -> Optional[tuple]:
-    """Pick the histogram x-range for ``vals``.
 
-    ``FORCE_RANGES_DAN`` is tuned for a passenger car (Fz 100-1000 daN). A
-    heavier vehicle, a different WFT calibration or a truck axle can sit an
-    order of magnitude outside it, and a fixed axis then puts the *entire*
-    distribution off-plot — the histogram renders blank rather than wrong, which
-    reads as "not loading". So the configured range is used only while it
-    actually contains the data, and a robust percentile range is used otherwise.
-    """
-    finite = vals[np.isfinite(vals)]
-    cfg = FORCE_RANGES_DAN.get(force_type) if force_type else None
-    if finite.size == 0:
-        return cfg
-    if cfg:
-        inside = float(np.mean((finite >= cfg[0]) & (finite <= cfg[1])))
-        if inside >= _RANGE_FIT_FRACTION:
-            return cfg
-        logger.warning(
-            "%s: only %.1f%% of samples fall in the configured %s range %s - "
-            "using the data's own range instead", ch or force_type,
-            100.0 * inside, force_type, cfg)
+def _percentile_range(finite: np.ndarray) -> tuple:
     lo = float(np.percentile(finite, 0.5))
     hi = float(np.percentile(finite, 99.5))
     if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
@@ -156,6 +137,41 @@ def _axis_range(vals: np.ndarray, force_type: Optional[str], ch: str = "") -> Op
         hi = lo + 1.0
     pad = 0.02 * (hi - lo)
     return (lo - pad, hi + pad)
+
+
+def _axis_range(vals: np.ndarray, force_type: Optional[str], ch: str = "",
+                range_mode: str = "full") -> Optional[tuple]:
+    """Pick the histogram x-range for ``vals``.
+
+    ``range_mode="full"`` (default) uses ``FORCE_RANGES_DAN`` — tuned for a
+    passenger car (Fz 100-1000 daN) — while it actually holds the data; a
+    heavier vehicle, a different WFT calibration or a truck axle can sit an
+    order of magnitude outside it, and a fixed axis then puts the *entire*
+    distribution off-plot, so a robust percentile range is used instead once
+    the configured range no longer fits. ``range_mode="autoscale"`` always
+    uses that percentile range (P0.5-P99.5 with a 2% pad), even when the
+    configured range technically contains the data — real WFT data often
+    sits in a narrow band near zero well inside the sensor's full range, and
+    the full-range axis then crushes the actual shape into the middle of the
+    plot.
+    """
+    finite = vals[np.isfinite(vals)]
+    if finite.size == 0:
+        return FORCE_RANGES_DAN.get(force_type) if force_type else None
+
+    if range_mode == "autoscale":
+        return _percentile_range(finite)
+
+    cfg = FORCE_RANGES_DAN.get(force_type) if force_type else None
+    if cfg:
+        inside = float(np.mean((finite >= cfg[0]) & (finite <= cfg[1])))
+        if inside >= _RANGE_FIT_FRACTION:
+            return cfg
+        logger.warning(
+            "%s: only %.1f%% of samples fall in the configured %s range %s - "
+            "using the data's own range instead", ch or force_type,
+            100.0 * inside, force_type, cfg)
+    return _percentile_range(finite)
 
 
 def _plot_single_histogram(ax, vals, weights, bins, xlim, ch, mode, total_m, col):
@@ -184,7 +200,15 @@ def _plot_single_histogram(ax, vals, weights, bins, xlim, ch, mode, total_m, col
     ax.set_title(f"{ch}  [{mode}]  {total_label}", fontsize=9, fontweight="bold", color=col)
 
 
-def generate_histograms(df: pd.DataFrame, config: RunConfig) -> None:
+def generate_histograms(df: pd.DataFrame, config: RunConfig, range_mode: str = "full") -> None:
+    """``range_mode``: ``"full"`` (default, matches prior output) uses the
+    configured sensor range; ``"autoscale"`` clips to where the data actually
+    sits (P0.5-P99.5 with a small pad). See :func:`_axis_range`.
+    """
+    if range_mode not in RANGE_MODES:
+        raise ValueError(f"range_mode must be one of {RANGE_MODES}, got {range_mode!r}")
+    suffix = "" if range_mode == "full" else f"_{range_mode}"
+
     out = config.figures_dir
     sr  = config.sampling_rate
     weights_full, total_m, speed_unit = _get_speed_weights(df, sr)
@@ -227,13 +251,13 @@ def generate_histograms(df: pd.DataFrame, config: RunConfig) -> None:
                 else:
                     w = np.ones(len(vals))
 
-                xlim = _axis_range(vals, force_type, ch)
+                xlim = _axis_range(vals, force_type, ch, range_mode)
                 bins = np.linspace(xlim[0], xlim[1], HIST_BINS + 1)
 
                 _plot_single_histogram(ax, vals, w, bins, xlim, ch, mode, total_m, col)
 
             fig.tight_layout(rect=[0, 0, 1, 0.93])
-            fname = out / f"hist_{mode}_{wheel}.png"
+            fname = out / f"hist_{mode}_{wheel}{suffix}.png"
             fig.savefig(fname, dpi=FIGURE_DPI, bbox_inches="tight", facecolor=BG)
             plt.close(fig)
             logger.info("Saved histogram: %s", fname.name)
@@ -250,13 +274,13 @@ def generate_histograms(df: pd.DataFrame, config: RunConfig) -> None:
             w = np.nan_to_num(w)
         else:
             w = np.ones(len(vals))
-        xlim = _axis_range(vals, force_type, ch)
+        xlim = _axis_range(vals, force_type, ch, range_mode)
         bins = np.linspace(xlim[0], xlim[1], HIST_BINS + 1)
 
         for mode in ("distance", "percentage"):
             fig, ax = plt.subplots(figsize=(6, 4), facecolor=BG)
             _plot_single_histogram(ax, vals, w, bins, xlim, ch, mode, total_m, col)
             fig.tight_layout()
-            fname = out / f"hist_{mode}_{ch}.png"
+            fname = out / f"hist_{mode}_{ch}{suffix}.png"
             fig.savefig(fname, dpi=FIGURE_DPI, bbox_inches="tight", facecolor=BG)
             plt.close(fig)

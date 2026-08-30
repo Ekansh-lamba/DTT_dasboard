@@ -16,6 +16,7 @@ from dtt.config import (
     FIGURE_DPI,
     RunConfig,
 )
+from dtt.analysis.histograms import _get_speed_weights
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +50,16 @@ def _series(df, rc, wheel, comp):
     return None
 
 
-def _hist2d_pct(x, y, x_bins, y_bins):
+def _hist2d_pct(x, y, x_bins, y_bins, weights=None):
+    """2D percentage histogram. ``weights`` (per-sample distance, m) makes each
+    cell's percentage a share of distance travelled rather than sample count."""
     mask = np.isfinite(x) & np.isfinite(y)
+    if weights is not None:
+        mask &= np.isfinite(weights)
     if mask.sum() < 2:
         return None
-    H, xe, ye = np.histogram2d(x[mask], y[mask], bins=[x_bins, y_bins])
+    w = weights[mask] if weights is not None else None
+    H, xe, ye = np.histogram2d(x[mask], y[mask], bins=[x_bins, y_bins], weights=w)
     total = H.sum()
     if total == 0:
         return None
@@ -84,7 +90,8 @@ def _draw_panel(ax, panel, title, xlabel, ylabel, col, vmax):
 
 
 def _pair_heatmap(df, rc, wheels, wheel_colors, x_comp, y_comp, x_bins, y_bins,
-                  x_label, y_label, out, fname, suptitle, reverse_axes=False):
+                  x_label, y_label, out, fname, suptitle, reverse_axes=False,
+                  weights=None, weighted=False):
     n = len(wheels)
     ncol = 2 if n <= 4 else 3
     nrow = int(np.ceil(n / ncol))
@@ -95,7 +102,8 @@ def _pair_heatmap(df, rc, wheels, wheel_colors, x_comp, y_comp, x_bins, y_bins,
     for wheel in wheels:
         x = _series(df, rc, wheel, x_comp)
         y = _series(df, rc, wheel, y_comp)
-        panels.append(_hist2d_pct(x, y, x_bins, y_bins) if x is not None and y is not None else None)
+        panels.append(_hist2d_pct(x, y, x_bins, y_bins, weights=weights)
+                      if x is not None and y is not None else None)
 
     vmax = max((float(np.max(p[0])) for p in panels if p is not None), default=1.0)
 
@@ -114,7 +122,8 @@ def _pair_heatmap(df, rc, wheels, wheel_colors, x_comp, y_comp, x_bins, y_bins,
     fig.subplots_adjust(right=0.88, wspace=0.35, hspace=0.4)
     if last_im is not None:
         cbar = fig.colorbar(last_im, cax=fig.add_axes([0.90, 0.15, 0.02, 0.7]))
-        cbar.set_label("% of Occurrences", fontsize=10, fontweight="bold")
+        cbar.set_label("% of Distance" if weighted else "% of Occurrences",
+                       fontsize=10, fontweight="bold")
         cbar.ax.tick_params(labelsize=8)
     fig.suptitle(suptitle, fontsize=13, fontweight="bold")
     path = out / fname
@@ -130,15 +139,24 @@ def generate_heatmaps(df: pd.DataFrame, config: RunConfig) -> None:
     wheel_colors = rc.wheel_colors if rc is not None else WHEEL_COLORS
     bins = _comp_bins(config.tyre)
 
+    weights_full, total_m, speed_unit = _get_speed_weights(df, config.sampling_rate)
+    weighted = weights_full is not None
+    metric = "% Distance" if weighted else "% Occurrence"
+    weight_line = (f"Speed weighting: {speed_unit}" if weighted
+                   else "Sample-count weighting — no usable speed channel")
+
     _pair_heatmap(df, rc, wheels, wheel_colors, "Fy", "Fx", bins["Fy"], bins["Fx"],
                   "Fy (daN)", "Fx (daN)", out, "heatmap_fx_fy_all.png",
-                  "Fx vs Fy  –  % Occurrence Heatmap", reverse_axes=True)
+                  f"Fx vs Fy  –  {metric} Heatmap\n{weight_line}", reverse_axes=True,
+                  weights=weights_full, weighted=weighted)
     _pair_heatmap(df, rc, wheels, wheel_colors, "Fy", "Fz", bins["Fy"], bins["Fz"],
                   "Fy (daN)", "Fz (daN)", out, "heatmap_fz_fy_all.png",
-                  "Fz vs Fy  –  % Occurrence Heatmap")
+                  f"Fz vs Fy  –  {metric} Heatmap\n{weight_line}",
+                  weights=weights_full, weighted=weighted)
     _pair_heatmap(df, rc, wheels, wheel_colors, "Fx", "Fz", bins["Fx"], bins["Fz"],
                   "Fx (daN)", "Fz (daN)", out, "heatmap_fz_fx_all.png",
-                  "Fz vs Fx  –  % Occurrence Heatmap")
+                  f"Fz vs Fx  –  {metric} Heatmap\n{weight_line}",
+                  weights=weights_full, weighted=weighted)
 
     for wheel in wheels:
         col = wheel_colors[wheel]["pri"]
