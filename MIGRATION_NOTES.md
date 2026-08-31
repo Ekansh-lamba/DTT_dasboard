@@ -929,3 +929,34 @@ figure's damage annotation shows (5.96e+16 for FL_Fx, m=8) — the rainflow
 math itself was never touched by this styling change, confirmed both by
 reading the code (no math functions edited) and by this independent
 recomputation.
+
+## Step 2 — temporary FAMOS-validation CSV export (2026-08-31)
+
+**Confirmed first:** `processed_data.csv` already captures exactly the
+right moment — right after `df = apply_filter(df, config)` (FAMOS recipe
+done), before any analysis stage. It already holds all channels at full
+precision. The only real gaps were: a distinct, unambiguous-as-temporary
+filename; `RunChannels`-driven column order instead of incidental
+DataFrame order; and an opt-in gate so it isn't written on every run.
+
+**Fix:** `RunConfig.export_famos_validation_csv: bool = False` — new field,
+inline-documented as temporary. New `pipeline.py::_write_famos_validation_csv(df,
+config)` — a top-of-function docstring marks it explicitly as a temporary
+FAMOS cross-check aid, a candidate for removal once that check is done.
+Orders columns as `[Time] + rc.mandatory_channels (present) + anything else`
+— no re-derivation of values, this is a pure reorder-and-save of the exact
+`df` `processed_data.csv` already writes. Writes
+`preprocessed_for_famos_validation.csv` into `config.run_output_dir`,
+called right after `processed_data.csv` is saved, gated behind the flag.
+CLI: `--export-famos-validation-csv`, following the existing
+`--deglitch`/`--remove-stops` `store_true` pattern.
+
+**Validated:** ran the pipeline twice on identical synthetic CSV input
+(butterworth mode, no filter, for speed) — once without the flag (confirmed
+`preprocessed_for_famos_validation.csv` absent), once with it (confirmed
+present). Row count matches the decimated/processed length exactly (5000 ==
+5000, no re-sampling). Spot-checked two channels (`FL_Fx`, `RR_Fz`) with
+`np.allclose` against `processed_data.csv`'s own values — exact match, as
+expected since both files are written from the same in-memory `df`. Column
+order confirmed `Time` first, then the platform's canonical force-channel
+order.

@@ -95,6 +95,33 @@ def _write_raw_csv(raw_frame, config, metadata, scale_meta) -> None:
                 "scaled by 1/%g)", path, len(out), len(out.columns) - 1, divisor)
 
 
+def _write_famos_validation_csv(df, config) -> None:
+    """TEMPORARY FAMOS-validation export.
+
+    Writes the signal exactly as it stands right after the FAMOS recipe
+    (despike/smo/FiltLP/decimate) and before any analysis stage touches it —
+    the same `df` `processed_data.csv` saves, just reordered by the
+    platform's own `RunChannels` model (Time, then the canonical force
+    channels, then anything else) instead of incidental column order, and
+    under a distinct, unambiguous filename so it can't be mistaken for a
+    permanent study artifact. Opt-in only (`config.export_famos_validation_csv`)
+    — this is a manual cross-check aid against a licensed FAMOS install, not
+    part of the normal study output, and is a candidate for removal once
+    that cross-check is done.
+    """
+    rc = getattr(config, "run_channels", None)
+    ordered = [TIME_COLUMN] if TIME_COLUMN in df.columns else []
+    if rc is not None:
+        ordered += [c for c in rc.mandatory_channels if c in df.columns]
+    remaining = [c for c in df.columns if c not in ordered]
+    out = df[ordered + remaining]
+
+    path = config.run_output_dir / "preprocessed_for_famos_validation.csv"
+    out.to_csv(path, index=False, float_format=CSV_FLOAT_FORMAT)
+    logger.info("FAMOS-validation CSV saved (temporary, opt-in): %s  (%d rows, %d channels)",
+                path, len(out), len(out.columns) - len(ordered[:1]))
+
+
 
 
 def _warn_if_stationary(df, config) -> None:
@@ -146,6 +173,7 @@ def run(
     vehicle_type: str       = "",
     famos_mode: bool        = True,
     deglitch:   bool        = False,
+    export_famos_validation_csv: bool = False,
 ) -> Path:
     if csv_path is None and raw_folder is None and not raw_files and not raw_folders:
         raise ValueError("Provide csv_path, raw_folder, raw_folders, or raw_files")
@@ -168,6 +196,7 @@ def run(
     kwargs["famos_mode"]   = famos_mode
     kwargs["deglitch"]     = deglitch
     kwargs["remove_stops"] = remove_stops
+    kwargs["export_famos_validation_csv"] = export_famos_validation_csv
 
     config = RunConfig(**kwargs)
     _setup_logging(config)
@@ -271,6 +300,9 @@ def run(
     processed_csv = config.run_output_dir / "processed_data.csv"
     df.to_csv(processed_csv, index=False, float_format=CSV_FLOAT_FORMAT)
     logger.info("Processed data saved: %s  (%d rows)", processed_csv, len(df))
+
+    if getattr(config, "export_famos_validation_csv", False):
+        _write_famos_validation_csv(df, config)
 
     # Recorded so a later two-study comparison (dtt.analysis.study_compare)
     # can tell whether both studies were produced by comparable processing --
@@ -391,6 +423,10 @@ def _cli() -> None:
                         help="Rolling-median de-glitch of DAQ artifact spikes before filtering")
     parser.add_argument("--miner",    type=float,           help="Miner's rule exponent (default 8)")
     parser.add_argument("--outdir",                         help="Override output directory")
+    parser.add_argument("--export-famos-validation-csv", action="store_true",
+                        help="TEMPORARY: also write a wide, RunChannels-ordered CSV of the "
+                             "post-recipe (pre-analysis) signal, for a manual FAMOS cross-check. "
+                             "Off by default; not part of normal study output.")
     args = parser.parse_args()
 
     run(
@@ -410,6 +446,7 @@ def _cli() -> None:
         remove_stops     = args.remove_stops,
         miner_exponent   = args.miner,
         output_dir       = args.outdir,
+        export_famos_validation_csv = args.export_famos_validation_csv,
     )
 
 

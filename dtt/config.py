@@ -163,6 +163,7 @@ class RunConfig:
     stop_seam_search_s:        float = 1.0   # nudge each cut boundary up to this many seconds to a quiet moment
     stop_seam_blend_s:         float = 0.2   # short linear blend across whatever step survives the nudge
     miner_exponent: float = RAINFLOW_MINER
+    export_famos_validation_csv: bool = False  # TEMPORARY: one wide post-recipe CSV for manual FAMOS cross-check; off by default, not part of the normal study output
     output_dir:     Path  = field(default_factory=lambda: OUTPUTS_DIR)
     run_channels:   object = None      # ChannelSet-derived config, built at run time
     tyre:           object = None      # resolved TyreParams for the vehicle type
