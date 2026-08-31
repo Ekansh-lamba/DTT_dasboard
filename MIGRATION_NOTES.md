@@ -890,3 +890,42 @@ different rendering only); an invalid `style` value raises `ValueError`.
 synthetic data on the pre-change code and on this change, and compared
 SHA-256 hashes — **byte-identical**, confirming `rainflow.py`'s output
 (the shared function's other caller) is completely untouched.
+
+---
+
+# Round 4: rainflow restyle, FAMOS-validation export, workflow modes (2026-08-31)
+
+## Step 1 — rainflow-page histogram row: light restyle (2026-08-31)
+
+**This explicitly supersedes Round 3 Step 6's byte-identical constraint on
+`rainflow.py`.** That constraint was correct for its round (styling was
+scoped to the Histograms page only); this round the user chose to extend
+the new light look to the rainflow range-distribution row too.
+
+**Scope, precisely:** the rainflow figure has two rows per channel — the
+Siemens from-to matrix (`ax1`, via `_draw_fromto_ax`) and the range
+distribution (`ax2`, via `draw_histogram`). Both previously shared
+`rainflow.py`'s own dark `_style_ax`. Only `ax2` changes; `ax1` and
+`_draw_fromto_ax`/`_style_ax` are completely untouched.
+
+**Fix:** `rainflow.py` imports `histograms.py`'s light `_style_ax` (aliased
+`_style_ax_light`) plus its light `BG`/`TEXT_PRI`/`TEXT_SEC` constants —
+reused, not duplicated, so the two pages' light themes can't drift apart.
+`ax2` now calls `_style_ax_light(ax2)` and
+`draw_histogram(..., style="soft")` (the same additive parameter Round 3
+Step 6 added — no third styling path). The P95 marker line, title, axis
+labels, damage-annotation textbox, and legend on `ax2` all switch from the
+dark-theme colours to the light ones (dark text, white-background damage
+box) to match. `ax1` keeps its dark styling and its own `_style_ax`
+unchanged.
+
+**Validated:** regenerated a rainflow figure on synthetic oscillating Fx
+data (visual: light background, thin single-tone curve, soft fill, quiet
+grid, small dark text on the bottom row; from-to matrix row still dark,
+unchanged). Independently recomputed the from-to matrix and Miner damage
+via `_extract_cycles`/`_build_fromto_matrix`/`_miner_damage` directly
+(bypassing the plotting code entirely) and confirmed they match what the
+figure's damage annotation shows (5.96e+16 for FL_Fx, m=8) — the rainflow
+math itself was never touched by this styling change, confirmed both by
+reading the code (no math functions edited) and by this independent
+recomputation.

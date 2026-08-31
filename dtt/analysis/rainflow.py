@@ -22,6 +22,15 @@ from dtt.config import (
     RunConfig,
 )
 from dtt.analysis.plot_style import draw_histogram
+# The range-distribution row (ax2) uses the Histograms page's light theme;
+# the from-to matrix (ax1) stays on this module's own dark _style_ax below,
+# unchanged. Reused, not duplicated, so the two pages can't silently drift.
+from dtt.analysis.histograms import (
+    _style_ax as _style_ax_light,
+    BG as LIGHT_BG,
+    TEXT_PRI as LIGHT_TEXT_PRI,
+    TEXT_SEC as LIGHT_TEXT_SEC,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -177,29 +186,32 @@ def generate_rainflow(df: pd.DataFrame, config: RunConfig) -> None:
             p95_val = float(np.percentile(rng_rep, 95)) if len(rng_rep) > 0 else 0.0
             dmg     = _miner_damage(cycles, m)
 
+            # Light restyle (this round) — matches the Histograms page's
+            # style="soft" look exactly. Supersedes the earlier decision to
+            # keep this row byte-identical/dark; see MIGRATION_NOTES.md.
             ax2 = axes[1][col_idx]
-            _style_ax(ax2)
+            _style_ax_light(ax2)
             if len(rng_rep) > 0:
                 bin_edges = np.linspace(0, float(np.percentile(rng_rep, 99)), 35)
                 # Range is |from - to|, never negative by construction, so this
                 # is always the one-sided case: no forced symmetric bell, a
                 # boundary-reflected KDE anchored at 0.
                 draw_histogram(ax2, rng_rep, bin_edges, color=col,
-                               bar_is_density=True, boundary=0.0)
-                ax2.axvline(p95_val, color="#FFFFFF", linewidth=1.8, linestyle="--",
+                               bar_is_density=True, boundary=0.0, style="soft")
+                ax2.axvline(p95_val, color=LIGHT_TEXT_PRI, linewidth=1.4, linestyle="--",
                             label=f"P95: {p95_val:.0f} daN")
-            ax2.set_title(f"{ch}  –  Range Distribution", color=col, fontsize=8, fontweight="bold")
-            ax2.set_xlabel("Range (daN)", color=TEXT_SEC, fontsize=7)
-            ax2.set_ylabel("Density", color=TEXT_SEC, fontsize=7)
+            ax2.set_title(f"{ch}  –  Range Distribution", color=LIGHT_TEXT_PRI, fontsize=8, fontweight="bold")
+            ax2.set_xlabel("Range (daN)", color=LIGHT_TEXT_SEC, fontsize=7)
+            ax2.set_ylabel("Density", color=LIGHT_TEXT_SEC, fontsize=7)
 
             ax2.text(
                 0.97, 0.95,
                 f"Damage\n(m={m})\n{dmg:.2e}",
                 transform=ax2.transAxes, fontsize=7, color=DANGER,
                 ha="right", va="top", fontweight="bold",
-                bbox=dict(boxstyle="round,pad=0.3", facecolor=ENTRY_BG, edgecolor=DANGER, alpha=0.9),
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="#FFFFFF", edgecolor=DANGER, alpha=0.95),
             )
-            ax2.legend(fontsize=6.5, facecolor=BG, labelcolor="white", framealpha=0.85)
+            ax2.legend(fontsize=6.5, facecolor=LIGHT_BG, labelcolor=LIGHT_TEXT_PRI, framealpha=0.9)
 
         fig.tight_layout(rect=[0, 0, 1, 0.93])
         fname = out / f"rainflow_{wheel}.png"
