@@ -146,7 +146,15 @@ def build_report(
     validation_report: ValidationReport,
     stats: Dict,
     metadata: Dict,
+    analysis_only: bool = False,
 ) -> Path:
+    """``analysis_only=True`` marks the report as produced by
+    ``workflow_mode="analysis"`` — no fresh preprocessing/validation pass, the
+    channel-validation and file/duration/units figures on slide 1 describe
+    the *existing* processed_data.csv this run read, not a run that just
+    ingested and conditioned it. Made visible on the title slide so a
+    reduced-metadata analysis-only report can't be mistaken for a full run.
+    """
     prs = Presentation()
     prs.slide_width  = Emu(PPTX_SLIDE_WIDTH_EMU)
     prs.slide_height = Emu(PPTX_SLIDE_HEIGHT_EMU)
@@ -165,8 +173,10 @@ def build_report(
 
     slide1 = prs.slides.add_slide(blank_layout)
     _set_slide_bg(slide1, prs)
-    _add_title(slide1, "WFT Automation  –  Study Overview",
-               f"{config.vehicle_name}  |  {now_str}")
+    subtitle = f"{config.vehicle_name}  |  {now_str}"
+    if analysis_only:
+        subtitle += "  |  ANALYSIS-ONLY MODE"
+    _add_title(slide1, "WFT Automation  –  Study Overview", subtitle)
     info = (
         f"File:          {metadata.get('file_name', 'N/A')}\n"
         f"Rows:          {metadata.get('rows', 0):,}\n"
@@ -176,6 +186,15 @@ def build_report(
         f"Unit Applied:  {'N → daN (÷10)' if metadata.get('n_to_dan_applied') else 'daN (unchanged)'}\n"
         f"Study:         {config.study_name}"
     )
+    if analysis_only:
+        info += (
+            "\n\nANALYSIS-ONLY MODE: this report was generated from an "
+            "existing processed_data.csv with no fresh preprocessing or "
+            "validation pass. Channel-validation and file/unit figures "
+            "above describe that existing file, not a run that just "
+            "ingested and conditioned it. See the pipeline log for any "
+            "processing-provenance warnings."
+        )
     _add_textbox(slide1, info, L, T, IMG_W, IMG_H, font_size=14, color=_TEXT_RGB)
 
     slide2 = prs.slides.add_slide(blank_layout)
@@ -248,6 +267,11 @@ def build_report(
     missing_ch  = validation_report.missing_channels
 
     conclusions = f"Study: {config.vehicle_name}  |  {now_str}\n\n"
+    if analysis_only:
+        conclusions += (
+            "*** ANALYSIS-ONLY MODE — no fresh preprocessing/validation pass. "
+            "Generated from an existing processed_data.csv. ***\n\n"
+        )
     conclusions += f"Channels validated:   {len(present_ch)} / {len(MANDATORY_CHANNELS)} mandatory\n"
     if missing_ch:
         conclusions += f"Missing channels:     {', '.join(missing_ch)}\n"

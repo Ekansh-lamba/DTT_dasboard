@@ -960,3 +960,105 @@ present). Row count matches the decimated/processed length exactly (5000 ==
 expected since both files are written from the same in-memory `df`. Column
 order confirmed `Time` first, then the platform's canonical force-channel
 order.
+
+## Step 3 — three workflow modes: preprocess / analysis / both (2026-08-31)
+
+**Confirmed before writing any code:** grepped every caller of
+`pipeline.run(` across the repo — the GUI (`gui/workers/pipeline_worker.py::
+RunRequest.to_cmd`) only shells out to the CLI subprocess, and `gui/main.py`'s
+frozen-exe dispatch calls `dtt.pipeline._cli()` and discards its result too.
+**No in-process caller inspects `run()`'s return value**, so making it
+workflow_mode-dependent (PPTX path for `"both"`/`"analysis"`, CSV path for
+`"preprocess"`) was safe to do without touching any caller — still called
+out explicitly as a real signature change, per instruction, not silently
+assumed safe.
+
+**`RunConfig.workflow_mode: str = "both"`** — validated in `__post_init__`
+against the three allowed values. `"both"` untouched: the new
+`if config.workflow_mode == "analysis": ... else: <today's exact code,
+now indented one level> ...` branch means `"both"`'s code path is
+byte-for-byte the same statements that ran before this round, just inside
+an `else:`.
+
+**`"preprocess"`**: runs stages 1–4 exactly as `"both"` does (same `else`
+branch), through `processed_data.csv`/`raw_data.csv`/the item-2 export/
+`run_provenance.json`, then an early `return processed_csv` **before** stop
+removal or any analysis stage — no `stats_summary.json`, no `figures/`, no
+PPTX.
+
+**`"analysis"`**: a new, much smaller branch. Skips ingestion/FAMOS/
+sanitization/filtering entirely. Loads `df = pd.read_csv(run_output_dir /
+"processed_data.csv")` (fails loudly with `FileNotFoundError` if absent),
+rebuilds `config.run_channels`/`config.tyre` via the exact same
+`build_run_channels`/`get_preset`/`match_preset` calls the normal path
+uses, assembles a reduced `metadata` dict (`rows`/`columns`/`duration_s`/
+`sampling_rate_hz` re-derived from the loaded frame, `n_to_dan_applied`
+from the study's stored provenance), and **re-runs `validate(df, metadata,
+config)`** — confirmed by reading `validator.py` that this is a read-only
+channel-presence/NaN check with no data mutation, so re-running it is
+validation-of-what-we're-about-to-analyze, not "re-running preprocessing."
+Then converges into the same stop-removal + stage-5-onward code every mode
+shares. `processed_data.csv`/`raw_data.csv` are never re-opened for writing
+in this branch — confirmed by hash **and** mtime comparison in validation
+below.
+
+**Required provenance guard** — new `dtt/provenance.py::check_stale_provenance`,
+reusing `load_provenance` exactly and the same `famos.audit.library_versions()`/
+`git_commit()` calls `build_provenance` already makes, compared against the
+*currently running* code (not a second study, which is what
+`compare_provenance` is shaped for). Three cases, all warn-don't-block, all
+logged loudly (`logger.warning`, wrapped in a `====` banner so they can't
+scroll past unnoticed) and all still let the run proceed since the user
+explicitly asked for `"analysis"` mode:
+1. **No `run_provenance.json` at all** — firmly in the warn path per
+   explicit instruction, not a silent pass. Confirmed by deleting a study's
+   provenance file and re-running in `"analysis"` mode — the warning fires
+   and the report still marks itself analysis-only.
+2. **Stored `famos_version`/git commit differs from the code now running.**
+3. **Units look inconsistent** — runs `dtt.ingestion.loader.
+   normalise_force_units`'s existing decade-error heuristic **read-only on
+   a copy** of the loaded `df` (never applied to the real analysis frame —
+   that would be exactly the forbidden second N-to-daN conversion) purely
+   to flag a mismatch against the vehicle preset's expected Fz band.
+
+**Report marking (required addition):** `report_builder.py::build_report`
+gained an `analysis_only: bool = False` parameter. When `True`, both the
+title slide's subtitle (`"...  |  ANALYSIS-ONLY MODE"`) and its info block,
+**and** the closing "Engineering Conclusions" slide, carry an explicit
+"no fresh preprocessing/validation pass" line — a reduced-metadata report
+can't be opened and mistaken for a full run. `pipeline.py` passes
+`analysis_only=(config.workflow_mode == "analysis")`.
+
+**CLI:** `--mode {preprocess,analysis,both}` (default `both`). The
+source-argument group (`--csv`/`--raw`/`--raw-files`/`--raw-folders`)
+changed from argparse-`required=True` to manually validated: still required
+for `"preprocess"`/`"both"` (clear `parser.error` if omitted), not required
+for `"analysis"` (which needs `--study` instead, also enforced with a clear
+`parser.error` rather than a traceback).
+
+**Validated, all three modes on one real synthetic study:**
+- `"preprocess"`: confirmed `processed_data.csv`/`raw_data.csv`/
+  `run_provenance.json` written, **zero** files in `figures/`, no
+  `stats_summary.json`, no `.pptx` — and the early-return path actually
+  returns the CSV path, not a report path.
+- `"both"`: 63 figures produced, PPTX returned — unchanged from every prior
+  round's runs of `"both"` (implicitly, since the code path is identical).
+- `"analysis"`: re-ran on the study `"both"` had just produced. Confirmed
+  `processed_data.csv`'s **SHA-256 hash and mtime are unchanged** after the
+  analysis-only re-run (never re-opened for writing). `stats_summary.json`
+  values matched the original `"both"` run to ~1e-6 relative — the tiny
+  remaining difference is exactly `CSV_FLOAT_FORMAT="%.6g"` round-trip
+  precision loss (`processed_data.csv` only carries 6 significant figures;
+  `"both"` mode computes stats on the full-precision in-memory frame,
+  `"analysis"` mode necessarily computes them on the re-read, rounded
+  values) — expected and inherent to reading back a persisted CSV, not a
+  bug, and confirmed by inspecting the actual diffs (all ~1e-6–1e-7
+  relative). Confirmed the PPTX is marked `ANALYSIS-ONLY` on both the title
+  and conclusions slides. Confirmed the stale-provenance warning actually
+  fires (missing-provenance case, the most likely real one) when re-run
+  against a study with its `run_provenance.json` deleted, and that the run
+  still completes and produces a correctly-marked report rather than
+  failing. Confirmed clear, typed errors (not tracebacks) for: `"analysis"`
+  mode on a study with no `processed_data.csv`; `"analysis"` mode with no
+  `study_name`; an invalid `workflow_mode` value; and the CLI-level
+  equivalents via `parser.error`.

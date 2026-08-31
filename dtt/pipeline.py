@@ -174,8 +174,30 @@ def run(
     famos_mode: bool        = True,
     deglitch:   bool        = False,
     export_famos_validation_csv: bool = False,
+    workflow_mode: str      = "both",
 ) -> Path:
-    if csv_path is None and raw_folder is None and not raw_files and not raw_folders:
+    """``workflow_mode``: ``"both"`` (default, today's full pipeline,
+    unchanged) | ``"preprocess"`` (ingestion + FAMOS recipe only, writes the
+    processed study output, then stops before any analysis stage) |
+    ``"analysis"`` (skips ingestion/FAMOS entirely; re-analyzes an existing
+    study's ``processed_data.csv`` in place, identified by ``study_name`` +
+    ``output_dir``; checks that study's saved processing provenance and
+    warns, never silently, if it looks stale or missing).
+
+    Returns the PPTX report path for ``"both"``/``"analysis"``, or the
+    ``processed_data.csv`` path for ``"preprocess"`` (no report exists yet
+    in that mode) — the return type is workflow_mode-dependent. Confirmed by
+    grep that no in-process caller inspects this return value today (the GUI
+    only drives the pipeline via the CLI subprocess), so this is safe, but
+    flagging it as a real signature change.
+    """
+    if workflow_mode == "analysis":
+        if not study_name:
+            raise ValueError(
+                'workflow_mode="analysis" requires study_name — the existing '
+                'study (under output_dir) whose processed_data.csv will be '
+                're-analyzed in place.')
+    elif csv_path is None and raw_folder is None and not raw_files and not raw_folders:
         raise ValueError("Provide csv_path, raw_folder, raw_folders, or raw_files")
 
     kwargs = dict(
@@ -197,19 +219,24 @@ def run(
     kwargs["deglitch"]     = deglitch
     kwargs["remove_stops"] = remove_stops
     kwargs["export_famos_validation_csv"] = export_famos_validation_csv
+    kwargs["workflow_mode"] = workflow_mode
 
     config = RunConfig(**kwargs)
     _setup_logging(config)
     logger = logging.getLogger("pipeline")
 
-    source = (f"{len(config.raw_folders)} raw sessions" if getattr(config, "raw_folders", None)
-              else f"{len(config.raw_files)} raw files" if config.raw_files
-              else config.raw_folder or config.csv_path)
+    if config.workflow_mode == "analysis":
+        source = f"existing study '{config.study_name}' (workflow_mode=analysis, no fresh ingestion)"
+    else:
+        source = (f"{len(config.raw_folders)} raw sessions" if getattr(config, "raw_folders", None)
+                  else f"{len(config.raw_files)} raw files" if config.raw_files
+                  else config.raw_folder or config.csv_path)
     logger.info("=" * 60)
     logger.info("DTT WFT Automation Pipeline  –  Starting")
     logger.info("Vehicle:  %s", config.vehicle_name)
     logger.info("Study:    %s", config.study_name)
     logger.info("Source:   %s", source)
+    logger.info("Mode:     %s", config.workflow_mode)
     if config.vehicle_type:
         logger.info("Vehicle type: %s", config.vehicle_type)
     logger.info("Output:   %s", config.run_output_dir)
@@ -217,99 +244,164 @@ def run(
 
     t0 = time.perf_counter()
 
-    logger.info("[1/9]  Data Ingestion")
-    if getattr(config, "raw_folders", None):
-        from dtt.ingestion.loader import load_raw_sessions
-        df, metadata = load_raw_sessions(config.raw_folders, config)
-    elif config.raw_files:
-        from dtt.ingestion.loader import load_raw_files
-        df, metadata = load_raw_files(config.raw_files, config)
-    elif config.raw_folder is not None:
-        from dtt.ingestion.loader import load_raw_folder
-        df, metadata = load_raw_folder(config.raw_folder, config)
+    if config.workflow_mode == "analysis":
+        # No ingestion, no FAMOS recipe, no sanitization/filtering -- this
+        # mode's entire point is to trust the existing processed_data.csv
+        # and re-run only the analysis stages on it, in place.
+        logger.info("[1-4/9]  Skipped (workflow_mode=analysis) -- reading "
+                    "the existing processed_data.csv instead of re-preprocessing")
+        processed_csv = config.run_output_dir / "processed_data.csv"
+        if not processed_csv.exists():
+            raise FileNotFoundError(
+                f'workflow_mode="analysis" requires an existing '
+                f'processed_data.csv in {config.run_output_dir}, found none. '
+                f'Run workflow_mode="preprocess" or "both" on this study first.')
+        import pandas as _pd
+        df = _pd.read_csv(processed_csv)
+        raw_frame, scale_meta = None, {}
+
+        from dtt.run_channels import build_run_channels
+        config.run_channels = build_run_channels(list(df.columns))
+        logger.info("Channel configuration (rebuilt from the existing CSV): %s",
+                    config.run_channels.summary())
+
+        from dtt.vehicles import get_preset, match_preset
+        preset = get_preset(config.vehicle_type) or match_preset(config.run_channels.channel_set)
+        config.tyre = preset.tyre
+        logger.info("Vehicle preset: %s  (tyre %s)", preset.name, preset.tyre.tyre_type)
+
+        # Required provenance guard: this mode trusts a file it did not just
+        # produce, so warn loudly -- never silently -- when that trust is
+        # shaky. Missing provenance (a study from before provenance tracking
+        # existed) is the most likely real case and is firmly in this warn
+        # path, not a silent pass-through.
+        from dtt.provenance import load_provenance, check_stale_provenance
+        prov_warnings = check_stale_provenance(config.run_output_dir, config=config, df=df)
+        if prov_warnings:
+            logger.warning("=" * 60)
+            logger.warning('workflow_mode="analysis" is trusting a previously-processed '
+                           "file. %d provenance warning(s):", len(prov_warnings))
+            for w in prov_warnings:
+                logger.warning("  - %s", w)
+            logger.warning("Proceeding as explicitly requested -- results may not "
+                           "reflect the current pipeline/recipe.")
+            logger.warning("=" * 60)
+        stored_prov = load_provenance(config.run_output_dir)
+
+        metadata = {
+            "file_name": processed_csv.name,
+            "rows": len(df),
+            "columns": len(df.columns),
+            "sampling_rate_hz": config.sampling_rate,
+            "duration_s": (len(df) / config.sampling_rate) if config.sampling_rate else 0.0,
+            "n_to_dan_applied": bool((stored_prov or {}).get("n_to_dan_applied")),
+        }
+
+        logger.info("[2/9]  Channel Validation  (re-checked against the existing processed data)")
+        validation_report = validate(df, metadata, config)
     else:
-        df, metadata = load_csv(config.csv_path, config)
-    if metadata.get("sampling_rate_hz"):
-        config.sampling_rate = metadata["sampling_rate_hz"]
-    # imc raw ingestion runs smo/FiltLP at the native rate (before red()), which
-    # is the only correct place for it; tell stage 4 not to condition twice.
-    # A DataFrame must not travel in metadata: that dict is handed to validation
-    # and the report builder, both of which treat it as plain descriptive values.
-    raw_frame = metadata.pop("raw_frame", None)
-    if metadata.get("sessions", 1) > 1:
-        logger.info("Joined %d recording sessions -> %.0f s; seams at %s s",
-                    metadata["sessions"], metadata.get("duration_s", 0),
-                    ", ".join(f"{t:.0f}" for t in metadata.get("seam_times_s", [])))
-    config.famos_applied = bool(metadata.get("famos_recipe"))
-    if config.famos_applied:
-        # Report how many channels were actually *conditioned*, not how many the
-        # recipe looked at. The old count included every passthrough column, so a
-        # run in which no force channel was recognised still logged "38 channels".
-        from dtt.preprocessing import count_conditioned
-        recipe = metadata["famos_recipe"]
-        treated = count_conditioned(recipe)
-        logger.info("FAMOS recipe applied at ingestion (red x%s): %d/%d channels conditioned",
-                    metadata.get("famos_decimate", 1), treated, len(recipe))
-        if not treated:
-            logger.warning("No channel matched the FAMOS recipe — the data is "
-                           "unconditioned and red() will have aliased it")
+        logger.info("[1/9]  Data Ingestion")
+        if getattr(config, "raw_folders", None):
+            from dtt.ingestion.loader import load_raw_sessions
+            df, metadata = load_raw_sessions(config.raw_folders, config)
+        elif config.raw_files:
+            from dtt.ingestion.loader import load_raw_files
+            df, metadata = load_raw_files(config.raw_files, config)
+        elif config.raw_folder is not None:
+            from dtt.ingestion.loader import load_raw_folder
+            df, metadata = load_raw_folder(config.raw_folder, config)
+        else:
+            df, metadata = load_csv(config.csv_path, config)
+        if metadata.get("sampling_rate_hz"):
+            config.sampling_rate = metadata["sampling_rate_hz"]
+        # imc raw ingestion runs smo/FiltLP at the native rate (before red()), which
+        # is the only correct place for it; tell stage 4 not to condition twice.
+        # A DataFrame must not travel in metadata: that dict is handed to validation
+        # and the report builder, both of which treat it as plain descriptive values.
+        raw_frame = metadata.pop("raw_frame", None)
+        if metadata.get("sessions", 1) > 1:
+            logger.info("Joined %d recording sessions -> %.0f s; seams at %s s",
+                        metadata["sessions"], metadata.get("duration_s", 0),
+                        ", ".join(f"{t:.0f}" for t in metadata.get("seam_times_s", [])))
+        config.famos_applied = bool(metadata.get("famos_recipe"))
+        if config.famos_applied:
+            # Report how many channels were actually *conditioned*, not how many the
+            # recipe looked at. The old count included every passthrough column, so a
+            # run in which no force channel was recognised still logged "38 channels".
+            from dtt.preprocessing import count_conditioned
+            recipe = metadata["famos_recipe"]
+            treated = count_conditioned(recipe)
+            logger.info("FAMOS recipe applied at ingestion (red x%s): %d/%d channels conditioned",
+                        metadata.get("famos_decimate", 1), treated, len(recipe))
+            if not treated:
+                logger.warning("No channel matched the FAMOS recipe — the data is "
+                               "unconditioned and red() will have aliased it")
 
-    # Build the axle-dynamic channel configuration from the actual columns
-    # BEFORE validation so every stage (incl. validation) is axle-aware.
-    from dtt.run_channels import build_run_channels
-    config.run_channels = build_run_channels(list(df.columns))
-    logger.info("Channel configuration: %s", config.run_channels.summary())
+        # Build the axle-dynamic channel configuration from the actual columns
+        # BEFORE validation so every stage (incl. validation) is axle-aware.
+        from dtt.run_channels import build_run_channels
+        config.run_channels = build_run_channels(list(df.columns))
+        logger.info("Channel configuration: %s", config.run_channels.summary())
 
-    from dtt.vehicles import get_preset, match_preset
-    preset = get_preset(config.vehicle_type) or match_preset(config.run_channels.channel_set)
-    config.tyre = preset.tyre
-    logger.info("Vehicle preset: %s  (tyre %s)", preset.name, preset.tyre.tyre_type)
+        from dtt.vehicles import get_preset, match_preset
+        preset = get_preset(config.vehicle_type) or match_preset(config.run_channels.channel_set)
+        config.tyre = preset.tyre
+        logger.info("Vehicle preset: %s  (tyre %s)", preset.name, preset.tyre.tyre_type)
 
-    # Units before anything reads a number: validation thresholds, histogram
-    # ranges and every statistic are all quoted in daN, so a decade error here
-    # silently invalidates all of them.
-    from dtt.ingestion.loader import normalise_force_units
-    df, scale_meta = normalise_force_units(df, config)
-    metadata.update(scale_meta)
+        # Units before anything reads a number: validation thresholds, histogram
+        # ranges and every statistic are all quoted in daN, so a decade error here
+        # silently invalidates all of them.
+        from dtt.ingestion.loader import normalise_force_units
+        df, scale_meta = normalise_force_units(df, config)
+        metadata.update(scale_meta)
 
-    if not getattr(config, "remove_stops", False):
-        _warn_if_stationary(df, config)
+        if not getattr(config, "remove_stops", False):
+            _warn_if_stationary(df, config)
 
-    logger.info("[2/9]  Channel Validation")
-    validation_report = validate(df, metadata, config)
+        logger.info("[2/9]  Channel Validation")
+        validation_report = validate(df, metadata, config)
 
-    logger.info("[3/9]  Data Sanitization")
-    df, san_report = sanitize(df, config)
+        logger.info("[3/9]  Data Sanitization")
+        df, san_report = sanitize(df, config)
 
-    logger.info("[4/9]  Signal Processing (%s)",
-                "imc/FAMOS recipe" if config.famos_mode else "Butterworth LPF")
-    if raw_frame is None and not config.famos_applied:
-        # A CSV study is still unconditioned here — stage 4 is what conditions
-        # it — so its "before" is simply the frame on the way in.
-        raw_frame = _force_frame(df, config)
-    df = apply_filter(df, config)
+        logger.info("[4/9]  Signal Processing (%s)",
+                    "imc/FAMOS recipe" if config.famos_mode else "Butterworth LPF")
+        if raw_frame is None and not config.famos_applied:
+            # A CSV study is still unconditioned here — stage 4 is what conditions
+            # it — so its "before" is simply the frame on the way in.
+            raw_frame = _force_frame(df, config)
+        df = apply_filter(df, config)
 
-    # The raw copy is only useful if it is on the same scale as the conditioned
-    # data. It bypassed both unit corrections (it is not in `df`), so re-apply
-    # exactly what `df` received, or the before/after traces sit a decade apart.
-    if raw_frame is not None:
-        _write_raw_csv(raw_frame, config, metadata, scale_meta)
+        # The raw copy is only useful if it is on the same scale as the conditioned
+        # data. It bypassed both unit corrections (it is not in `df`), so re-apply
+        # exactly what `df` received, or the before/after traces sit a decade apart.
+        if raw_frame is not None:
+            _write_raw_csv(raw_frame, config, metadata, scale_meta)
 
-    # Publish the frame every later stage actually analyses — and that the GUI
-    # re-reads as "study data". Saving before stage 4 shipped the raw frame.
-    processed_csv = config.run_output_dir / "processed_data.csv"
-    df.to_csv(processed_csv, index=False, float_format=CSV_FLOAT_FORMAT)
-    logger.info("Processed data saved: %s  (%d rows)", processed_csv, len(df))
+        # Publish the frame every later stage actually analyses — and that the GUI
+        # re-reads as "study data". Saving before stage 4 shipped the raw frame.
+        processed_csv = config.run_output_dir / "processed_data.csv"
+        df.to_csv(processed_csv, index=False, float_format=CSV_FLOAT_FORMAT)
+        logger.info("Processed data saved: %s  (%d rows)", processed_csv, len(df))
 
-    if getattr(config, "export_famos_validation_csv", False):
-        _write_famos_validation_csv(df, config)
+        if getattr(config, "export_famos_validation_csv", False):
+            _write_famos_validation_csv(df, config)
 
-    # Recorded so a later two-study comparison (dtt.analysis.study_compare)
-    # can tell whether both studies were produced by comparable processing --
-    # a recipe-version or units difference should not masquerade as a real
-    # load difference between two runs.
-    from dtt.provenance import build_provenance, write_provenance
-    write_provenance(config.run_output_dir, build_provenance(config, metadata))
+        # Recorded so a later two-study comparison (dtt.analysis.study_compare)
+        # can tell whether both studies were produced by comparable processing --
+        # a recipe-version or units difference should not masquerade as a real
+        # load difference between two runs.
+        from dtt.provenance import build_provenance, write_provenance
+        write_provenance(config.run_output_dir, build_provenance(config, metadata))
+
+        if config.workflow_mode == "preprocess":
+            elapsed = time.perf_counter() - t0
+            logger.info("=" * 60)
+            logger.info("Pipeline complete (preprocess-only) in %.1f s  (%.1f min)",
+                        elapsed, elapsed / 60)
+            logger.info("Processed data: %s", processed_csv)
+            logger.info("=" * 60)
+            return processed_csv
 
     # Stop removal produces a *derived* series for every analysis stage below
     # -- processed_data.csv above is already saved from the full `df`, which
@@ -385,7 +477,8 @@ def run(
         logger.error("PSD generation failed: %s", exc, exc_info=True)
 
     logger.info("[Report]  Building PowerPoint")
-    report_path = build_report(config, validation_report, stats, metadata)
+    report_path = build_report(config, validation_report, stats, metadata,
+                               analysis_only=(config.workflow_mode == "analysis"))
 
     elapsed = time.perf_counter() - t0
     logger.info("=" * 60)
@@ -398,7 +491,10 @@ def run(
 
 def _cli() -> None:
     parser = argparse.ArgumentParser(description="DTT WFT Automation Pipeline")
-    src = parser.add_mutually_exclusive_group(required=True)
+    # Not required at the argparse level: workflow_mode="analysis" needs none
+    # of these (it reads an existing study's processed_data.csv instead).
+    # Enforced manually below for the other two modes, where it still is.
+    src = parser.add_mutually_exclusive_group(required=False)
     src.add_argument("--csv",                               help="Path to WFT CSV file")
     src.add_argument("--raw",                               help="Path to imc STUDIO .raw channel folder")
     src.add_argument("--raw-files", nargs="+",              help="Specific imc .raw files")
@@ -427,7 +523,19 @@ def _cli() -> None:
                         help="TEMPORARY: also write a wide, RunChannels-ordered CSV of the "
                              "post-recipe (pre-analysis) signal, for a manual FAMOS cross-check. "
                              "Off by default; not part of normal study output.")
+    parser.add_argument("--mode", choices=("preprocess", "analysis", "both"), default="both",
+                        help='"both" (default): today\'s full pipeline. "preprocess": ingestion '
+                             '+ FAMOS recipe only, stop before any analysis stage. "analysis": '
+                             "skip preprocessing, re-analyze an existing study's "
+                             "processed_data.csv in place (requires --study).")
     args = parser.parse_args()
+
+    if args.mode == "analysis":
+        if not args.study:
+            parser.error("--mode analysis requires --study (the existing study to re-analyze)")
+    elif not (args.csv or args.raw or args.raw_files or args.raw_folders):
+        parser.error("one of --csv, --raw, --raw-files, --raw-folders is required "
+                     "unless --mode analysis is used")
 
     run(
         csv_path         = args.csv,
@@ -447,6 +555,7 @@ def _cli() -> None:
         miner_exponent   = args.miner,
         output_dir       = args.outdir,
         export_famos_validation_csv = args.export_famos_validation_csv,
+        workflow_mode    = args.mode,
     )
 
 

@@ -100,3 +100,75 @@ def compare_provenance(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]],
                 f"{vb!r}) — deltas below may reflect a processing/recipe "
                 f"change rather than a real difference between the runs.")
     return warnings
+
+
+def check_stale_provenance(run_output_dir: Path, config=None, df=None) -> List[str]:
+    """Warnings about whether a study's saved provenance is fresh enough to
+    trust for a workflow_mode="analysis" re-run — never a hard block, only a
+    signal the caller must surface (never hide), same warn-don't-block shape
+    as :func:`compare_provenance`, but the comparison here is one stored
+    study against the code *currently running*, not two peer studies.
+
+    Reuses :func:`load_provenance` and the exact ``famos.audit`` calls
+    :func:`build_provenance` already makes for the version fields. When
+    ``config``/``df`` are both given, also runs
+    ``dtt.ingestion.loader.normalise_force_units``'s existing decade-error
+    heuristic **read-only on a copy** of ``df`` — never applied to the real
+    analysis frame — purely to flag a units mismatch, not to correct one
+    (correcting here would be exactly the forbidden second N-to-daN
+    conversion).
+    """
+    warnings: List[str] = []
+    stored = load_provenance(run_output_dir)
+    if stored is None:
+        # Firmly in the warn path, not a silent pass-through: this is the
+        # single most likely stale case in practice (a study processed
+        # before provenance stamping existed).
+        warnings.append(
+            "No run_provenance.json found for this study — it predates "
+            "provenance tracking (or was produced outside this pipeline). "
+            "Its recipe/units cannot be verified against the current code; "
+            "proceeding only because 'only analysis' was explicitly "
+            "requested. Treat the results as unverified.")
+        return warnings
+
+    try:
+        from famos.audit import library_versions, git_commit
+        from dtt.config import BASE_DIR
+        current_libs = library_versions()
+        current_git = git_commit(BASE_DIR)
+    except Exception as exc:                                      # noqa: BLE001
+        logger.warning("Could not collect current library/git provenance: %s", exc)
+        current_libs, current_git = {}, "unavailable"
+
+    stored_famos = stored.get("famos_version", "unknown")
+    current_famos = current_libs.get("famos", "unknown")
+    if stored_famos != current_famos:
+        warnings.append(
+            f"This study was processed with famos v{stored_famos}; the code "
+            f"now running is famos v{current_famos}. The recipe may have "
+            f"changed since this study was preprocessed — re-preprocess if "
+            f"in doubt rather than trusting the existing processed_data.csv.")
+
+    stored_git = stored.get("git", "unavailable")
+    if stored_git not in ("unavailable", current_git) and current_git != "unavailable":
+        warnings.append(
+            f"This study's processing commit ({stored_git[:12]}) differs "
+            f"from the code currently running ({current_git[:12]}). Pipeline "
+            f"internals may have changed since preprocessing.")
+
+    if config is not None and df is not None:
+        try:
+            from dtt.ingestion.loader import normalise_force_units
+            _, scale_meta = normalise_force_units(df.copy(), config)
+            if scale_meta.get("force_scale_decades"):
+                warnings.append(
+                    f"The loaded processed data looks "
+                    f"{scale_meta['force_scale_decades']:+d} decade(s) off "
+                    f"the expected daN range for this vehicle preset — units "
+                    f"may be inconsistent with what run_provenance.json "
+                    f"recorded (n_to_dan_applied={stored.get('n_to_dan_applied')}).")
+        except Exception as exc:                                   # noqa: BLE001
+            logger.warning("Could not run the units consistency check: %s", exc)
+
+    return warnings
