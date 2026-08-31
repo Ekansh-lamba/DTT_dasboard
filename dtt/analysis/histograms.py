@@ -13,7 +13,6 @@ from dtt.config import (
     CHAN_COLORS,
     FORCE_RANGES_DAN,
     HIST_BINS,
-    PLOT_COLORS,
     SPEED_CANDIDATES,
     FIGURE_DPI,
     RunConfig,
@@ -22,10 +21,18 @@ from dtt.analysis.plot_style import draw_histogram
 
 logger = logging.getLogger(__name__)
 
-BG       = PLOT_COLORS["bg"]
-TEXT_SEC = PLOT_COLORS["text_sec"]
-TEXT_PRI = PLOT_COLORS["text_pri"]
-PANEL    = PLOT_COLORS["panel"]
+# Local light theme for the force-distribution histograms only — literal
+# colours, deliberately *not* sourced from the shared dark `PLOT_COLORS`
+# dict, so this module's look can differ from boxplots.py/rainflow.py/
+# heatmaps.py/severity.py without touching any of them (each defines its
+# own independent `_style_ax`; nothing here is imported elsewhere except
+# `_get_speed_weights`, confirmed by grep).
+BG       = "#FFFFFF"      # figure background
+PANEL    = "#FAFAFA"      # plot area background (very pale grey)
+GRID     = "#E3E3E3"      # quiet gridlines
+SPINE    = "#CCCCCC"      # thin axis spines
+TEXT_PRI = "#333333"      # titles — dark grey, not the old bright white-on-navy
+TEXT_SEC = "#555555"      # axis labels/ticks — dark grey
 
 
 def _try_find_col(df: pd.DataFrame, names: list) -> Optional[str]:
@@ -43,8 +50,10 @@ def _style_ax(ax):
     ax.set_facecolor(PANEL)
     ax.tick_params(colors=TEXT_SEC, labelsize=8)
     for sp in ax.spines.values():
-        sp.set_edgecolor(PLOT_COLORS["accent"])
+        sp.set_edgecolor(SPINE)
         sp.set_linewidth(0.7)
+    ax.grid(True, color=GRID, linewidth=0.6, alpha=0.9, zorder=0)
+    ax.set_axisbelow(True)
     ax.xaxis.label.set_color(TEXT_SEC)
     ax.yaxis.label.set_color(TEXT_SEC)
     ax.title.set_color(TEXT_PRI)
@@ -192,12 +201,12 @@ def _plot_single_histogram(ax, vals, weights, bins, xlim, ch, mode, total_m, col
             ylabel = "% Samples (no speed data)"
         total_label = f"{np.nansum(w_plot):.1f} %"
 
-    draw_histogram(ax, vals, bins, weights=w_plot, color=col)
+    draw_histogram(ax, vals, bins, weights=w_plot, color=col, style="soft")
     if xlim:
         ax.set_xlim(xlim)
-    ax.set_xlabel("Force (daN)", fontsize=8)
-    ax.set_ylabel(ylabel, fontsize=8)
-    ax.set_title(f"{ch}  [{mode}]  {total_label}", fontsize=9, fontweight="bold", color=col)
+    ax.set_xlabel("Force (daN)", fontsize=8, color=TEXT_SEC)
+    ax.set_ylabel(ylabel, fontsize=8, color=TEXT_SEC)
+    ax.set_title(f"{ch}  [{mode}]  {total_label}", fontsize=9, fontweight="bold", color=TEXT_PRI)
 
 
 def generate_histograms(df: pd.DataFrame, config: RunConfig, range_mode: str = "full") -> None:

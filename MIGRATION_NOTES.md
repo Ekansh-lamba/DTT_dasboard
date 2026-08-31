@@ -826,3 +826,67 @@ study (90 vs. 50) produced the larger damage number as physically expected
 (ratio ≈ 104x, consistent with Miner's `range^m` at `m=8` amplifying a
 1.8x amplitude difference sharply), and confirmed the PNG renders
 successfully.
+
+## Step 6 — force-distribution histogram restyle: light reference match (2026-08-31)
+
+**Diagnosis (done before any edit, as instructed).** The force-distribution
+histograms were already routing through the one shared `plot_style.py::
+draw_histogram` — no separate/older draw path existed, confirmed by tracing
+`histograms.py::_plot_single_histogram`'s call into it. The dark look came
+from two places instead: (1) `histograms.py`'s own `_style_ax` (a
+module-local function, independent of every other module's) set a dark
+navy `PLOT_COLORS["panel"]` background and light-on-dark text; (2)
+`draw_histogram` itself defaulted to a dark/saturated look — a fixed red
+`KDE_COLOR` and dark-centre-to-light-edge banded bars — shared with
+`rainflow.py`'s range-distribution panel, its only other caller. So this
+was case 2 from the brief: correctly wired to `plot_style`, but
+`plot_style`'s own look needed softening, scoped so only the force
+histograms changed.
+
+**Reference clarified mid-task:** the attached reference turned out to be
+the two-run EV-vs-IC comparison look (filled KDE curves, no bars, light
+background, stats strip) — already built as `draw_comparison_kde`/
+`draw_stats_strip` in Round 3 Step 4, explicitly out of scope for *this*
+task. The force-distribution target is one strand of that same visual
+language: a single soft-filled curve, no discrete bars at all.
+
+**Fix, additive to `draw_histogram` (`plot_style.py`):** new `style: str =
+"banded"` parameter. `"banded"` is the exact prior behaviour (bars +
+banded colours + fixed red curve) — unchanged, so `rainflow.py`'s output is
+untouched. New `style="soft"`: skips `ax.bar()`/`banded_colors()` entirely
+and instead draws `ax.fill_between(x_grid, curve, alpha=0.25, color=color)`
++ a thin `ax.plot(..., linewidth=1.3, color=color)` — reusing the exact
+same `kde_curve` call (same weighting, same boundary-reflection logic;
+nothing about what's *computed* changed, only what's drawn). The mean/
+percentile marker line's colour switches from hardcoded white (invisible
+on a light background) to a muted dark grey when `style="soft"` — a
+necessary visibility fix, called out rather than silently done.
+
+**Fix, local to `histograms.py`:** replaced the module's `BG`/`PANEL`/
+`TEXT_PRI`/`TEXT_SEC` constants — previously aliased from the shared dark
+`PLOT_COLORS` dict — with new literal light-theme colours defined directly
+in this module (white/pale-grey backgrounds, quiet light-grey gridlines,
+thin light-grey spines, dark-grey text). Confirmed by grep that nothing
+outside this file imports these names (only `_get_speed_weights` is
+imported elsewhere, by `heatmaps.py`), so `boxplots.py`/`rainflow.py`/
+`heatmaps.py`/`severity.py` — which import the same shared `PLOT_COLORS`
+dict independently — are unaffected. `_style_ax` gained a light gridline
+call. `_plot_single_histogram` now calls `draw_histogram(..., style="soft")`
+and the per-channel title switched from the loud per-wheel primary colour
+to the new dark `TEXT_PRI`, per the brief's "small dark unobtrusive text."
+`PLOT_COLORS` import dropped from `histograms.py` (no longer used).
+
+**Validated:** regenerated one wheel's Fx/Fy/Fz force-distribution
+histograms (both `range_mode="full"` and `"autoscale"`, confirming last
+round's option still works unchanged) on synthetic data — visually
+confirmed light background, thin single-tone curve, soft fill, quiet grid,
+small dark labels, matching the reference. Unit-level check on
+`draw_histogram` directly: `style="banded"` still draws exactly one bar per
+bin plus 2 lines (mean + KDE); `style="soft"` draws zero bars, one
+fill-between collection, and the same 2 lines; the returned histogram
+`heights` are identical between the two styles (same underlying math,
+different rendering only); an invalid `style` value raises `ValueError`.
+**Regression check:** generated `rainflow_FL.png` from identical seeded
+synthetic data on the pre-change code and on this change, and compared
+SHA-256 hashes — **byte-identical**, confirming `rainflow.py`'s output
+(the shared function's other caller) is completely untouched.

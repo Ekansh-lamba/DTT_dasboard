@@ -121,13 +121,20 @@ def banded_colors(bin_centers: np.ndarray, values: np.ndarray,
     return [ramp[int(k)] for k in band]
 
 
+_SOFT_MARKER_COLOR = "#4A4A4A"          # dark-grey mean/percentile line, visible on a light bg
+_SOFT_FILL_ALPHA = 0.25
+_SOFT_LINE_WIDTH = 1.3
+_BANDED_LINE_WIDTH = 1.7
+
+
 def draw_histogram(ax, values: np.ndarray, bins: np.ndarray,
                    weights: Optional[np.ndarray] = None,
                    color: str = "#00B4D8",
                    bar_is_density: bool = False,
                    boundary: Optional[float] = None,
-                   show_kde: bool = True) -> Tuple[np.ndarray, str]:
-    """Draw one banded histogram with a scaled KDE curve onto ``ax``.
+                   show_kde: bool = True,
+                   style: str = "banded") -> Tuple[np.ndarray, str]:
+    """Draw one histogram with a scaled KDE curve onto ``ax``.
 
     ``values``/``weights`` are the raw (already-finite) samples and their
     per-sample weight (distance, say) — pass ``weights=None`` for a plain
@@ -140,8 +147,21 @@ def draw_histogram(ax, values: np.ndarray, bins: np.ndarray,
     ``boundary`` fixes the one-sided reflection point (default: the first bin
     edge) when :func:`detect_shape` calls this distribution one-sided.
 
-    Returns ``(bar_heights, shape)``.
+    ``style``: ``"banded"`` (default, unchanged from before) draws bars
+    coloured in dark-centre-to-light-edge bands with a fixed red KDE line —
+    this is what rainflow's range-distribution panel uses and keeps using.
+    ``"soft"`` draws no bars at all: a single soft low-alpha fill under a
+    thin line, both in ``color`` — the light force-distribution-histogram
+    look. Only the drawing changes between the two; the histogram/KDE maths
+    above this point are identical either way.
+
+    Returns ``(bar_heights, shape)`` — ``bar_heights`` is still computed via
+    ``np.histogram`` under ``style="soft"`` even though no bars are drawn, so
+    callers that inspect the return value see the same shape of data.
     """
+    if style not in ("banded", "soft"):
+        raise ValueError(f'style must be "banded" or "soft", got {style!r}')
+
     v = np.asarray(values, dtype=float)
     finite = np.isfinite(v)
     w = None
@@ -154,22 +174,25 @@ def draw_histogram(ax, values: np.ndarray, bins: np.ndarray,
     centers = (bins[:-1] + bins[1:]) / 2.0
     widths = np.diff(bins)
     if v.size == 0:
-        ax.bar(centers, np.zeros_like(centers), width=widths, color=color)
+        if style == "banded":
+            ax.bar(centers, np.zeros_like(centers), width=widths, color=color)
         return np.zeros_like(centers), "symmetric"
 
     shape = detect_shape(v, w)
     heights, _ = np.histogram(v, bins=bins, weights=w, density=bar_is_density)
-    colors = banded_colors(centers, v, w, shape, color)
-    ax.bar(centers, heights, width=widths, color=colors, edgecolor="none",
-          alpha=0.92, zorder=2)
+    if style == "banded":
+        colors = banded_colors(centers, v, w, shape, color)
+        ax.bar(centers, heights, width=widths, color=colors, edgecolor="none",
+              alpha=0.92, zorder=2)
 
     if not show_kde:
         return heights, shape
 
     x_grid = np.linspace(bins[0], bins[-1], 400)
+    marker_color = "#FFFFFF" if style == "banded" else _SOFT_MARKER_COLOR
     if shape == "symmetric":
         mean, _ = _weighted_mean_std(v, w)
-        ax.axvline(mean, color="#FFFFFF", linewidth=1.3, alpha=0.85, zorder=4)
+        ax.axvline(mean, color=marker_color, linewidth=1.3, alpha=0.85, zorder=4)
         density = kde_curve(v, x_grid, weights=w)
     else:
         # Reflection is only correct against a *real* physical bound (the
@@ -196,7 +219,12 @@ def draw_histogram(ax, values: np.ndarray, bins: np.ndarray,
         bin_width = float(widths[0]) if widths.size else 1.0
         total = float(w.sum()) if w is not None else float(v.size)
         curve = density * bin_width * total
-    ax.plot(x_grid, curve, color=KDE_COLOR, linewidth=1.7, zorder=5)
+
+    if style == "soft":
+        ax.fill_between(x_grid, curve, alpha=_SOFT_FILL_ALPHA, color=color, zorder=3)
+        ax.plot(x_grid, curve, color=color, linewidth=_SOFT_LINE_WIDTH, zorder=5)
+    else:
+        ax.plot(x_grid, curve, color=KDE_COLOR, linewidth=_BANDED_LINE_WIDTH, zorder=5)
 
     return heights, shape
 
