@@ -52,6 +52,37 @@ class NewStudyPage(BasePage):
         form.setSpacing(12)
         form.setLabelAlignment(Qt.AlignLeft)
 
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Full run (preprocess + analysis)", "both")
+        self.mode_combo.addItem("Preprocess only (no analysis, no report)", "preprocess")
+        self.mode_combo.addItem("Analysis only (existing study, no re-preprocessing)", "analysis")
+        self.mode_combo.setToolTip(
+            "Full run: today's normal pipeline.\n"
+            "Preprocess only: ingest + condition the signal, save processed_data.csv / "
+            "raw_data.csv, then stop -- no histograms/heatmaps/rainflow/report.\n"
+            "Analysis only: skip preprocessing entirely and re-run just the analysis "
+            "stages on an existing study's processed_data.csv, in place. Checks that "
+            "study's saved processing provenance and warns (never silently) if it "
+            "looks stale or missing.")
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        form.addRow("Workflow mode", self.mode_combo)
+
+        # Shown only for "Analysis only" -- pick an existing, already-processed
+        # study instead of a fresh CSV/raw source.
+        self.existing_study_container = QWidget()
+        es_row = QHBoxLayout(self.existing_study_container)
+        es_row.setContentsMargins(0, 0, 0, 0)
+        self.existing_study_combo = QComboBox()
+        self.existing_study_combo.setMinimumWidth(240)
+        self.existing_study_combo.currentIndexChanged.connect(self._on_existing_study_changed)
+        refresh_studies = QPushButton("Refresh")
+        refresh_studies.setObjectName("Secondary")
+        refresh_studies.clicked.connect(self._reload_existing_studies)
+        es_row.addWidget(self.existing_study_combo, 1)
+        es_row.addWidget(refresh_studies)
+        form.addRow("Existing study", self.existing_study_container)
+        self.existing_study_container.setVisible(False)
+
         self.source_type = QComboBox()
         self.source_type.addItems(["CSV file", "imc raw folder"])
         self.source_type.currentIndexChanged.connect(self._on_source_type)
@@ -202,6 +233,16 @@ class NewStudyPage(BasePage):
         self.famos_check.toggled.connect(self._toggle_filter)
         right.layout().addWidget(self.famos_check)
 
+        self.famos_validation_check = QCheckBox("Export FAMOS-validation CSV (temporary)")
+        self.famos_validation_check.setChecked(False)
+        self.famos_validation_check.setToolTip(
+            "Also write preprocessed_for_famos_validation.csv: the signal right "
+            "after the FAMOS recipe (despike/smo/FiltLP/decimate), reordered by "
+            "channel, for a manual cross-check against a licensed FAMOS install.\n"
+            "Temporary validation aid -- not part of the normal study output, and "
+            "has no effect in Analysis-only mode (nothing gets re-preprocessed).")
+        right.layout().addWidget(self.famos_validation_check)
+
         self.deglitch_check = QCheckBox("Remove DAQ artifact spikes")
         self.deglitch_check.setChecked(False)
         self.deglitch_check.setToolTip(
@@ -296,9 +337,61 @@ class NewStudyPage(BasePage):
         self.reload_csvs()
         self._on_source_type()
         self._toggle_filter()
+        self._on_mode_changed()
+
+    # Workflow mode switching
+    def _on_mode_changed(self, *_) -> None:
+        mode = self.mode_combo.currentData()
+        is_analysis = (mode == "analysis")
+        preprocessing_happens = not is_analysis   # "both" or "preprocess"
+
+        # Analysis-only reads an existing processed_data.csv -- no source
+        # picker, no live channel detection, none of that applies.
+        self.source_type.setVisible(not is_analysis)
+        self.existing_study_container.setVisible(is_analysis)
+        self.channels_title.setVisible(not is_analysis)
+        self.channels_scroll.setVisible(not is_analysis)
+        self.detect_label.setVisible(not is_analysis)
+        if is_analysis:
+            self.csv_container.setVisible(False)
+            self.raw_container.setVisible(False)
+            self.sessions_box.setVisible(False)
+            self._reload_existing_studies()
+        else:
+            self._on_source_type()
+            self._describe_sessions()  # restore the join-list visibility _on_source_type doesn't touch
+
+        # Filtering options only take effect when preprocessing actually runs.
+        for w in (self.filter_check, self.famos_check, self.famos_validation_check,
+                 self.deglitch_check, self.stops_check, self.cutoff_spin,
+                 self.order_spin):
+            w.setEnabled(preprocessing_happens)
+        if preprocessing_happens:
+            self._toggle_filter()          # restore the normal enabled/disabled mix
+            self.stops_check.setEnabled(True)
+            self.stop_min_spin.setEnabled(self.stops_check.isChecked())
+        # Miner's exponent still matters in analysis-only mode (rainflow runs).
+        self.miner_spin.setEnabled(True)
+        self.study_edit.setEnabled(not is_analysis)
+
+    def _reload_existing_studies(self) -> None:
+        self.existing_study_combo.clear()
+        studies = [s for s in self.repo.list_studies() if s.processed_csv.exists()]
+        if not studies:
+            self.existing_study_combo.addItem("No studies with processed_data.csv found", None)
+            return
+        for s in studies:
+            self.existing_study_combo.addItem(s.name, s.name)
+
+    def _on_existing_study_changed(self, *_) -> None:
+        name = self.existing_study_combo.currentData()
+        if name:
+            self.study_edit.setText(name)
 
     # Source switching
     def _on_source_type(self, *_) -> None:
+        if self.mode_combo.currentData() == "analysis":
+            return
         is_raw = self.source_type.currentIndex() == 1
         self.raw_container.setVisible(is_raw)
         self.csv_container.setVisible(not is_raw)
@@ -513,6 +606,7 @@ class NewStudyPage(BasePage):
     # Launch
     def _on_start(self) -> None:
         self.error_label.setText("")
+        mode = self.mode_combo.currentData() or "both"
         is_raw = self.source_type.currentIndex() == 1
         vehicle_type = self.vtype_combo.currentData() or ""
 
@@ -529,7 +623,19 @@ class NewStudyPage(BasePage):
             remove_stops=self.stops_check.isChecked(),
             stop_min_s=(self.stop_min_spin.value()
                         if self.stops_check.isChecked() else None),
+            mode=mode,
+            export_famos_validation_csv=self.famos_validation_check.isChecked(),
         )
+
+        if mode == "analysis":
+            study_name = self.existing_study_combo.currentData()
+            if not study_name:
+                self.error_label.setText(
+                    "Select an existing study with a processed_data.csv to analyze.")
+                return
+            common["study"] = study_name
+            self.start_requested.emit(RunRequest(**common))
+            return
 
         if is_raw:
             if self._raw_sessions:

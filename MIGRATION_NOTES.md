@@ -1062,3 +1062,76 @@ for `"analysis"` (which needs `--study` instead, also enforced with a clear
   mode on a study with no `processed_data.csv`; `"analysis"` mode with no
   `study_name`; an invalid `workflow_mode` value; and the CLI-level
   equivalents via `parser.error`.
+
+## Step 4 — GUI: workflow mode picker + FAMOS-validation checkbox (2026-08-31)
+
+Round 4's plan deliberately deferred a GUI picker for the mode/export flag
+to the later GUI-restructure round, on the reasoning that both were CLI-only
+and that restructure would need to happen anyway. After seeing Step 1's
+restyle land but having no way to reach Steps 2/3 without a terminal, the
+user asked for these two specifically to be added to the existing New Study
+screen now, ahead of that restructure — a narrower ask than the full
+restructure, so done as a contained addition to the existing page rather
+than pulled forward as part of it.
+
+**`gui/workers/pipeline_worker.py::RunRequest`** — two new fields, `mode:
+str = "both"` and `export_famos_validation_csv: bool = False`. `to_cmd()`
+appends `--mode <mode>` only when not `"both"` (keeps the emitted command
+identical to before for every existing caller) and
+`--export-famos-validation-csv` when set. The existing `--csv`/`--raw*`
+source-selection block is now skipped entirely when `mode == "analysis"` —
+that mode needs none of them, matching the CLI's own validation.
+
+**`gui/pages/new_study_page.py::NewStudyPage`**:
+- New "Workflow mode" combo (`Full run` / `Preprocess only` / `Analysis
+  only`) at the top of the Data Source card, driving a new `_on_mode_changed`
+  handler.
+- New "Existing study" combo, shown only for Analysis-only, populated from
+  `self.repo.list_studies()` filtered to ones with a `processed_data.csv`
+  (reusing `StudyRepository`, not a new discovery mechanism) — picking one
+  also mirrors its name into the Study name field for clarity.
+- Selecting Analysis-only hides the source picker, live channel detection,
+  and channel listing (none apply — no source is being read), and disables
+  every filtering control (`filter_check`/`famos_check`/
+  `famos_validation_check`/`deglitch_check`/`stops_check`/`cutoff_spin`/
+  `order_spin`) since nothing gets re-preprocessed in that mode. Miner's
+  exponent stays enabled — rainflow still runs and reads it in Analysis-only
+  mode.
+- New "Export FAMOS-validation CSV (temporary)" checkbox next to the
+  existing FAMOS-recipe checkbox, wired straight to
+  `RunRequest.export_famos_validation_csv`.
+- `_on_start` builds the mode/export fields into the existing `common` kwargs
+  dict; for Analysis-only it short-circuits before any source validation and
+  requires a study to actually be selected (clear inline error otherwise) —
+  every other kwarg (vehicle, miner, remove_stops, etc.) still flows through
+  unchanged, since several of them (miner, remove_stops) still matter to the
+  analysis stages that do run.
+
+**Known, accepted limitation (not fixed this pass):** the Processing
+screen's stage tracker (`pipeline_worker.py::_STAGE_MARKERS`) matches
+`[1/9]`/`[3/9]`/`[4/9]` log markers to show "Data Ingestion"/"Sanitization"/
+"Filtering" as in-progress. In `"analysis"` mode those stages don't run and
+the pipeline logs a single `[1-4/9] Skipped` line instead, so those three
+rows on the Processing screen will simply show as never-started rather than
+skipped — an honest reflection of what happened, just not a
+purpose-built "skipped" state. Not addressed here to keep this addition to
+the two things asked for; worth a follow-up if it reads as confusing in
+practice.
+
+**Validated (headless PySide6, `QT_QPA_PLATFORM=offscreen`, `page.show()` so
+Qt's real visibility chain is exercised, not the false-negative
+never-shown-widget state):**
+- Switching the mode combo to Analysis-only correctly shows the existing-study
+  picker and hides the source picker/channel panel; switching back to Full
+  run correctly reverses both, restores the filtering controls' enabled
+  state, and re-shows the CSV/raw picker per the underlying `source_type`
+  selection.
+- `_on_start()` in Analysis-only mode with no study selected sets the
+  expected inline error and does not emit `start_requested`.
+- End-to-end with a real on-disk study (`20260828_121831`): selecting it and
+  starting produced a `RunRequest` with `mode="analysis"`, the study name,
+  and `to_cmd()` correctly omitting every `--csv`/`--raw*` flag while
+  including `--mode analysis --study 20260828_121831`.
+- Preprocess-only with the FAMOS-validation checkbox checked and a real CSV
+  selected produced `to_cmd()` containing `--mode preprocess`,
+  `--export-famos-validation-csv`, and `--csv`, as expected.

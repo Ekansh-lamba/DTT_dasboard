@@ -44,6 +44,8 @@ class RunRequest:
     deglitch: bool = False        # rolling-median removal of DAQ artifact spikes
     remove_stops: bool = False    # excise stationary/paused stretches
     stop_min_s: Optional[float] = None
+    mode: str = "both"            # "both" | "preprocess" | "analysis"
+    export_famos_validation_csv: bool = False  # TEMPORARY: post-recipe CSV for manual FAMOS cross-check
 
     def to_cmd(self) -> List[str]:
         # A frozen .exe re-invokes itself in pipeline mode; from source we call
@@ -52,14 +54,18 @@ class RunRequest:
             cmd = [sys.executable, "--run-pipeline"]
         else:
             cmd = [sys.executable, "-m", "dtt.pipeline"]
-        if self.raw_folders:
-            cmd += ["--raw-folders"] + [str(f) for f in self.raw_folders]
-        elif self.raw_files:
-            cmd += ["--raw-files"] + [str(f) for f in self.raw_files]
-        elif self.raw_folder:
-            cmd += ["--raw", str(self.raw_folder)]
-        else:
-            cmd += ["--csv", str(self.csv_path)]
+        # "analysis" mode reads an existing study's processed_data.csv instead
+        # of ingesting a source, so it needs none of --csv/--raw/--raw-files/
+        # --raw-folders (and the CLI itself doesn't require one in that mode).
+        if self.mode != "analysis":
+            if self.raw_folders:
+                cmd += ["--raw-folders"] + [str(f) for f in self.raw_folders]
+            elif self.raw_files:
+                cmd += ["--raw-files"] + [str(f) for f in self.raw_files]
+            elif self.raw_folder:
+                cmd += ["--raw", str(self.raw_folder)]
+            else:
+                cmd += ["--csv", str(self.csv_path)]
         cmd += ["--vehicle", self.vehicle or "Vehicle"]
         if self.vehicle_type:
             cmd += ["--vehicle-type", self.vehicle_type]
@@ -81,6 +87,10 @@ class RunRequest:
                 cmd += ["--stop-min-s", str(self.stop_min_s)]
         if self.deglitch:
             cmd += ["--deglitch"]
+        if self.mode != "both":
+            cmd += ["--mode", self.mode]
+        if self.export_famos_validation_csv:
+            cmd += ["--export-famos-validation-csv"]
         return cmd
 
 
