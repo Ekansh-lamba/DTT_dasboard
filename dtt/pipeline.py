@@ -170,9 +170,22 @@ def run(
     raw_files:  list        = None,
     raw_folders: list       = None,
     remove_stops: bool      = False,
+    stop_min_s: float       = None,
+    stop_speed_kph: float   = None,
     vehicle_type: str       = "",
     famos_mode: bool        = True,
     deglitch:   bool        = False,
+    despike:    bool        = False,
+    despike_rail_min_run:    int   = None,
+    despike_dropout_max_run: int   = None,
+    despike_hw_cutoff_hz:    float = None,
+    despike_net:             bool  = False,
+    transient_despike:                  bool  = False,
+    transient_despike_pct:              float = None,
+    transient_despike_window_s:         float = None,
+    transient_despike_noise_floor_mult: float = None,
+    transient_despike_max_spike_frac:   float = None,
+    histogram_range_mode: str = None,
     export_famos_validation_csv: bool = False,
     workflow_mode: str      = "both",
 ) -> Path:
@@ -218,6 +231,19 @@ def run(
     kwargs["famos_mode"]   = famos_mode
     kwargs["deglitch"]     = deglitch
     kwargs["remove_stops"] = remove_stops
+    if stop_min_s     is not None: kwargs["stop_min_s"]     = stop_min_s
+    if stop_speed_kph is not None: kwargs["stop_speed_kph"] = stop_speed_kph
+    kwargs["despike"]     = despike
+    if despike_rail_min_run    is not None: kwargs["despike_rail_min_run"]    = despike_rail_min_run
+    if despike_dropout_max_run is not None: kwargs["despike_dropout_max_run"] = despike_dropout_max_run
+    if despike_hw_cutoff_hz    is not None: kwargs["despike_hw_cutoff_hz"]    = despike_hw_cutoff_hz
+    kwargs["despike_net"] = despike_net
+    kwargs["transient_despike"] = transient_despike
+    if transient_despike_pct              is not None: kwargs["transient_despike_pct"]              = transient_despike_pct
+    if transient_despike_window_s         is not None: kwargs["transient_despike_window_s"]         = transient_despike_window_s
+    if transient_despike_noise_floor_mult is not None: kwargs["transient_despike_noise_floor_mult"] = transient_despike_noise_floor_mult
+    if transient_despike_max_spike_frac   is not None: kwargs["transient_despike_max_spike_frac"]   = transient_despike_max_spike_frac
+    if histogram_range_mode is not None: kwargs["histogram_range_mode"] = histogram_range_mode
     kwargs["export_famos_validation_csv"] = export_famos_validation_csv
     kwargs["workflow_mode"] = workflow_mode
 
@@ -447,7 +473,8 @@ def run(
 
     logger.info("[6/9]  Histogram Generation")
     try:
-        generate_histograms(analysis_df, config)
+        generate_histograms(analysis_df, config,
+                            range_mode=getattr(config, "histogram_range_mode", "full"))
     except Exception as exc:
         logger.error("Histogram generation failed: %s", exc, exc_info=True)
 
@@ -515,10 +542,36 @@ def _cli() -> None:
                              "counted as road load")
     parser.add_argument("--stop-min-s", type=float,
                         help="Shortest stationary stretch to remove (default 3 s)")
+    parser.add_argument("--stop-speed-kph", type=float,
+                        help="Speed below which the vehicle reads as stopped (default 1.5 km/h)")
     parser.add_argument("--deglitch",  action="store_true",
                         help="Rolling-median de-glitch of DAQ artifact spikes before filtering")
+    parser.add_argument("--despike",  action="store_true",
+                        help="Physical-rule despike (rail/dropout/narrow-spike) ahead of smo/FiltLP")
+    parser.add_argument("--despike-rail-min-run", type=int,
+                        help="Samples pinned at channel min/max to count as saturation (default 3)")
+    parser.add_argument("--despike-dropout-max-run", type=int,
+                        help="Samples of any repeated value to count as a frozen sensor (default 5)")
+    parser.add_argument("--despike-hw-cutoff-hz", type=float,
+                        help="Hardware anti-alias cutoff; sets the minimum physical feature width (default 200 Hz)")
+    parser.add_argument("--despike-net", action="store_true",
+                        help="Optional loose adaptive Hampel net for gross leftovers after despike")
+    parser.add_argument("--transient-despike", action="store_true",
+                        help='Manual\'s "20%% within 1s" spike rule, run post-smooth/decimate')
+    parser.add_argument("--transient-despike-pct", type=float,
+                        help="Deviation from local trend, as a percent, to flag (default 20)")
+    parser.add_argument("--transient-despike-window-s", type=float,
+                        help="Local-trend window, seconds (default 1.0)")
+    parser.add_argument("--transient-despike-noise-floor-mult", type=float,
+                        help="Noise-floor multiple the deviation must also clear (default 10)")
+    parser.add_argument("--transient-despike-max-spike-frac", type=float,
+                        help="Cap on flagged run length as a fraction of the window (default 0.4)")
     parser.add_argument("--miner",    type=float,           help="Miner's rule exponent (default 8)")
     parser.add_argument("--outdir",                         help="Override output directory")
+    parser.add_argument("--histogram-range-mode", choices=("full", "autoscale"), default=None,
+                        help='Force-histogram x-axis: "full" (default) uses the configured '
+                             'per-channel span; "autoscale" always fits to the actual data '
+                             "(P0.5-P99.5).")
     parser.add_argument("--export-famos-validation-csv", action="store_true",
                         help="TEMPORARY: also write a wide, RunChannels-ordered CSV of the "
                              "post-recipe (pre-analysis) signal, for a manual FAMOS cross-check. "
@@ -552,6 +605,19 @@ def _cli() -> None:
         famos_mode       = not args.no_famos,
         deglitch         = args.deglitch,
         remove_stops     = args.remove_stops,
+        stop_min_s       = args.stop_min_s,
+        stop_speed_kph   = args.stop_speed_kph,
+        despike                             = args.despike,
+        despike_rail_min_run                = args.despike_rail_min_run,
+        despike_dropout_max_run             = args.despike_dropout_max_run,
+        despike_hw_cutoff_hz                = args.despike_hw_cutoff_hz,
+        despike_net                         = args.despike_net,
+        transient_despike                   = args.transient_despike,
+        transient_despike_pct               = args.transient_despike_pct,
+        transient_despike_window_s          = args.transient_despike_window_s,
+        transient_despike_noise_floor_mult  = args.transient_despike_noise_floor_mult,
+        transient_despike_max_spike_frac    = args.transient_despike_max_spike_frac,
+        histogram_range_mode = args.histogram_range_mode,
         miner_exponent   = args.miner,
         output_dir       = args.outdir,
         export_famos_validation_csv = args.export_famos_validation_csv,

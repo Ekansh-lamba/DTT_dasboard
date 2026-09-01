@@ -28,9 +28,16 @@ class HistogramsPage(BasePage):
         self.signal_combo = QComboBox()
         self.kind_combo = QComboBox()
         self.kind_combo.addItems(["Distance-weighted", "Percentage"])
+        self.range_combo = QComboBox()
+        self.range_combo.addItem("Full range", "full")
+        self.range_combo.addItem("Autoscale to data", "autoscale")
+        self.range_combo.setToolTip(
+            "Which x-axis mode's figure to show — depends on which mode(s) "
+            "the run generated.")
         for w in (QLabel("Wheel:"), self.wheel_combo,
                   QLabel("Signal:"), self.signal_combo,
-                  QLabel("Type:"), self.kind_combo):
+                  QLabel("Type:"), self.kind_combo,
+                  QLabel("X-axis:"), self.range_combo):
             head.addWidget(w)
         fs = QPushButton("⤢ Fullscreen")
         fs.setObjectName("Secondary")
@@ -38,7 +45,7 @@ class HistogramsPage(BasePage):
         head.addWidget(fs)
         root.addLayout(head)
 
-        for c in (self.wheel_combo, self.signal_combo, self.kind_combo):
+        for c in (self.wheel_combo, self.signal_combo, self.kind_combo, self.range_combo):
             c.currentIndexChanged.connect(self._update_view)
 
         card = Card()
@@ -84,16 +91,18 @@ class HistogramsPage(BasePage):
         wheel = self.wheel_combo.currentText()
         signal = self.signal_combo.currentText()
         kind = "distance" if self.kind_combo.currentIndex() == 0 else "percentage"
+        range_mode = self.range_combo.currentData() or "full"
         if not wheel:
             return None, "No wheel channels in this study"
 
+        suffix = "" if range_mode == "full" else f"_{range_mode}"
         if signal == "Combined":
-            path = self.study.histogram_combined(wheel, kind)
-            name = f"hist_{kind}_{wheel}.png"
+            path = self.study.histogram_combined(wheel, kind, range_mode)
+            name = f"hist_{kind}_{wheel}{suffix}.png"
         else:
-            path = self.study.histogram(wheel, signal, kind)
+            path = self.study.histogram(wheel, signal, kind, range_mode)
             channel = self.study.channel_for(wheel, signal) or f"{wheel}_{signal}"
-            name = f"hist_{kind}_{channel}.png"
+            name = f"hist_{kind}_{channel}{suffix}.png"
         return path, name
 
     def _update_view(self) -> None:

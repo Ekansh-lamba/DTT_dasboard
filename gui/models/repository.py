@@ -273,17 +273,26 @@ class Study:
             return []
         return sorted(self.figures_dir.glob(pattern))
 
-    def histogram(self, wheel: str, signal: str, kind: str = "distance") -> Optional[Path]:
+    def histogram(self, wheel: str, signal: str, kind: str = "distance",
+                  range_mode: str = "full") -> Optional[Path]:
         """kind = 'distance' | 'percentage'. Per-channel histogram.
 
         The figure is named after the real channel, which is not always
         ``{wheel}_{signal}`` — resolve it before building the filename.
+        ``range_mode='autoscale'`` looks for the ``_autoscale``-suffixed
+        sibling file; ``'full'`` (default) is the unsuffixed original.
         """
         channel = self.channel_for(wheel, signal) or f"{wheel}_{signal}"
-        return self.figure(f"hist_{kind}_{channel}.png")
+        suffix = "" if range_mode == "full" else f"_{range_mode}"
+        return self.figure(f"hist_{kind}_{channel}{suffix}.png")
 
-    def histogram_combined(self, wheel: str, kind: str = "distance") -> Optional[Path]:
-        return self.figure(f"hist_{kind}_{wheel}.png")
+    def histogram_combined(self, wheel: str, kind: str = "distance",
+                           range_mode: str = "full") -> Optional[Path]:
+        suffix = "" if range_mode == "full" else f"_{range_mode}"
+        return self.figure(f"hist_{kind}_{wheel}{suffix}.png")
+
+    def psd(self, wheel: str) -> Optional[Path]:
+        return self.figure(f"psd_{wheel}.png")
 
     def heatmap(self, name: str) -> Optional[Path]:
         return self.figure(f"heatmap_{name}.png")

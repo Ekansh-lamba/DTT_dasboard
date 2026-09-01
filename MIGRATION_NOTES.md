@@ -1135,3 +1135,227 @@ never-shown-widget state):**
 - Preprocess-only with the FAMOS-validation checkbox checked and a real CSV
   selected produced `to_cmd()` containing `--mode preprocess`,
   `--export-famos-validation-csv`, and `--csv`, as expected.
+
+---
+
+# Round 5: GUI surfacing of terminal-only features (2026-09-01)
+
+Additive-only pass per the brief: no page reorganisation, no navigation
+restructure, no backend/pipeline math touched. Every new control sets an
+existing `RunConfig` field through a new CLI flag (pure argument-parsing
+plumbing) — the recipe/analysis code itself is unchanged.
+
+**Phase 1 audit (full table given to the user separately) found:** workflow
+mode, the FAMOS-validation CSV export, and stop removal on/off + min-duration
+were already GUI-reachable (Round 4). Genuinely terminal-only: despike
+(rail/dropout/sub-width + net), the transient/20%-spike rule, the stop-removal
+speed threshold (`stop_speed_kph`), the histogram x-axis range mode, and the
+Welch PSD output (generated automatically but with no GUI viewer). Two-run
+study comparison (`compare_studies`/`compare_rainflow`, `study_compare.py`)
+had **no CLI entry at all**, only a Python API — the user chose to defer both
+of those (and the stop-removal seam-blend params, an internal tuning knob) out
+of this round entirely.
+
+## Step A — despike + transient-spike controls (2026-09-01)
+
+**The GUI has no in-process pipeline import — it shells out to `python -m
+dtt.pipeline`** (`gui/workers/pipeline_worker.py::RunRequest.to_cmd()`), so
+every RunConfig field without a CLI flag was invisible to the GUI regardless
+of any GUI work. Confirmed by grep: `despike`/`despike_*`/`transient_despike*`
+existed on `RunConfig` (Round 2) and were already threaded into
+`apply_famos_recipe` via `signal_processor.py::apply_filter` (confirmed by
+reading the existing `getattr(config, "despike", False)`-style kwargs), but
+`dtt/pipeline.py::_cli()` had no matching `argparse` entries and `run()` had
+no matching keyword parameters — the only way to set them was constructing
+`RunConfig(...)` directly in Python.
+
+**Fix:** `dtt/pipeline.py::run()` gained keyword parameters for `despike`,
+`despike_rail_min_run`, `despike_dropout_max_run`, `despike_hw_cutoff_hz`,
+`despike_net`, `transient_despike`, and its 4 params — each only added to the
+`kwargs` dict (and so only overrides the `RunConfig` default) when not `None`,
+same pattern the existing `sampling_rate`/`filter_order` overrides use.
+`_cli()` gained the matching `--despike`, `--despike-rail-min-run`,
+`--despike-dropout-max-run`, `--despike-hw-cutoff-hz`, `--despike-net`,
+`--transient-despike`, `--transient-despike-pct`,
+`--transient-despike-window-s`, `--transient-despike-noise-floor-mult`,
+`--transient-despike-max-spike-frac` flags.
+
+**Bug found and fixed as a direct byproduct, not a silent side effect:**
+`MIGRATION_NOTES.md`'s own Round 2 open-items note flagged that
+`--stop-min-s` was parsed but never reached `run()`'s kwargs (`run()` had no
+`stop_min_s` parameter at all). Since this step was already adding the
+sibling `stop_speed_kph` parameter to the same function, `stop_min_s` was
+added alongside it and wired into `_cli()`'s `run(...)` call — closing that
+open bug. Flagging explicitly: this changes real behaviour (the existing GUI
+spinbox and `--stop-min-s` flag previously had **no effect**; both now do).
+
+**GUI (`new_study_page.py`):** two new checkboxes in the Filtering card —
+"Despike (rail / dropout / sub-hardware-width)" and 'Transient spike rule
+("20% within 1s")' — both off by default (matches `RunConfig`). Each reveals
+its own indented `QFormLayout` sub-box **only when checked** (`setVisible`,
+not just `setEnabled`) per the user's explicit clutter requirement — the
+default view is two clean checkboxes, not a wall of greyed-out spinboxes.
+Every numeric field is pre-filled from the matching `RunConfig` default:
+rail-run 3, dropout-run 5, HW cutoff 200 Hz, transient threshold 20%, window
+1.0 s, noise-floor 10x, max-spike-frac 0.4. A "Speed threshold" spinbox
+(default 1.5 km/h, matching `stop_speed_kph`) was added next to the existing
+"Shortest stop to cut" spinbox, same enable/disable wiring. `RunRequest`
+(`pipeline_worker.py`) gained the matching fields and `to_cmd()` entries,
+following the existing `remove_stops`/`stop_min_s` pattern (only emit a flag's
+value args when the parent flag is set).
+
+**Validated (headless PySide6, `QT_QPA_PLATFORM=offscreen`, `page.show()`):**
+- Every new spinbox's default value read back exactly matches the
+  corresponding `RunConfig` default (200.0, 3, 5, 20.0, 1.0, 10.0, 0.4, 1.5) —
+  confirmed by reading each widget's `.value()` immediately after construction.
+- Both `despike_box`/`transient_box` start hidden; toggling each checkbox
+  shows/hides its box; the default (fully untouched) screen's `to_cmd()`
+  produces the exact same command line as before this step (`--csv ... --vehicle
+  ... --miner 8.0`, no new flags) — confirms the default state reproduces
+  today's behaviour exactly.
+- Setting despike (HW cutoff 250), transient, stop-removal (speed 2.5 km/h)
+  and driving `_on_start()` produced a `RunRequest` whose `to_cmd()` contained
+  every set flag with its edited value: `--despike --despike-rail-min-run 3
+  --despike-dropout-max-run 5 --despike-hw-cutoff-hz 250.0 --transient-despike
+  --transient-despike-pct 20.0 ... --remove-stops --stop-min-s 5.0
+  --stop-speed-kph 2.5`.
+- Backend-level check (isolated from the GUI): called
+  `apply_famos_recipe(df, despike_enabled=True, despike_hw_cutoff_hz=250.0,
+  transient_enabled=True, ...)` directly on a real synthetic CSV
+  (`generate_sample_data.py --profile mixed`) — 37/38 channels came back with
+  `despike(...)`/`transient(...)` in their applied-steps string, confirming
+  the flag path actually reaches the pipeline math, not just argument parsing.
+- `remove_stops_frame` called directly with `moving_kph=1.5` vs `5.0` (same
+  min_stop_s) on the same synthetic study removed a different row count
+  (1011 vs 1111 of 20000), and `min_stop_s=3.0` vs `20.0` (same speed)
+  dropped from 1011 to 0 — confirms both newly-wired parameters actually
+  change stop-detection output, not just pass through inertly.
+- `pytest tests/` — 37/38 pass, same single pre-existing failure as every
+  prior round (missing gitignored proprietary file, unrelated).
+
+## Step B — stop-removal speed threshold: covered by Step A
+
+The `stop_speed_kph` CLI flag, `RunRequest` field, and GUI spinbox were built
+and validated together with Step A above (same Filtering-card row, same
+`stops_check` enable/disable wiring) since they're the same feature group as
+the `stop_min_s` bug fix — no separate work needed.
+
+## Step C — histogram x-axis range mode (2026-09-01)
+
+**Issue, more terminal-only than the rest:** `range_mode` wasn't even a
+`RunConfig` field — `dtt/pipeline.py`'s call to `generate_histograms(analysis_df,
+config)` never passed it, so the pipeline was hardcoded to `"full"` no matter
+what. Deliberately left this way in Round 3 pending this GUI round.
+
+**Fix:** new `RunConfig.histogram_range_mode: str = "full"` field (matches
+today's default exactly, so a study run without touching this control is
+unaffected). `pipeline.py`'s histogram-generation call now reads
+`generate_histograms(analysis_df, config, range_mode=getattr(config,
+"histogram_range_mode", "full"))`. `_cli()` gained
+`--histogram-range-mode {full,autoscale}`; `run()` gained the matching keyword.
+
+**GUI, two places:**
+- **New Study page**: a "Histogram x-axis" combo in the Filtering card
+  (Full range / Autoscale to data), default "Full range" — matches the
+  `RunConfig` default, stays enabled in every workflow mode (rainflow/
+  histograms still run in Analysis-only mode, same as Miner's exponent).
+- **Histograms page**: a new "X-axis:" combo in the toolbar, so a study that
+  was run with **both** modes generated (or only one) can be viewed either
+  way. `Study.histogram()`/`histogram_combined()` (`gui/models/repository.py`)
+  gained a `range_mode` parameter that resolves to the `_autoscale`-suffixed
+  filename or the unsuffixed original, mirroring `generate_histograms`'s own
+  filename convention exactly (no second naming scheme invented).
+
+**Graceful degrade (explicit requirement):** no new empty-state code was
+needed — `ZoomableImageView.load()` already renders "No figure available"
+for a missing path and `HistogramsPage`'s caption already appends
+"(not generated)"; passing a `range_mode` whose file doesn't exist for this
+study just flows into that same existing path.
+
+**Validated:**
+- `python -m dtt.pipeline --csv ... --histogram-range-mode full` and
+  `--histogram-range-mode autoscale` on the same synthetic study: `full`
+  produced the unsuffixed `hist_distance_FL_Fx.png` (byte-identical filename
+  convention to every prior round); `autoscale` produced
+  `hist_distance_FL_Fx_autoscale.png` — confirms the CLI flag reaches
+  `generate_histograms` correctly.
+- Headless: loaded a study that only has `_autoscale` files into
+  `HistogramsPage` with the range combo left at its "Full range" default —
+  caption correctly read `hist_distance_FL.png  (not generated)`, no crash,
+  no broken image. Switching the combo to "Autoscale to data" correctly
+  resolved and displayed the real file.
+- Default New Study page state (nothing touched) still emits no
+  `--histogram-range-mode` flag at all — `to_cmd()` unchanged from before this
+  step for the untouched-defaults case.
+
+## Step D — Welch PSD viewer page (2026-09-01)
+
+**Issue:** `dtt/analysis/psd.py::generate_psd` already runs unconditionally
+every full/analysis run (pipeline stage `[9b/9]`, wired in Round 3) and saves
+`psd_{wheel}.png` into `figures_dir` — no toggle needed, nothing to surface
+there — but no GUI page displayed it; the only way to see it was opening the
+study folder manually.
+
+**Fix:** new `gui/pages/psd_page.py::PsdPage`, structurally identical to
+`BoxplotsPage` (a `FigureGrid` of per-item cards, `ImageViewerDialog` on
+click) rather than `HistogramsPage`'s single zoomable view + combo selectors
+— PSD has exactly one figure per wheel, no signal/kind/range axis to pick,
+so the simpler existing pattern fit without inventing a new one.
+`Study.psd(wheel)` added to `gui/models/repository.py`, mirroring
+`boxplot()`/`rainflow_image()` exactly. Registered in `main_window.py`'s
+`NAV_ITEMS`/`_STUDY_PAGES`/page mapping, inserted between Rainflow and
+Reports (closest existing neighbours in the pipeline's own stage order) —
+a single added nav row, no reordering of the existing thirteen.
+
+**Empty state (explicit requirement), inherited for free:** `FigureGrid.
+set_figures()` already renders a "Figure not generated" placeholder per card
+when a path is `None` (the exact mechanism `BoxplotsPage` already relies on)
+— `PsdPage` needed no new empty-state code, only to build the `(title, path)`
+list the same way `BoxplotsPage` does.
+
+**Validated (headless PySide6):**
+- A preprocess-only study (`workflow_mode="preprocess"`, stops before any
+  analysis stage — confirmed 0 files in its `figures/` dir) loaded into
+  `PsdPage`: 4 cards rendered (one per default wheel), each showing "Figure
+  not generated" text, no broken-image icon, no crash. Screenshot confirmed
+  visually.
+- A full-run study (`workflow_mode="both"`, real `psd_FL/FR/RL/RR.png` on
+  disk) loaded into the same page instance: all 4 cards show a real loaded
+  pixmap (`card._pixmap is not None`). Screenshot confirmed the actual Welch
+  PSD subplots render correctly inside the existing dark Card styling.
+- Full `MainWindow` construction + `navigate("psd")` succeeds end to end,
+  confirming the new page is wired into the real navigation stack, not just
+  buildable in isolation.
+
+## Contrast / styling — all four steps
+
+No manual styling was added to any new widget. `QCheckBox`, `QSpinBox`,
+`QDoubleSpinBox`, `QComboBox`, `QFormLayout`, and `QLabel` are all styled
+globally by `gui/theme.py`'s app-wide stylesheet (confirmed by reading it —
+explicit checked-state accent colour, focus borders, entry backgrounds) —
+every new control automatically matches existing ones with no bolted-on look.
+Confirmed visually via headless screenshot grabs (`page.grab()` with the real
+`theme.stylesheet()` applied, same as `gui/main.py`'s actual startup path):
+checkbox accent colouring, spinbox/combo borders, and indentation of the
+collapsible despike/transient sub-forms all render as expected against the
+dark theme.
+
+## Deferred, per explicit user decision
+
+- **Two-run study comparison / RF Compare** (`dtt/analysis/study_compare.py`)
+  — left entirely as Python-API-only. No CLI flag, no GUI entry point. Still
+  open for a future round if wanted; the module itself is unchanged.
+- **Stop-removal seam-blend params** (`stop_seam_search_s`,
+  `stop_seam_blend_s`) — left at their validated 1.0s/0.2s defaults, no CLI
+  flag, no GUI control. Internal backstop tuning, not an operator-facing knob
+  per the user's explicit call.
+
+## Not touched
+
+No pipeline/analysis math was edited in this round — every change is CLI
+argument parsing (new `argparse` entries setting existing `RunConfig` fields)
+or GUI widget wiring (new controls setting existing `RunRequest` fields).
+`famos/ops.py`, `dtt/preprocessing.py`'s despike/transient rule
+implementations, `dtt/analysis/psd.py`'s Welch computation, and
+`dtt/analysis/histograms.py`'s range-mode logic are all byte-for-byte
+unchanged from before this round.

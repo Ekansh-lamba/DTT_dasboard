@@ -251,6 +251,109 @@ class NewStudyPage(BasePage):
             "the raw traces show isolated out-of-family spikes.")
         right.layout().addWidget(self.deglitch_check)
 
+        # Despike (rail/dropout/sub-hardware-width) -- structural physical
+        # rules, distinct from the statistical deglitch above. Numeric fields
+        # are hidden, not just disabled, until the checkbox is ticked, so the
+        # default view stays two clean checkboxes rather than a wall of greyed
+        # inputs.
+        self.despike_check = QCheckBox("Despike (rail / dropout / sub-hardware-width)")
+        self.despike_check.setChecked(False)
+        self.despike_check.setToolTip(
+            "Structural despike ahead of smo/FiltLP: flags a run pinned at the "
+            "channel's own min/max (rail), a frozen/zero run (dropout), or an "
+            "excursion narrower than the sensor's own hardware anti-alias filter "
+            "can produce (sub-hardware-width) -- never by amplitude alone, so "
+            "genuine load peaks of any size survive.")
+        self.despike_check.toggled.connect(self._toggle_despike)
+        right.layout().addWidget(self.despike_check)
+
+        self.despike_box = QWidget()
+        dform = QFormLayout(self.despike_box)
+        dform.setContentsMargins(22, 0, 0, 0)
+        dform.setSpacing(8)
+
+        self.despike_rail_spin = QSpinBox()
+        self.despike_rail_spin.setRange(2, 50)
+        self.despike_rail_spin.setValue(3)
+        self.despike_rail_spin.setSuffix(" samples")
+        self.despike_rail_spin.setToolTip("Run length pinned at channel min/max to count as saturation.")
+        dform.addRow("Rail run", self.despike_rail_spin)
+
+        self.despike_dropout_spin = QSpinBox()
+        self.despike_dropout_spin.setRange(2, 50)
+        self.despike_dropout_spin.setValue(5)
+        self.despike_dropout_spin.setSuffix(" samples")
+        self.despike_dropout_spin.setToolTip("Run length of an identical repeated value to count as a frozen sensor.")
+        dform.addRow("Dropout run", self.despike_dropout_spin)
+
+        self.despike_hw_spin = QDoubleSpinBox()
+        self.despike_hw_spin.setRange(1.0, 2000.0)
+        self.despike_hw_spin.setValue(200.0)
+        self.despike_hw_spin.setSuffix(" Hz")
+        self.despike_hw_spin.setToolTip(
+            "Hardware anti-alias cutoff -- sets the narrowest feature width that "
+            "can physically be real.")
+        dform.addRow("HW cutoff", self.despike_hw_spin)
+
+        self.despike_net_check = QCheckBox("Loose adaptive net (gross leftovers)")
+        self.despike_net_check.setChecked(False)
+        self.despike_net_check.setToolTip(
+            "Optional loose Hampel backstop after the structural rules above, "
+            "for gross garbage they miss. Off by default.")
+        dform.addRow("", self.despike_net_check)
+
+        self.despike_box.setVisible(False)
+        right.layout().addWidget(self.despike_box)
+
+        self.transient_check = QCheckBox('Transient spike rule ("20% within 1s")')
+        self.transient_check.setChecked(False)
+        self.transient_check.setToolTip(
+            "The manual's rule for a sudden spike that deviates from its local "
+            "trend and returns within about a second, run on the already-"
+            "conditioned (smoothed/decimated) signal, not the raw channel.")
+        self.transient_check.toggled.connect(self._toggle_transient)
+        right.layout().addWidget(self.transient_check)
+
+        self.transient_box = QWidget()
+        tform = QFormLayout(self.transient_box)
+        tform.setContentsMargins(22, 0, 0, 0)
+        tform.setSpacing(8)
+
+        self.transient_pct_spin = QDoubleSpinBox()
+        self.transient_pct_spin.setRange(1.0, 500.0)
+        self.transient_pct_spin.setValue(20.0)
+        self.transient_pct_spin.setSuffix(" %")
+        self.transient_pct_spin.setToolTip("Deviation from the local trend to flag.")
+        tform.addRow("Threshold", self.transient_pct_spin)
+
+        self.transient_window_spin = QDoubleSpinBox()
+        self.transient_window_spin.setRange(0.1, 10.0)
+        self.transient_window_spin.setValue(1.0)
+        self.transient_window_spin.setSuffix(" s")
+        self.transient_window_spin.setToolTip("Local-trend rolling-median window.")
+        tform.addRow("Window", self.transient_window_spin)
+
+        self.transient_noise_spin = QDoubleSpinBox()
+        self.transient_noise_spin.setRange(1.0, 100.0)
+        self.transient_noise_spin.setValue(10.0)
+        self.transient_noise_spin.setSuffix(" x noise floor")
+        self.transient_noise_spin.setToolTip(
+            "Effective threshold is the larger of the % above and this multiple "
+            "of the channel's own local noise scale.")
+        tform.addRow("Noise floor", self.transient_noise_spin)
+
+        self.transient_frac_spin = QDoubleSpinBox()
+        self.transient_frac_spin.setRange(0.05, 1.0)
+        self.transient_frac_spin.setSingleStep(0.05)
+        self.transient_frac_spin.setValue(0.4)
+        self.transient_frac_spin.setToolTip(
+            "Caps a flagged run at this fraction of the window, so a genuine "
+            "wide swing (e.g. real braking/cornering) is never eaten.")
+        tform.addRow("Max spike frac", self.transient_frac_spin)
+
+        self.transient_box.setVisible(False)
+        right.layout().addWidget(self.transient_box)
+
         self.stops_check = QCheckBox("Remove stationary periods")
         self.stops_check.setChecked(False)
         self.stops_check.setToolTip(
@@ -274,10 +377,22 @@ class NewStudyPage(BasePage):
             "Anything shorter is treated as traffic rather than a stop.")
         self.stop_min_spin.setMaximumWidth(110)
         stop_row.addWidget(self.stop_min_spin)
+        stop_row.addSpacing(12)
+        stop_row.addWidget(QLabel("Speed threshold"))
+        self.stop_speed_spin = QDoubleSpinBox()
+        self.stop_speed_spin.setRange(0.1, 50.0)
+        self.stop_speed_spin.setValue(1.5)
+        self.stop_speed_spin.setSuffix(" km/h")
+        self.stop_speed_spin.setToolTip(
+            "Below this speed the vehicle reads as stopped, not literal zero.")
+        self.stop_speed_spin.setMaximumWidth(120)
+        stop_row.addWidget(self.stop_speed_spin)
         stop_row.addStretch(1)
         right.layout().addLayout(stop_row)
         self.stops_check.toggled.connect(self.stop_min_spin.setEnabled)
+        self.stops_check.toggled.connect(self.stop_speed_spin.setEnabled)
         self.stop_min_spin.setEnabled(False)
+        self.stop_speed_spin.setEnabled(False)
 
         self.cutoff_spin = QDoubleSpinBox()
         self.cutoff_spin.setRange(0.1, 1000.0)
@@ -295,6 +410,15 @@ class NewStudyPage(BasePage):
         self.miner_spin.setSingleStep(0.5)
         self.miner_spin.setValue(8.0)
         fform.addRow("Miner's exponent", self.miner_spin)
+
+        self.range_mode_combo = QComboBox()
+        self.range_mode_combo.addItem("Full range (configured span)", "full")
+        self.range_mode_combo.addItem("Autoscale to data (P0.5-P99.5)", "autoscale")
+        self.range_mode_combo.setToolTip(
+            "Force-histogram x-axis. Full range: today's default, uses the "
+            "configured per-channel span (Fx/Fy ±300 daN, Fz 100-1000 daN). "
+            "Autoscale: always fits the axis to the actual data spread instead.")
+        fform.addRow("Histogram x-axis", self.range_mode_combo)
         right.layout().addLayout(fform)
 
         right.layout().addWidget(_card_title("Analysis Modules"))
@@ -363,13 +487,14 @@ class NewStudyPage(BasePage):
 
         # Filtering options only take effect when preprocessing actually runs.
         for w in (self.filter_check, self.famos_check, self.famos_validation_check,
-                 self.deglitch_check, self.stops_check, self.cutoff_spin,
-                 self.order_spin):
+                 self.deglitch_check, self.despike_check, self.transient_check,
+                 self.stops_check, self.cutoff_spin, self.order_spin):
             w.setEnabled(preprocessing_happens)
         if preprocessing_happens:
             self._toggle_filter()          # restore the normal enabled/disabled mix
             self.stops_check.setEnabled(True)
             self.stop_min_spin.setEnabled(self.stops_check.isChecked())
+            self.stop_speed_spin.setEnabled(self.stops_check.isChecked())
         # Miner's exponent still matters in analysis-only mode (rainflow runs).
         self.miner_spin.setEnabled(True)
         self.study_edit.setEnabled(not is_analysis)
@@ -404,6 +529,12 @@ class NewStudyPage(BasePage):
             self.csv_combo.addItem("No CSV files in csv/ — use Browse…", None)
         for f in files:
             self.csv_combo.addItem(f.name, str(f))
+
+    def _toggle_despike(self, checked: bool) -> None:
+        self.despike_box.setVisible(checked)
+
+    def _toggle_transient(self, checked: bool) -> None:
+        self.transient_box.setVisible(checked)
 
     def _toggle_filter(self, *_) -> None:
         on = self.filter_check.isChecked()
@@ -623,6 +754,27 @@ class NewStudyPage(BasePage):
             remove_stops=self.stops_check.isChecked(),
             stop_min_s=(self.stop_min_spin.value()
                         if self.stops_check.isChecked() else None),
+            stop_speed_kph=(self.stop_speed_spin.value()
+                            if self.stops_check.isChecked() else None),
+            despike=self.despike_check.isChecked(),
+            despike_rail_min_run=(self.despike_rail_spin.value()
+                                   if self.despike_check.isChecked() else None),
+            despike_dropout_max_run=(self.despike_dropout_spin.value()
+                                      if self.despike_check.isChecked() else None),
+            despike_hw_cutoff_hz=(self.despike_hw_spin.value()
+                                   if self.despike_check.isChecked() else None),
+            despike_net=(self.despike_net_check.isChecked()
+                         if self.despike_check.isChecked() else False),
+            transient_despike=self.transient_check.isChecked(),
+            transient_despike_pct=(self.transient_pct_spin.value()
+                                    if self.transient_check.isChecked() else None),
+            transient_despike_window_s=(self.transient_window_spin.value()
+                                         if self.transient_check.isChecked() else None),
+            transient_despike_noise_floor_mult=(self.transient_noise_spin.value()
+                                                 if self.transient_check.isChecked() else None),
+            transient_despike_max_spike_frac=(self.transient_frac_spin.value()
+                                               if self.transient_check.isChecked() else None),
+            histogram_range_mode=self.range_mode_combo.currentData(),
             mode=mode,
             export_famos_validation_csv=self.famos_validation_check.isChecked(),
         )

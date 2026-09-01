@@ -20,6 +20,7 @@ from gui.pages.histograms_page import HistogramsPage
 from gui.pages.heatmaps_page import HeatmapsPage
 from gui.pages.boxplots_page import BoxplotsPage
 from gui.pages.rainflow_page import RainflowPage
+from gui.pages.psd_page import PsdPage
 from gui.pages.reports_page import ReportsPage
 from gui.pages.comparison_page import ComparisonPage
 from gui.pages.history_page import HistoryPage
@@ -35,13 +36,14 @@ NAV_ITEMS = [
     ("heatmaps",   "Heatmaps",    "▦"),
     ("boxplots",   "Boxplots",    "◫"),
     ("rainflow",   "Rainflow",    "∿"),
+    ("psd",        "PSD",         "∼"),
     ("reports",    "Reports",     "▤"),
     ("comparison", "Compare",     "⇄"),
     ("history",    "History",     "≡"),
 ]
 _STUDY_PAGES = {
     "preprocess", "signals", "validation", "statistics", "histograms",
-    "heatmaps", "boxplots", "rainflow", "reports",
+    "heatmaps", "boxplots", "rainflow", "psd", "reports",
 }
 
 
@@ -164,6 +166,7 @@ class MainWindow(QMainWindow):
         self.heatmaps   = HeatmapsPage(self.repo)
         self.boxplots   = BoxplotsPage(self.repo)
         self.rainflow   = RainflowPage(self.repo)
+        self.psd        = PsdPage(self.repo)
         self.reports    = ReportsPage(self.repo)
         self.comparison = ComparisonPage(self.repo)
         self.history    = HistoryPage(self.repo)
@@ -174,7 +177,7 @@ class MainWindow(QMainWindow):
             "signals": self.signals, "validation": self.validation,
             "statistics": self.statistics, "histograms": self.histograms,
             "heatmaps": self.heatmaps, "boxplots": self.boxplots,
-            "rainflow": self.rainflow, "reports": self.reports,
+            "rainflow": self.rainflow, "psd": self.psd, "reports": self.reports,
             "comparison": self.comparison, "history": self.history,
         }
         for key, _, _ in NAV_ITEMS:

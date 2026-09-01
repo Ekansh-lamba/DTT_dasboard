@@ -44,6 +44,18 @@ class RunRequest:
     deglitch: bool = False        # rolling-median removal of DAQ artifact spikes
     remove_stops: bool = False    # excise stationary/paused stretches
     stop_min_s: Optional[float] = None
+    stop_speed_kph: Optional[float] = None
+    despike: bool = False                          # physical-rule despike (rail/dropout/narrow-spike)
+    despike_rail_min_run: Optional[int] = None
+    despike_dropout_max_run: Optional[int] = None
+    despike_hw_cutoff_hz: Optional[float] = None
+    despike_net: bool = False
+    transient_despike: bool = False                 # manual's "20% within 1s" spike rule
+    transient_despike_pct: Optional[float] = None
+    transient_despike_window_s: Optional[float] = None
+    transient_despike_noise_floor_mult: Optional[float] = None
+    transient_despike_max_spike_frac: Optional[float] = None
+    histogram_range_mode: Optional[str] = None      # "full" | "autoscale"
     mode: str = "both"            # "both" | "preprocess" | "analysis"
     export_famos_validation_csv: bool = False  # TEMPORARY: post-recipe CSV for manual FAMOS cross-check
 
@@ -85,8 +97,32 @@ class RunRequest:
             cmd += ["--remove-stops"]
             if self.stop_min_s:
                 cmd += ["--stop-min-s", str(self.stop_min_s)]
+            if self.stop_speed_kph:
+                cmd += ["--stop-speed-kph", str(self.stop_speed_kph)]
         if self.deglitch:
             cmd += ["--deglitch"]
+        if self.despike:
+            cmd += ["--despike"]
+            if self.despike_rail_min_run is not None:
+                cmd += ["--despike-rail-min-run", str(self.despike_rail_min_run)]
+            if self.despike_dropout_max_run is not None:
+                cmd += ["--despike-dropout-max-run", str(self.despike_dropout_max_run)]
+            if self.despike_hw_cutoff_hz is not None:
+                cmd += ["--despike-hw-cutoff-hz", str(self.despike_hw_cutoff_hz)]
+            if self.despike_net:
+                cmd += ["--despike-net"]
+        if self.transient_despike:
+            cmd += ["--transient-despike"]
+            if self.transient_despike_pct is not None:
+                cmd += ["--transient-despike-pct", str(self.transient_despike_pct)]
+            if self.transient_despike_window_s is not None:
+                cmd += ["--transient-despike-window-s", str(self.transient_despike_window_s)]
+            if self.transient_despike_noise_floor_mult is not None:
+                cmd += ["--transient-despike-noise-floor-mult", str(self.transient_despike_noise_floor_mult)]
+            if self.transient_despike_max_spike_frac is not None:
+                cmd += ["--transient-despike-max-spike-frac", str(self.transient_despike_max_spike_frac)]
+        if self.histogram_range_mode and self.histogram_range_mode != "full":
+            cmd += ["--histogram-range-mode", self.histogram_range_mode]
         if self.mode != "both":
             cmd += ["--mode", self.mode]
         if self.export_famos_validation_csv:
