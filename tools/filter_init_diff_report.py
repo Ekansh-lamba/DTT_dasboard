@@ -18,10 +18,13 @@ Two facts make an exact answer possible without reprocessing:
    so the divergence for any study is a single multiplication, and the settling
    window is a property of the filter, identical for every study at a given fs.
 
-2. A literal re-run is in any case impossible for this channel. `raw_data.csv`
-   stores only the mandatory FORCE channels (`_force_frame` in dtt/pipeline.py
-   keeps `run_channels.mandatory_channels`), so no archived study retains the
-   raw `Latacc` that FiltLP consumed. Re-deriving it from the processed column
+2. A literal re-run is impossible for every study archived before the raw
+   snapshot was widened. `raw_data.csv` used to store the mandatory FORCE
+   channels only (`_force_frame` in dtt/pipeline.py kept
+   `run_channels.mandatory_channels`); it now stores every channel the recipe
+   conditions (`_raw_reference_frame`, keyed off
+   `dtt.preprocessing.conditions_channel`), `Latacc` included. Studies ingested
+   before that change still retain no raw `Latacc`. Re-deriving it from the processed column
    would mean inverting a low-pass, which amplifies quantisation noise without
    bound. The analytic route is the only exact one available.
 

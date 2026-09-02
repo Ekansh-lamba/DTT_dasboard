@@ -38,14 +38,47 @@ def _setup_logging(config: RunConfig) -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError, OSError):
             pass                                   # None or already-closed stream
-    logging.basicConfig(
-        level=logging.INFO,
-        format=fmt,
-        handlers=[
-            logging.FileHandler(log_path, encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
+    # `logging.basicConfig` is a silent no-op the moment the root logger already
+    # has a handler -- which is true whenever the pipeline is called in-process
+    # by a host that configured logging first (a notebook, a test harness, an
+    # embedding GUI). The run then wrote no pipeline.log at all.
+    #
+    # An empty log is not a cosmetic loss. `PreprocessPage._study_is_conditioned`
+    # read that file to decide whether the FAMOS recipe had run, so a fully
+    # conditioned study was reported as unconditioned and the screen offered to
+    # smooth it a second time. Attach the handlers explicitly instead.
+    #
+    # Only handlers this function owns are replaced, so a host's own logging
+    # survives; and the console handler is skipped when the host already has
+    # one, rather than double-printing every line.
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    formatter = logging.Formatter(fmt)
+
+    host_console = any(
+        isinstance(h, logging.StreamHandler)
+        and not isinstance(h, logging.FileHandler)
+        and not getattr(h, "_dtt_owned", False)
+        for h in root.handlers)
+
+    for h in list(root.handlers):
+        if getattr(h, "_dtt_owned", False):
+            root.removeHandler(h)
+            try:
+                h.close()
+            except (OSError, ValueError):
+                pass
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    file_handler._dtt_owned = True
+    root.addHandler(file_handler)
+
+    if not host_console:
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(formatter)
+        stream_handler._dtt_owned = True
+        root.addHandler(stream_handler)
 
 
 
@@ -62,12 +95,27 @@ def _find_speed_column(df):
     return None
 
 
-def _force_frame(df, config):
-    """Time plus the force channels only — all the before/after view can plot."""
-    rc = getattr(config, "run_channels", None)
-    if rc is None:
-        return None
-    cols = [c for c in rc.mandatory_channels if c in df.columns]
+def _raw_reference_frame(df, config):
+    """Time plus every channel the FAMOS recipe conditions — the before/after set.
+
+    Keyed off :func:`dtt.preprocessing.conditions_channel`, the same question the
+    imc reader asks when it snapshots raw, so the two ingestion paths store the
+    same channel set. It used to be ``rc.mandatory_channels``, which is the
+    Fx/Fy/Fz forces only: the moments and the smoothed aux channels reached
+    ``processed_data.csv`` correctly but had no raw twin, so the Preprocess
+    screen drew them as one unlabelled line.
+
+    Falls back to the mandatory force list only if nothing matches, so a study
+    with unrecognised channel names still stores whatever it can.
+    """
+    from dtt.preprocessing import conditions_channel
+
+    cols = [c for c in df.columns if c != TIME_COLUMN and conditions_channel(c)]
+    if not cols:
+        rc = getattr(config, "run_channels", None)
+        if rc is None:
+            return None
+        cols = [c for c in rc.mandatory_channels if c in df.columns]
     if not cols:
         return None
     keep = ([TIME_COLUMN] if TIME_COLUMN in df.columns else []) + cols
@@ -75,7 +123,7 @@ def _force_frame(df, config):
 
 
 def _write_raw_csv(raw_frame, config, metadata, scale_meta) -> None:
-    """Save the unconditioned force channels as the study's `raw_data.csv`."""
+    """Save the unconditioned reference channels as the study's `raw_data.csv`."""
     import pandas as _pd
 
     divisor = 1.0
@@ -84,15 +132,35 @@ def _write_raw_csv(raw_frame, config, metadata, scale_meta) -> None:
     divisor *= float(scale_meta.get("force_scale_divisor", 1.0) or 1.0)
 
     out = raw_frame.copy()
+    scaled = []
     if divisor != 1.0:
+        # Force channels only. Both upstream corrections -- `_apply_n_to_dan`
+        # and `normalise_force_units` -- divide Fx/Fy/Fz and nothing else, by
+        # design: moments carry their own imc `CR` factor and their own unit
+        # (Nm), and Latacc/Longacc/Vehicle_Speed are not forces at all.
+        #
+        # Dividing every column was harmless while this frame held the forces
+        # alone. It stopped being harmless the moment the frame widened to every
+        # conditioned channel: a moment would have been written 10-100x low and
+        # then drawn against its correctly-scaled processed trace, which is a
+        # far more convincing lie than the missing channel it replaced.
+        from dtt.channels import parse_channel, FORCE_COMPONENTS
+
         for c in out.columns:
-            if c != TIME_COLUMN:
+            if c == TIME_COLUMN:
+                continue
+            parsed = parse_channel(str(c))
+            if parsed is not None and parsed[1] in FORCE_COMPONENTS:
                 out[c] = _pd.to_numeric(out[c], errors="coerce") / divisor
+                scaled.append(c)
 
     path = config.run_output_dir / "raw_data.csv"
     out.to_csv(path, index=False, float_format=CSV_FLOAT_FORMAT)
-    logger.info("Raw (unconditioned) data saved: %s  (%d rows, %d channels, "
-                "scaled by 1/%g)", path, len(out), len(out.columns) - 1, divisor)
+    logger.info("Raw (unconditioned) reference saved: %s  (%d rows, %d channels; "
+                "1/%g applied to %d force channels, others unscaled)",
+                path, len(out), len(out.columns) - 1, divisor, len(scaled))
+    logger.info("    before/after pair available for: %s",
+                ", ".join(c for c in out.columns if c != TIME_COLUMN) or "(none)")
 
 
 def _write_famos_validation_csv(df, config) -> None:
@@ -359,6 +427,12 @@ def run(
             treated = count_conditioned(recipe)
             logger.info("FAMOS recipe applied at ingestion (red x%s): %d/%d channels conditioned",
                         metadata.get("famos_decimate", 1), treated, len(recipe))
+            # Per-channel, not just a count. A reviewer checking that the
+            # moments really were smoothed should not have to infer it from
+            # "15/38" -- and a channel that silently fell through to
+            # passthrough is only visible if every channel is named.
+            for _ch, _ops in recipe.items():
+                logger.info("    %-22s %s", _ch, _ops)
             if not treated:
                 logger.warning("No channel matched the FAMOS recipe — the data is "
                                "unconditioned and red() will have aliased it")
@@ -395,7 +469,7 @@ def run(
         if raw_frame is None and not config.famos_applied:
             # A CSV study is still unconditioned here — stage 4 is what conditions
             # it — so its "before" is simply the frame on the way in.
-            raw_frame = _force_frame(df, config)
+            raw_frame = _raw_reference_frame(df, config)
         df = apply_filter(df, config)
 
         # The raw copy is only useful if it is on the same scale as the conditioned

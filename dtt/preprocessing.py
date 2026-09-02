@@ -32,6 +32,7 @@ pre-smoothing twin ``Latacc_LPF`` — an exact, sample-wise ground truth:
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -42,6 +43,8 @@ from scipy.ndimage import median_filter, convolve1d, uniform_filter1d
 from scipy.signal import butter, filtfilt, lfilter, decimate, sosfilt, sosfilt_zi
 
 from dtt.channels import COMPONENTS, parse_channel
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- FAMOS recipe
 
@@ -126,6 +129,25 @@ def famos_recipe(channel: str, decimate_factor: int = 1) -> PreprocessSettings:
     elif key in _ACCEL_SMO_CHANNELS:
         s.smooth_width_s = FAMOS_AUX_SMOOTH_S
     return s
+
+
+def conditions_channel(name: str) -> bool:
+    """True when the FAMOS recipe actually *changes* ``name``.
+
+    The question "does this channel have a meaningful before/after?" has one
+    answer -- the recipe's own -- and every caller that keeps a raw reference
+    copy has to ask it the same way. Keeping raw for the Fx/Fy/Fz forces alone
+    (which is what ``FORCE_COMPONENTS`` filtering did) silently left the
+    moments, ``Latacc``, ``Longacc`` and ``Vehicle_Speed`` with no "before" at
+    all, even though ``smo``/``FiltLP`` run on every one of them: the Preprocess
+    screen then had nothing to compare against and drew the conditioned trace
+    alone, which reads exactly like unprocessed raw.
+
+    A passthrough channel (GPS, yaw, angles) correctly returns False -- the
+    recipe genuinely does nothing to it, so there is no pair to draw.
+    """
+    r = famos_recipe(name)
+    return r.smooth_width_s > 0 or r.apply_filter
 
 
 # ------------------------------------------------------------------ FAMOS smo
@@ -902,6 +924,168 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
             ordered.append(f"{col}_LPF")
     result = result[[c for c in ordered if c in result.columns]]
     return result, new_fs, applied
+
+
+# ------------------------------------------------------- observable stages
+
+# The names the Preprocess screen and the logs both use. Fixed strings, because
+# an operator checking this against FAMOS has to be able to say which stage a
+# trace is -- "sanitized" was ambiguous exactly where it mattered: it did not
+# distinguish "the recipe ran" from "nothing ran and this is the input".
+STAGE_RAW = "Raw Data"
+STAGE_DESPIKE = "Despiked Output"
+STAGE_FILTLP = "Filtered Output (FiltLP)"
+STAGE_SMO = "SMO Output"
+STAGE_FINAL = "Final FAMOS-Equivalent Preprocessed Output"
+
+
+@dataclass
+class PreprocessStage:
+    """One observable step of the FAMOS recipe, with its own time base."""
+    name: str
+    detail: str
+    t: np.ndarray
+    y: np.ndarray
+    fs: float
+
+    @property
+    def n_samples(self) -> int:
+        return int(np.asarray(self.y).size)
+
+    @property
+    def n_nan(self) -> int:
+        return int(np.isnan(np.asarray(self.y, dtype=float)).sum())
+
+    def describe(self) -> str:
+        y = np.asarray(self.y, dtype=float)
+        finite = y[np.isfinite(y)]
+        rng = f"{finite.min():.4g}..{finite.max():.4g}" if finite.size else "empty"
+        std = finite.std() if finite.size else float("nan")
+        return (f"{self.name:<48s} n={self.n_samples:<9d} fs={self.fs:<8.4g} "
+                f"NaN={self.n_nan:<7d} std={std:<12.6g} range=[{rng}]")
+
+
+def famos_stages(x: np.ndarray, fs: float, channel: str,
+                 decimate_factor: int = 1,
+                 t: Optional[np.ndarray] = None,
+                 despike_enabled: bool = False,
+                 deglitch: bool = False,
+                 deglitch_nsigma: float = 6.0,
+                 blank_dead_s: float = 1.0,
+                 despike_rail_min_run: int = 3,
+                 despike_dropout_max_run: int = 5,
+                 despike_hw_cutoff_hz: float = 200.0,
+                 despike_net: bool = False,
+                 despike_net_nsigma: float = 6.0,
+                 despike_net_window_s: float = 0.011,
+                 ) -> List["PreprocessStage"]:
+    """Every intermediate of the FAMOS recipe for one channel, in order.
+
+    This is :func:`apply_famos_recipe`'s per-column body with the intermediates
+    kept instead of overwritten, and it calls the *same* operators in the *same*
+    order -- ``blank_dead_runs`` -> ``despike`` -> de-glitch -> ``FiltLP`` ->
+    ``smo`` -> ``red``. It deliberately re-derives nothing: a second
+    implementation of the recipe would be free to disagree with the one that
+    writes ``processed_data.csv``, and a debugging view that disagrees with the
+    data is worse than no view at all. ``tests/test_famos_stages.py`` pins the
+    final stage to ``apply_famos_recipe``'s output sample-for-sample.
+
+    Returns at least two stages (raw, final). A passthrough channel returns those
+    two with nothing between them, and its final stage carries ``red()`` only --
+    the honest answer for a channel the recipe does not condition.
+    """
+    y = np.asarray(x, dtype=float)
+    fs = float(fs)
+    tt = (np.asarray(t, dtype=float)
+          if t is not None and np.size(t) == y.size
+          else np.arange(y.size) / fs)
+    t0 = float(tt[0]) if tt.size else 0.0
+    s = famos_recipe(channel, decimate_factor=1)
+
+    stages: List[PreprocessStage] = [
+        PreprocessStage(STAGE_RAW, "unconditioned input", tt, y, fs)]
+
+    if blank_dead_s > 0 and is_wft_channel(channel):
+        blanked = blank_dead_runs(y, fs, blank_dead_s)
+        n_dead = int(np.isfinite(y).sum() - np.isfinite(blanked).sum())
+        if n_dead and np.isfinite(blanked).any():
+            y = blanked
+            stages.append(PreprocessStage(
+                STAGE_DESPIKE, f"blank dropout({n_dead / fs:.1f}s)", tt, y, fs))
+
+    if despike_enabled:
+        y, pct = despike(y, fs, rail_min_run=despike_rail_min_run,
+                         dropout_max_run=despike_dropout_max_run,
+                         hw_cutoff_hz=despike_hw_cutoff_hz,
+                         net=despike_net, net_nsigma=despike_net_nsigma,
+                         net_window_s=despike_net_window_s)
+        stages.append(PreprocessStage(
+            STAGE_DESPIKE, f"despike({pct:.3g}%)", tt, y, fs))
+
+    if deglitch:
+        y = hampel_deglitch(y, fs, n_sigmas=deglitch_nsigma)
+        stages.append(PreprocessStage(STAGE_DESPIKE, "de-glitch", tt, y, fs))
+
+    if s.apply_filter:
+        y = butterworth_lpf(y, s.filter_cutoff, s.filter_order, fs,
+                            init=s.filter_init)
+        stages.append(PreprocessStage(
+            STAGE_FILTLP, f"FiltLP({s.filter_order},{s.filter_cutoff:g}Hz)",
+            tt, y, fs))
+
+    if s.smooth_width_s > 0:
+        y = famos_smooth(y, fs, s.smooth_width_s)
+        stages.append(PreprocessStage(
+            STAGE_SMO, f"smo({s.smooth_width_s:g}s)", tt, y, fs))
+
+    new_fs = fs
+    detail = " -> ".join(st.detail for st in stages[1:]) or "passthrough"
+    if decimate_factor > 1:
+        y = famos_red(y, decimate_factor)
+        new_fs = fs / decimate_factor
+        tt = np.arange(y.size) / new_fs + t0
+        detail = f"{detail} -> red({decimate_factor})"
+    stages.append(PreprocessStage(STAGE_FINAL, detail, tt, y, new_fs))
+    return stages
+
+
+def log_preprocess_trace(channel: str, stages: List["PreprocessStage"],
+                         source: str = "", level: int = logging.INFO) -> str:
+    """Emit (and return) the per-channel ``[PREPROCESS]`` block.
+
+    Nothing here is swallowed: an empty or all-NaN final stage is named as such
+    rather than reaching the screen as a blank plot with no explanation.
+    """
+    first, final = stages[0], stages[-1]
+    names = {st.name for st in stages}
+    if final.n_samples == 0:
+        verdict = "EMPTY"
+    elif final.n_nan == final.n_samples:
+        verdict = "ERROR (all-NaN)"
+    else:
+        verdict = "VALID"
+    s = famos_recipe(channel)
+    smo_note = (f"  (smo({s.smooth_width_s:g}s))" if s.smooth_width_s > 0
+                else "  (recipe applies none)")
+    lpf_note = "" if s.apply_filter else "  (recipe applies none)"
+    kind = "WFT force/moment" if is_wft_channel(channel) else "auxiliary/passthrough"
+    lines = [
+        "[PREPROCESS]",
+        f"  File/source : {source or '-'}",
+        f"  Channel     : {channel}",
+        f"  Samples in  : {first.n_samples}",
+        f"  Sampling    : {first.fs:g} Hz",
+        f"  Channel type: {kind}",
+        f"  SMO applied : {'YES' if STAGE_SMO in names else 'NO'}{smo_note}",
+        f"  FiltLP      : {'YES' if STAGE_FILTLP in names else 'NO'}{lpf_note}",
+        f"  Despike     : {'YES' if STAGE_DESPIKE in names else 'NO'}",
+        f"  Samples out : {final.n_samples}  @ {final.fs:g} Hz",
+        f"  Final output: {verdict}",
+    ]
+    lines += ["    " + st.describe() for st in stages]
+    text = "\n".join(lines)
+    logger.log(level, text)
+    return text
 
 
 def count_conditioned(applied: Dict[str, str]) -> int:

@@ -481,19 +481,24 @@ def _assemble(channels, target_fs, source, famos: bool = True,
     raw_frame = None
     step = max(1, int(round(fs / target_fs))) if (target_fs and fs > target_fs) else 1
     if famos:
-        # Keep an unconditioned copy of the force channels before smo/FiltLP run.
-        # Conditioning at the native rate is correct but it is also destructive,
-        # and nothing downstream can reconstruct what was removed — so a study
-        # ingested this way has no "before" at all unless it is captured here.
-        # Decimated with red() alone so it shares the output time base; that is
-        # the genuine raw signal at 100 Hz, aliasing and spikes included.
-        from dtt.preprocessing import apply_famos_recipe, is_wft_channel
-        from dtt.channels import parse_channel, FORCE_COMPONENTS
-        force_cols = [c for c in df.columns
-                      if is_wft_channel(c)
-                      and (parse_channel(c) or (None, None))[1] in FORCE_COMPONENTS]
-        if force_cols:
-            raw_frame = df[force_cols].iloc[::step].reset_index(drop=True)
+        # Keep an unconditioned copy of every channel the recipe conditions,
+        # before smo/FiltLP run. Conditioning at the native rate is correct but
+        # it is also destructive, and nothing downstream can reconstruct what
+        # was removed — so a study ingested this way has no "before" at all
+        # unless it is captured here. Decimated with red() alone so it shares
+        # the output time base; that is the genuine raw signal at 100 Hz,
+        # aliasing and spikes included.
+        #
+        # This used to keep the Fx/Fy/Fz forces only. `smo(0.1)` runs on the
+        # moments too (FR_Mx_2, RR_Mz_1, …), and `smo(0.5)`/`FiltLP` on Latacc,
+        # Longacc and Vehicle_Speed — none of which had a raw counterpart, so
+        # the Preprocess screen could not draw a before/after for them and fell
+        # back to a single trace that is indistinguishable from raw. Ask the
+        # recipe which channels it changes and keep raw for exactly those.
+        from dtt.preprocessing import apply_famos_recipe, conditions_channel
+        raw_cols = [c for c in df.columns if conditions_channel(c)]
+        if raw_cols:
+            raw_frame = df[raw_cols].iloc[::step].reset_index(drop=True)
             raw_frame.insert(0, "Time", np.arange(len(raw_frame)) / (fs / step))
 
         # FAMOS order: smo/FiltLP at the native rate, *then* red(). Decimating
@@ -513,7 +518,15 @@ def _assemble(channels, target_fs, source, famos: bool = True,
             transient_window_s=transient_despike_window_s,
             transient_noise_floor_mult=transient_despike_noise_floor_mult,
             transient_max_spike_frac=transient_despike_max_spike_frac,
-            emit_lpf_columns=False)
+            # Store the pre-smoothing FiltLP intermediate (Latacc_LPF). It is
+            # one extra column on one channel, and it is the only stage of the
+            # recipe that is *not* recoverable after the fact: red(smo(x)) is
+            # the final output, so the smo stage costs nothing to store, but
+            # FiltLP's output is consumed by smo and then gone. Keeping it is
+            # what lets the Preprocess screen show a bit-exact intermediate
+            # instead of recomputing an approximation at the decimated rate.
+            # A genuine FAMOS CSV export carries this column too.
+            emit_lpf_columns=True)
     elif step > 1:
         df = df.iloc[::step].reset_index(drop=True)
         fs_out = fs / step

@@ -21,8 +21,10 @@ from gui.pages.base_page import BasePage
 from gui.widgets.common import SectionTitle, Card
 from gui.widgets.mpl_canvas import PlotPanel
 from dtt.preprocessing import (
-    PreprocessSettings, apply_pipeline, summary_stats, famos_recipe,
-    is_wft_channel, blank_dead_runs,
+    PreprocessSettings, PreprocessStage, apply_pipeline, summary_stats,
+    famos_recipe, is_wft_channel, blank_dead_runs, conditions_channel,
+    famos_stages, log_preprocess_trace,
+    STAGE_RAW, STAGE_SMO, STAGE_FILTLP, STAGE_FINAL,
 )
 
 _MAX_PLOT_POINTS = 1400        # fallback before the canvas has been laid out
@@ -562,6 +564,28 @@ class PreprocessPage(BasePage):
             "converge on the true samples.")
         self.show_raw.toggled.connect(self._schedule)
         foot.addWidget(self.show_raw)
+        self.show_stages = QCheckBox("Show FAMOS stages")
+        self.show_stages.setChecked(False)
+        self.show_stages.setToolTip(
+            "Overlay the recipe's intermediates for this channel.\n\n"
+            "On a study the pipeline already conditioned, every stage drawn "
+            "here is read from the study's own files, so it is bit-exact — "
+            "nothing is recomputed and nothing is approximated. The FiltLP "
+            "stage comes from the stored <channel>_LPF column.\n\n"
+            "There is deliberately no separate SMO curve on such a study: the "
+            "recipe ends smo -> red, so red(smo(x)) IS the red final trace. "
+            "Drawing a smo recomputed at the decimated rate would be a "
+            "different, wrong curve.")
+        self.show_stages.toggled.connect(self._schedule)
+        foot.addWidget(self.show_stages)
+        self.trace_btn = QPushButton("Preprocessing trace…")
+        self.trace_btn.setObjectName("Secondary")
+        self.trace_btn.setToolTip(
+            "Per-channel [PREPROCESS] report: sample counts, rate, detected "
+            "channel type, which operators ran, and whether the final output "
+            "is VALID, EMPTY or all-NaN.")
+        self.trace_btn.clicked.connect(self._show_trace)
+        foot.addWidget(self.trace_btn)
         self.famos_btn = QPushButton("Validate vs FAMOS…")
         self.famos_btn.setObjectName("Secondary")
         self.famos_btn.clicked.connect(self._validate_famos)
@@ -597,6 +621,7 @@ class PreprocessPage(BasePage):
         self._raw_time = None
         self._syncing_channels = False   # list <-> combo, without an echo
         self._cache = {}                 # (study, channel) -> loaded arrays
+        self._lpf_cache = {}             # (study, channel, "_LPF") -> stored stage
         self._workers = set()            # keep QThreads alive while running
         self._pending_channel = None
         self._full_span = 0.0            # length of the loaded recording (s)
@@ -625,17 +650,31 @@ class PreprocessPage(BasePage):
     def _study_is_conditioned(self) -> bool:
         """True if this study's ingestion already ran the FAMOS recipe.
 
-        The pipeline log records it; that is the only place the fact survives,
-        and it decides whether re-applying the recipe here would double-smooth.
+        ``run_provenance.json`` records it as a structured field, and that is
+        the authority: the study writes ``famos_applied`` there deliberately.
+        Grepping the pipeline log was the *only* source before, which made this
+        answer hostage to whether logging happened to be configured -- and a run
+        driven in-process by a host that had already called
+        ``logging.basicConfig`` produced an empty log, so a conditioned study
+        read as unconditioned and the screen offered to smooth it again.
 
-        Both conditioning paths have to be recognised. imc raw ingestion logs
-        "applied at ingestion"; a CSV study is conditioned at stage 4 instead and
-        logs "applied at <rate> Hz". Matching only the first made every CSV study
-        look unconditioned, so the page labelled already-smoothed data "raw" and
-        ran a second smo(0.1) over it.
+        The log stays as the fallback, for studies written before provenance
+        existed. Both conditioning paths have to be recognised there: imc raw
+        ingestion logs "applied at ingestion"; a CSV study is conditioned at
+        stage 4 instead and logs "applied at <rate> Hz". Matching only the first
+        made every CSV study look unconditioned.
         """
+        if not self.study:
+            return False
         try:
-            if not (self.study and self.study.has_log):
+            from dtt.provenance import load_provenance
+            prov = load_provenance(self.study.path)
+            if prov is not None and "famos_applied" in prov:
+                return bool(prov["famos_applied"])
+        except (OSError, ValueError, ImportError):
+            pass                       # fall through to the log
+        try:
+            if not self.study.has_log:
                 return False
             log = self.study.log_file.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -659,10 +698,20 @@ class PreprocessPage(BasePage):
         """
         proc = self._proc_label(s, ch, have_raw, sanitizing)
         if have_raw:
-            return f"Raw vs sanitized   (blue = raw, red = {proc.split('— ', 1)[-1]})"
-        if self._conditioned:
-            return ("Study data — imc/FAMOS recipe applied at ingestion   "
+            # Name the red trace for what produced it. "Raw vs sanitized" over a
+            # trace that is really the stored FAMOS output undersells it as a
+            # cosmetic clean-up; the two are not the same claim.
+            showing_final = (self._conditioned and not sanitizing
+                             and self._recipe_matches(s, ch))
+            head = ("Raw vs Final FAMOS-Equivalent Preprocessed Output"
+                    if showing_final else "Raw vs sanitized")
+            return f"{head}   (blue = {STAGE_RAW}, red = {proc.split('— ', 1)[-1]})"
+        if self._conditioned and conditions_channel(ch):
+            return (f"{STAGE_FINAL} — imc/FAMOS recipe applied at ingestion   "
                     "(no raw stored for this channel, so no before/after pair)")
+        if self._conditioned:
+            return (f"{STAGE_RAW} — FAMOS passthrough: the recipe conditions "
+                    "nothing on this channel, so there is no before/after")
         return f"Study data — {proc.split('— ', 1)[-1]}"
 
     def _on_famos_auto(self, on: bool) -> None:
@@ -1033,7 +1082,162 @@ class PreprocessPage(BasePage):
         if not steps:
             return ("unchanged — FAMOS passthrough" if op == "passthrough"
                     else "sanitized — no conditioning")
-        return "sanitized — " + " → ".join(steps)
+        # "Sanitized" is the right word for a threshold/outlier/gap pass the
+        # operator dialled in. It is the wrong word for the study's stored
+        # FAMOS output, which is the whole deliverable -- calling that
+        # "sanitized" invites the reading that the real preprocessing is
+        # somewhere else, unshown. Name the two cases apart.
+        showing_final = (self._conditioned and not sanitizing
+                         and self._recipe_matches(s, ch))
+        prefix = STAGE_FINAL if showing_final else "sanitized"
+        return f"{prefix} — " + " → ".join(steps)
+
+    # ---- stage overlay / trace ---------------------------------------------
+
+    _STAGE_STYLE = {
+        STAGE_FILTLP: ("#f4a261", 1.0, "-"),
+        STAGE_SMO:    ("#8ecae6", 1.0, "--"),
+    }
+
+    def _lpf_column(self, ch: str):
+        """The stored ``<ch>_LPF`` intermediate, or ``(None, None)``.
+
+        This is the pipeline's own FiltLP output, written at ingestion and
+        decimated with the rest, so it is the real thing rather than a
+        reconstruction.
+        """
+        if not self.study:
+            return None, None
+        key = (str(self.study.path), ch, "_LPF")
+        if key in self._lpf_cache:
+            return self._lpf_cache[key]
+        got = (None, None)
+        try:
+            if self.study.processed_csv.exists():
+                got = self._read_channel(self.study.processed_csv, f"{ch}_LPF")
+        except (OSError, ValueError):
+            got = (None, None)
+        self._lpf_cache[key] = got
+        return got
+
+    def _exact_stages(self, ch: str, t, raw) -> list:
+        """Stages this screen can show without approximating anything.
+
+        On a conditioned study the intermediates are read from the study's own
+        files. The alternative -- re-running smo/FiltLP on the stored raw --
+        cannot reproduce the pipeline, because the pipeline runs them at the
+        native 1 kHz *before* red() and the stored raw is already decimated;
+        the recomputed curve would be a plausible-looking wrong answer, which
+        is the one thing a validation screen must never draw.
+
+        Only two stages are genuinely missing from the stored files, and only
+        one of them matters:
+
+          * smo -- not missing at all. The recipe ends ``smo -> red``, so
+            ``red(smo(x))`` is exactly the stored final output. There is
+            nothing left to draw, which is why no SMO curve is emitted here.
+          * FiltLP -- consumed by smo and otherwise unrecoverable, which is why
+            ingestion now stores it as ``<channel>_LPF``.
+
+        An unconditioned study is a different case: there the screen *is* the
+        thing doing the conditioning, at the rate the data actually carries, so
+        recomputing is exact for what it claims to show.
+        """
+        if not self._conditioned:
+            try:
+                return famos_stages(raw, self._fs, ch,
+                                    decimate_factor=int(self.resample.value()),
+                                    t=t)
+            except (ValueError, FloatingPointError):
+                return []
+        stages = []
+        lpf_t, lpf_y = self._lpf_column(ch)
+        if lpf_y is not None and lpf_y.size:
+            stages.append(PreprocessStage(
+                STAGE_FILTLP, "stored intermediate, bit-exact",
+                lpf_t if lpf_t is not None else self._time, lpf_y, self._fs))
+        return stages
+
+    def _plot_stages(self, ax, t, raw, ch: str, npts: int) -> None:
+        """Draw the recipe's intermediates under the final trace.
+
+        Only the stages between raw and final: the raw is already the blue
+        envelope and the final is the red centre line, so redrawing either here
+        would just thicken a line that is on screen twice.
+        """
+        drew = set()
+        for st in self._exact_stages(ch, t, raw):
+            style = self._STAGE_STYLE.get(st.name)
+            if style is None:            # raw and final are drawn by _update
+                continue
+            colour, lw, ls = style
+            ts, ys = _median_line(st.t, st.y, npts)
+            ax.plot(ts, ys, color=colour, linewidth=lw, linestyle=ls,
+                    alpha=0.95, zorder=2, label=f"{st.name} — {st.detail}")
+            drew.add(st.name)
+
+        # Say where the smo stage went, rather than leaving its absence to be
+        # read as "smo did not run". A legend-only entry: no line, just the
+        # identity that makes the red trace the smo output.
+        r = famos_recipe(ch)
+        if self._conditioned and r.smooth_width_s > 0 and STAGE_SMO not in drew:
+            ax.plot([], [], color=_PROC_COLOR, linewidth=0,
+                    label=(f"{STAGE_SMO} — red(smo) is the red trace itself, "
+                           f"so it is not drawn twice"))
+        if (self._conditioned and r.apply_filter
+                and STAGE_FILTLP not in drew):
+            ax.plot([], [], color="none", linewidth=0,
+                    label=("FiltLP intermediate not stored for this study — "
+                           "re-run ingestion to record it"))
+
+    def _show_trace(self) -> None:
+        """The [PREPROCESS] block for the loaded channel, in a dialog.
+
+        Deliberately reports rather than repairs: a channel that arrives empty
+        or all-NaN says so here instead of reaching the plot as a blank axes
+        with no explanation.
+        """
+        ch = self.channel_combo.currentText()
+        if not ch or self._data.size == 0:
+            QMessageBox.information(self, "Preprocessing trace",
+                                    "Load a channel first.")
+            return
+        have_raw = self._raw is not None and self._raw.size > 0
+        base = self._raw if have_raw else self._data
+        try:
+            if self._conditioned:
+                # Report the stored article, not a re-derivation of it.
+                stages = []
+                if have_raw:
+                    stages.append(PreprocessStage(
+                        STAGE_RAW, "stored raw_data.csv (red only)",
+                        self._raw_time, self._raw, self._fs))
+                stages += self._exact_stages(ch, self._raw_time, self._raw)
+                stages.append(PreprocessStage(
+                    STAGE_FINAL, "stored processed_data.csv",
+                    self._time, self._data, self._fs))
+            else:
+                stages = famos_stages(base, self._fs, ch,
+                                      decimate_factor=int(self.resample.value()))
+            text = log_preprocess_trace(
+                ch, stages, source=str(getattr(self.study, "path", "")))
+        except Exception as exc:                      # noqa: BLE001 - reported
+            text = (f"Preprocessing failed for {ch}: "
+                    f"{type(exc).__name__}: {exc}")
+        if self._conditioned:
+            text += ("\n\n  Every stage above is read from this study's own "
+                     "files, so the numbers are the stored article. The recipe "
+                     "ends smo -> red, so red(smo(x)) is the final row itself.")
+        if not have_raw:
+            text += ("\n\n  NOTE: no unconditioned copy of this channel is "
+                     "stored for this study, so there is no raw row above. "
+                     "Re-run ingestion to store a raw reference.")
+        box = QMessageBox(self)
+        box.setWindowTitle(f"Preprocessing trace — {ch}")
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"<pre style='font-family:Consolas,monospace'>{text}</pre>")
+        box.setTextFormat(Qt.RichText)
+        box.exec()
 
     def _update(self, *_) -> None:
         if self._data.size == 0:
@@ -1101,9 +1305,25 @@ class PreprocessPage(BasePage):
             # Without a stored raw, "before" and "after" are the same array.
             # Drawing it twice in two colours is not an empty comparison, it is
             # a misleading one. One trace, named for what it is.
-            _a, _lw, _ = _density_style(proc.size, npts)
+            #
+            # "What it is" is the part that used to be wrong. A channel the
+            # recipe had already conditioned was drawn in the *raw* colour under
+            # the word "study data", so a fully-smoothed moment was pixel-for-
+            # pixel indistinguishable from an unprocessed one -- which is
+            # exactly how a reviewer concludes that preprocessing never ran.
+            # Colour and name it from the recipe instead.
+            conditioned_here = self._conditioned and conditions_channel(ch)
+            _a, _lw, _plw = _density_style(proc.size, npts)
             tp, yp = _envelope_line(t_proc, proc, npts)
-            ax.plot(tp, yp, color=_RAW_COLOR, linewidth=_lw, alpha=_a, label=src)
+            if conditioned_here:
+                ax.plot(tp, yp, color=_PROC_COLOR, linewidth=max(_plw, _lw),
+                        solid_joinstyle="round", solid_capstyle="round",
+                        label=f"{STAGE_FINAL} — FAMOS {_famos_op(ch)}")
+            else:
+                ax.plot(tp, yp, color=_RAW_COLOR, linewidth=_lw, alpha=_a,
+                        label=(f"{STAGE_RAW} — FAMOS passthrough "
+                               f"(the recipe conditions nothing on this channel)"
+                               if self._conditioned else src))
         else:
             raw_alpha, raw_lw, proc_lw = _density_style(
                 raw.size if raw is not None else proc.size, npts)
@@ -1113,6 +1333,8 @@ class PreprocessPage(BasePage):
                 # each stroke is standing in for.
                 ax.plot(tr, yr, color=_RAW_COLOR, linewidth=raw_lw,
                         alpha=raw_alpha, zorder=1, label=src)
+            if self.show_stages.isChecked() and raw is not None and raw.size:
+                self._plot_stages(ax, t, raw, ch, npts)
             tp, yp = _median_line(t_proc, proc, npts)
             # Red on top, opaque and a touch heavier: it is one thin line now,
             # not a second band, so it no longer needs transparency to keep the
