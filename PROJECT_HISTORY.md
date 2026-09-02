@@ -53,7 +53,9 @@ implementations turned out to be measurably wrong against the real thing.
 - `golden_corpus/` — synthetic and real-recording test sequences captured
   from a licensed FAMOS trial, used to score the Python operators against
   ground truth without needing a permanent licence.
-- `tests/` — unit tests for the `famos/` library.
+- `tests/` — unit tests for the `famos/` library, the moment-channel
+  preprocessing path, session-join time mapping, logging/provenance, and the
+  golden-corpus scores against licensed-FAMOS output (§9.6).
 - `data/` — real (gitignored) FAMOS ground-truth exports used to validate
   changes locally; never committed.
 
@@ -72,7 +74,9 @@ implementations turned out to be measurably wrong against the real thing.
 | 2026-08-29 | leak/credential audit before push (§7) | Claude |
 | 2026-08-29 | "spiky preprocess graph" investigation — real data, not a bug (§8) | Claude |
 | 2026-08-29 | validation guide + Module 1 status docs | nik123-py + Claude Opus 5 |
-| 2026-08-30 | this document, plus detailed method appendices §11–13 (imc3 format, smo kernel search, despike basis) | Claude |
+| 2026-08-30 | this document, plus detailed method appendices §12–14 (imc3 format, smo kernel search, despike basis) | Claude |
+| 2026-09-01 | packaged Windows `.exe` rebuilt and shipped (onefile) | Claude + user |
+| 2026-09-02 | **Round 3**: moment (`f*_m*`) channels had no stored raw reference — preprocessing was invisible, not absent; golden-corpus scoring automated (§9) | Claude + user |
 
 ---
 
@@ -91,7 +95,7 @@ cutdata    = red(cutd, 10)                 # decimate x10
 
 - **`smo`** — triangular (Bartlett) kernel, exact half-width
   `a = (round(width_s·fs) - 1) / 2`, zero-phase. *Not* a moving average and
-  *not* a boxcar-of-boxcars (§4.2; full candidate search in §12).
+  *not* a boxcar-of-boxcars (§4.2; full candidate search in §13).
 - **`FiltLP`** — causal, single-pass Butterworth. *Not* zero-phase (§4.1).
 - **`red`** — plain stride decimation, keep every Nth sample from index 0,
   no anti-alias filtering of its own (confirmed twice: Round 1 build-out,
@@ -146,7 +150,7 @@ Result: max abs error 5.6e-3 N on force channels (the CSV export's own
 rounding floor), r = 1.000000000.
 
 The full list of kernel candidates tried and rejected before landing on the
-exact half-width of 49.5 is in §12; the value is not one most people would
+exact half-width of 49.5 is in §13; the value is not one most people would
 guess, and the search is instructive.
 
 ### 4.3 `smo` edge handling: nearest-pad → window-shrink
@@ -211,7 +215,7 @@ dropout runs (repeated floats that can't occur from real analog noise) and
 saturation correctly caught, all real load swings on either side untouched.
 
 The measurement that ruled out a statistical amplitude threshold and forced
-the structural-rules approach is in §13.
+the structural-rules approach is in §14.
 
 ### 4.6 Checks
 
@@ -233,7 +237,7 @@ the structural-rules approach is in §13.
   explicitly out of scope for that round, flagged for whoever owns
   `imc_reader.py` — but it means **every channel read via `read_raw` is
   silently misaligned by 58ms** unless corrected. Not yet addressed as of
-  this document (§9).
+  this document (§10).
 
 ### 4.7 Result
 
@@ -450,7 +454,7 @@ already on `origin/nikhilesh` from an earlier, separate push:
 Both were flagged to the user with the specific finding and left in place
 at the user's explicit direction (git history would retain them either
 way; removing them now only stops *future* exposure). **Not yet
-addressed** — see §9.
+addressed** — see §10.
 
 ---
 
@@ -482,7 +486,205 @@ screen, which always displays the true, complete measured data.
 
 ---
 
-## 9. Open items / known gaps
+## 9. Round 3 — the missing raw reference for moment channels (2026-09-02)
+
+An industry mentor reviewed the platform and reported three things: filtering
+was "not being done/displayed properly", files referred to as `f*_m*` showed
+"no preprocessed data", and the system "did not behave like FAMOS" when the
+preprocessing was checked.
+
+The brief that came with it assumed the filtering mathematics was suspect. It
+was not. This round is a good example of why the instruction to *trace the data
+flow before touching a validated operator* is worth following literally.
+
+### 9.1 What `f*_m*` actually meant
+
+Nothing in the codebase used that string. Resolved by listing the dataset:
+`f*_m*` matches `FR_Mx_2.raw`, `FR_My_2.raw`, `FR_Mz_2.raw` in
+`raw data in .dat format/2006-08-25 09-10-46 (1)/` — **WFT moment channels**,
+named `<position>_<component>_<WFT serial>`. On the other dataset the same
+channels are `FL_Mx` … `RR_Mz`.
+
+Checked first, before assuming a mapping bug: `parse_channel("FR_Mx_2")`
+returns `(A1R, Mx)` and `is_wft_channel` is `True`. Channel mapping was fine.
+So was the recipe — `famos_recipe` gives moments `smo(0.1)`, identical to
+forces — and so was the output: `FR_Mx_2` sits in `processed_data.csv` with
+554,785 samples and no NaNs, measurably smoothed.
+
+**The preprocessing had always run on moments. It was invisible, not absent.**
+
+### 9.2 Root cause — the raw snapshot was force-only
+
+Two places captured the unconditioned "before" copy, and both filtered it to
+forces:
+
+- `imc_reader.py` kept `is_wft_channel(c) and parse_channel(c)[1] in
+  FORCE_COMPONENTS` — i.e. `Fx/Fy/Fz` only.
+- `pipeline.py::_force_frame` kept `rc.mandatory_channels`, which
+  `run_channels.py` builds under the same `if comp in FORCE_COMPONENTS` filter.
+
+Measured on a real run: **31 of 37 channels had no raw counterpart**, moments
+among them. `raw_data.csv` held 6 columns where `processed_data.csv` held 37.
+
+The Preprocess screen reads the two files as a pair. With no raw column,
+`_read_channel` returns `(None, None)`, `have_raw` goes false, and `_update`
+falls into a branch that draws a single trace in `_RAW_COLOR` — **the raw
+colour** — labelled "study data". A fully smoothed moment was therefore
+rendered identically to an unprocessed one, while forces beside it showed a
+proper blue/red pair. That is precisely the report: forces look preprocessed,
+`f*_m*` does not.
+
+**Fix:** ask the recipe itself. `preprocessing.conditions_channel(name)` returns
+true when `famos_recipe` actually changes a channel (`smo` and/or `FiltLP`), and
+both capture sites now key off it. Moments, `Latacc`, `Longacc` and
+`Vehicle_Speed` all gain a before/after pair; genuine passthrough channels
+(GPS, yaw, angles) correctly do not, because there is nothing to compare.
+`raw_data.csv` went from 6 to 15 channels on the 2-wheel set, 12 to 26 on the
+4-wheel set.
+
+### 9.3 The bug the fix introduced, caught in validation
+
+Widening that frame broke an assumption somewhere else — the kind of failure
+that only shows up if validation checks *magnitudes* and not merely presence.
+
+`_write_raw_csv` divided **every** column by the force scale divisor (the
+N→daN conversion times any decade correction). That was correct only while the
+frame contained forces alone. The first post-fix run gave, for `FR_Mx_2`:
+
+```
+raw  std =   8.24        proc std = 812.04        ← a factor of 100
+```
+
+Both upstream corrections (`_apply_n_to_dan`, `normalise_force_units`) touch
+`Fx/Fy/Fz` and nothing else, by design — the loader's own docstring says so:
+moments carry their own imc `CR` factor and their own unit (Nm). The divisor is
+now applied to force channels only.
+
+Left unnoticed this would have been **worse than the bug it replaced**: a
+moment drawn 100x low against its correctly scaled processed trace is a
+plausible-looking wrong answer, where a missing channel at least announces
+itself. Pinned by `test_raw_csv_scales_forces_only`.
+
+### 9.4 Making the conditioning observable
+
+The mentor's underlying complaint was that preprocessing could not be *seen*,
+so three things were added on top of the root-cause fix:
+
+- **`famos_stages()`** returns every intermediate of the recipe for one channel
+  (raw → despike → FiltLP → smo → red) as labelled `PreprocessStage` records.
+  It calls the same operators in the same order as `apply_famos_recipe` rather
+  than reimplementing them, and a test pins its final stage to that function's
+  output at `atol=0` — a debugging view free to disagree with the data is worse
+  than no view.
+- **`log_preprocess_trace()`** emits a per-channel `[PREPROCESS]` block (sample
+  counts, rate, detected type, which operators ran, `VALID`/`EMPTY`/all-NaN
+  verdict), surfaced in the GUI behind a "Preprocessing trace…" button. The
+  pipeline log now also names every channel and its operations instead of only
+  a "15/38 conditioned" count.
+- **Naming.** The conditioned trace is labelled *"Final FAMOS-Equivalent
+  Preprocessed Output"*, not "sanitized" — the old word invited the reading that
+  the real preprocessing lived somewhere else, unshown. A passthrough channel
+  now says it is passthrough rather than looking unprocessed.
+
+**Stage exactness.** The first cut of the stage overlay recomputed `smo`/`FiltLP`
+from the stored raw, which is decimated — so it could not reproduce a pipeline
+that runs them at 1 kHz *before* `red()`. That was replaced rather than
+documented: on a conditioned study every stage drawn is now read from the
+study's own files. Ingestion stores the FiltLP intermediate (`Latacc_LPF`,
+one extra column, and a column a genuine FAMOS CSV export carries anyway), and
+no separate smo curve is drawn at all — the recipe ends `smo → red`, so
+`red(smo(x))` **is** the stored final output. The legend says that instead of
+drawing a second, wrong curve.
+
+### 9.5 An empty log made a conditioned study look unconditioned
+
+`_setup_logging` used `logging.basicConfig`, which is a silent no-op once the
+root logger has any handler. Called in-process by a host that had already
+configured logging, the run wrote an **empty** `pipeline.log` — and
+`PreprocessPage._study_is_conditioned` read that file to decide whether the
+recipe had run, so the screen reported a fully conditioned study as
+unconditioned and offered to smooth it a second time.
+
+Two fixes: `_setup_logging` now attaches (and replaces) its own handlers,
+leaving a host's alone and not double-printing to a console it already owns;
+and `_study_is_conditioned` reads `famos_applied` from `run_provenance.json`
+first, so the answer no longer depends on logging being wired up at all. The
+log remains the fallback for studies written before provenance existed.
+
+### 9.6 Turning the expired FAMOS trial into a standing test
+
+`MODULE1_STATUS.md` recorded the licensed-FAMOS validation as done, but nothing
+re-checked it — "our `smo` matches FAMOS" had degraded from a measurement into
+a memory of one, and an edit to the kernel would have been caught by nothing.
+
+The capture is still on disk, so it is now a test.
+`golden_corpus/famos_out/FR_Fx_2.csv` carries, for six real force channels,
+the raw signal beside FAMOS's own `_smo`, `_red` and `_rawred` results.
+Scored over 200k samples:
+
+| comparison | result |
+|---|---|
+| `smo(0.1)` vs FAMOS `_smo` | max err < 1 N on ~50,000 N signals, r > 0.99999999 |
+| `smo → red(10)` vs FAMOS `_red` | same |
+| `red(10)` alone vs FAMOS `_rawred` | **bit-exact, max err = 0** |
+
+The last row has no rounding excuse available — both sides are copies of stored
+samples — so it proves the decimation phase (start at index 0, stride 10) is
+identical to FAMOS's. The tests skip cleanly when the 2 GB gitignored CSV is
+absent, because a skip is honest and a pass on missing evidence is not.
+
+The corpus covers *forces*; moments are not separately captured and do not need
+to be, because `test_moment_and_force_are_conditioned_the_same_way` pins them to
+byte-identical treatment. This narrows, but does not close, the §10 gap.
+
+**Why the CSV and not the binary.** `golden_corpus/famos_out/*.dat` — and the
+`Raw data_no sanitisation/` recordings — are the newer **imc3** container
+(`|imc3,1;|CB1…`), which `read_famos_all` does not parse; it handles the classic
+comma-keyed `|CF,2,1,1;` layout. The folder reader has its own imc3 path, which
+is why ingestion works while `read_famos` returns nothing on the same files.
+Scoring therefore went through the ASCII export, whose ~6-significant-figure
+rounding (~0.05 N at these magnitudes) is the error floor above. See §12.
+
+### 9.7 Multi-session joining — already built, now verified
+
+A request arrived to "put data from 4220 to X time and have it map as well" —
+i.e. join a second recording onto the end of the first. This already existed
+(`load_raw_sessions` → `sessions.py::concat_sessions`, GUI "+ Session" button,
+CLI `--raw-folders`) but had never been demonstrated, so it was verified rather
+than rebuilt.
+
+Splitting a real 4219 s recording in half, giving leg 2 its own clock starting
+at zero as a recorder writes it, and rejoining: leg 2 lands at 2109.42 s, every
+clock gap is exactly 0.01 s, and values are bit-identical to the unsplit
+original. Joining the two real session folders end to end put the seam at
+4219 s over a 9771.5 s record, and the joined `raw_data.csv` carries the moment
+channels — so the before/after pair survives a stitch.
+
+The join is deliberately **end to end**: a real-world gap between legs is not
+represented, and the seam times in the report are what let a caller find where
+one leg ended. That is the right model for "one route driven in several runs"
+and the wrong one for absolute wall-clock placement, which does not exist.
+
+### 9.8 Result
+
+`raw_data.csv` now carries a "before" for every channel the recipe conditions,
+the Preprocess screen names what it is showing, and the FAMOS operators are
+re-scored on every test run. 130 tests pass. No change to the validated
+mathematics: `famos/` is untouched, and `smo`, `red` and `FiltLP` are called,
+not reimplemented.
+
+Pushed as `ae4312f`, rebased onto a teammate's `c5fe316`.
+
+**Carries a migration cost.** Conditioning is destructive and the raw was never
+stored, so a study processed before this change cannot be repaired in place —
+it must be re-ingested to gain the pair. The packaged `.exe` likewise had to be
+rebuilt; the mentor's report was reproduced partly *because* the binary in use
+predated the fix, which is worth remembering the next time a fix "doesn't
+work".
+
+---
+
+## 10. Open items / known gaps
 
 - **Raw reader 58-sample offset** (§4.6, Check 3) — still unfixed. A real,
   reproducible latent bug in `imc_reader.py::read_raw`'s data-start
@@ -492,7 +694,7 @@ screen, which always displays the true, complete measured data.
   sample `[1000000+58 : 1030001+58]` vs. `Fx_raw_cut.csv`. The structural
   imc3 format that lets a reader use explicit chunk lengths instead of a
   data-start heuristic (the deterministic fix at the source) is documented
-  in §11.
+  in §12.
 - **`--stop-min-s` CLI flag is parsed but never wired into `run()`'s
   kwargs** — a small pre-existing gap from the teammate's own commit,
   noticed during the merge reconciliation, not yet fixed. Both the CLI
@@ -502,16 +704,34 @@ screen, which always displays the true, complete measured data.
   left in place at user's direction. Revisit if/when the repo's visibility
   changes.
 - **Moment channels (`Mx/My/Mz`) and `Latacc` on real data are inferred,
-  not measured** — per `MODULE1_STATUS.md`, they follow the same validated
-  operator path as forces (low risk) but have not been captured against a
-  real matched FAMOS pair the way forces have.
+  not measured** — narrowed in Round 3 but still open. The golden corpus
+  covers *forces*, and a test now pins moments to byte-identical treatment
+  (`test_moment_and_force_are_conditioned_the_same_way`), so the operator
+  they run is FAMOS-scored even though the channel is not. Capturing a real
+  matched FAMOS moment pair still needs a licence; the trial is spent.
+- **imc3 files are only readable through the folder path** — `read_famos`
+  and `read_famos_all` parse the classic comma-keyed `|CF,2,1,1;` layout and
+  return nothing for the newer `|imc3,1;` container, which is what both
+  `golden_corpus/famos_out/*.dat` and the `Raw data_no sanitisation/`
+  recordings are. Ingestion works because `_read_channels` has a separate
+  imc3 path. The consequence is that golden-corpus scoring goes through the
+  ASCII CSV export and inherits its ~0.05 N rounding floor instead of the
+  binary's full precision (§9.6). Structural format notes in §12.
+- **Absolute wall-clock placement of joined sessions does not exist** —
+  `concat_sessions` joins end to end, so a real gap between legs is
+  compressed to zero and only the seam time records where the join fell
+  (§9.7).
 - **Existing studies predate the unit-decade fix** — anything processed
   before that correction holds forces a decade high; re-run rather than
   compare.
+- **Studies processed before Round 3 have no raw reference for moments** —
+  conditioning is destructive and the "before" was never written, so these
+  cannot be repaired in place; re-ingest to get the before/after pair
+  (§9.8). The same applies to any packaged `.exe` built before 2026-09-02.
 
 ---
 
-## 10. What's validated and where to check it
+## 11. What's validated and where to check it
 
 Full detail in `MODULE1_STATUS.md` and `golden_corpus/VALIDATION_GUIDE.md`.
 Headline: the FAMOS reader is byte-exact (0.000e+00 vs. a licensed FAMOS on
@@ -523,12 +743,17 @@ ground truth to check against (they're not FAMOS operations) and were
 instead validated empirically on real recordings as described in §4.5,
 §5.3, §5.4 above.
 
+Since Round 3 those FAMOS scores are no longer a one-off record: 15 tests
+re-score `smo` and `red` against the captured licensed-FAMOS output on every
+run, `red` bit-exactly (§9.6). They skip rather than fail when the gitignored
+2 GB corpus CSV is absent.
+
 ---
 
-## 11. Appendix: reverse-engineering the imc3 raw binary format
+## 12. Appendix: reverse-engineering the imc3 raw binary format
 
 This is the investigative detail behind the raw reader and the §4.6 Check 3 /
-§9 offset bug. It was worked out during Round 1 while establishing ground
+§10 offset bug. It was worked out during Round 1 while establishing ground
 truth, and it is the structural reference a proper fix to `imc_reader.py`
 should build on.
 
@@ -546,7 +771,7 @@ of keyed blocks. Metadata blocks come first (`|CB1`, `|CL1`, `|CO1`, `|CA1`,
 calibration, properties), then the sample data, then a short trailer (`|CS1`,
 `|CJ1`, `|CE1`). The `|CP1` properties block is where acquisition metadata
 lives, including the hardware anti-alias filter cutoff (`eFilterCutoff1 = 200`)
-that later justified the despike sub-width rule (§4.5, §13).
+that later justified the despike sub-width rule (§4.5, §14).
 
 **The data is chunked, not contiguous.** This was the key finding. The samples
 are not stored as one block. They are split across roughly 40,000 small
@@ -584,12 +809,12 @@ something plausible it never fails loudly on a misread. The structural format
 above is the deterministic alternative: reading the explicit `|RC5` length
 fields and starting at the first chunk removes the need for a data-start
 heuristic and would close the 58-sample offset at its source. This remains an
-open item (§9); the structural understanding is recorded here as the reference
+open item (§10); the structural understanding is recorded here as the reference
 for that fix.
 
 ---
 
-## 12. Appendix: pinning the exact `smo` kernel, every candidate tried
+## 13. Appendix: pinning the exact `smo` kernel, every candidate tried
 
 Expands §3 and §4.2. §4.2 states the conclusion (triangular, half-width
 `(round(width_s·fs) - 1)/2`); this is the full search that got there, kept
@@ -666,7 +891,7 @@ FAMOS to the CSV export's rounding floor on every channel.
 
 ---
 
-## 13. Appendix: why despike uses physical rules, not a statistical threshold
+## 14. Appendix: why despike uses physical rules, not a statistical threshold
 
 Expands §4.5. §4.5 states the design constraint (WFT road load is genuinely
 spiky, so amplitude thresholds eat real peaks); this records the measurement
@@ -697,7 +922,7 @@ pinned at the channel's own extreme (rail), a frozen or zero run that
 continuous analog noise cannot produce (dropout), and a spike too narrow to
 have survived the sensor's own 200 Hz hardware anti-alias filter (sub-width).
 The hardware cutoff, read from the `|CP1` metadata during the format work
-(§11), is what makes the sub-width rule defensible: at 1 kHz sampling, nothing
+(§12), is what makes the sub-width rule defensible: at 1 kHz sampling, nothing
 narrower than about 2.5 samples can be real. The one place a loose statistical
 net survives is as an optional, off-by-default backstop at high k (~6), reused
 from the existing Hampel machinery, for gross garbage the structural rules
