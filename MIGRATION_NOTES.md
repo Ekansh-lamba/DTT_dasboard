@@ -1359,3 +1359,259 @@ or GUI widget wiring (new controls setting existing `RunRequest` fields).
 implementations, `dtt/analysis/psd.py`'s Welch computation, and
 `dtt/analysis/histograms.py`'s range-mode logic are all byte-for-byte
 unchanged from before this round.
+
+---
+
+## Round 4 — small batch: default source, multi-session picker, last-used
+## directory, analyzer boxplot styling (2026-09-03)
+
+Four small, independent GUI/analysis changes, three of which (1, 2, 3) all
+touch `gui/pages/new_study_page.py`'s new-study/add-dataset flow and were done
+together; item 4 is a contained plot-styling port. No pipeline/report
+structure changed in any of the four.
+
+### Item 1 — IMC Raw folder as the default source
+
+**File:** `gui/pages/new_study_page.py`, `source_type` combo construction.
+**Before:** `QComboBox` defaulted to index 0 ("CSV file"). **After:**
+`setCurrentIndex(1)` right after populating the combo, so "imc raw folder" is
+selected on open. CSV remains fully selectable; `_on_source_type()` (the
+existing show/hide + detection wiring) is untouched, it just runs against the
+new initial index.
+
+**Validated:** headless construction of `NewStudyPage` shows the raw-folder
+picker visible and the CSV picker hidden immediately after `__init__`;
+switching the combo back to index 0 flips both correctly (existing CSV path
+unaffected).
+
+### Item 2 — add multiple raw sessions in one picker
+
+**File:** `gui/pages/new_study_page.py::_add_session`.
+**Before:** `QFileDialog.getExistingDirectory` — native picker, one folder per
+click, so N sessions needed N clicks.
+**After:** a new `_select_multiple_dirs()` helper builds a non-native
+`QFileDialog` (`FileMode.Directory`, `ShowDirsOnly`, `DontUseNativeDialog`)
+and switches its internal `listView`/`treeView` (Qt's own object names for the
+actual file-browsing views — the unrelated `sidebar` quick-access list is
+deliberately left single-select) to `ExtendedSelection`, so ctrl/shift-click
+picks several folders in one dialog. `_add_session` now extends
+`_raw_sessions` with every returned path instead of appending one.
+
+No pipeline change needed: `RunRequest.raw_folders` (a list) already flows
+through to `--raw-folders` / `imc_reader`'s session join — confirmed by
+reading `pipeline_worker.py` before touching anything, per the brief's
+"picker-and-list change, not a pipeline change" framing. Single-folder
+selection is the N=1 case of the same code path, not a separate branch.
+
+**Validated:** a non-interactive drive of the real `QFileDialog` (populating
+its `listView` model against three temp folders, then programmatically
+multi-selecting all three rows via `QItemSelectionModel`) confirmed
+`selectedFiles()` returns all three paths; clearing to a single-row selection
+confirmed it still returns exactly one. The multi-select dialog is
+necessarily the non-native Qt one rather than the OS picker — Qt has no
+native multi-folder dialog — so it looks different from Windows' own folder
+browser; noted and accepted as the known tradeoff for this feature.
+
+### Item 3 — pickers remember the last-used directory
+
+**File:** `gui/pages/new_study_page.py`, new module-level `_last_dir()` /
+`_remember_dir()` helpers backed by `QSettings` (key
+`new_study/last_dataset_dir`). No settings mechanism existed anywhere in the
+app before this — confirmed by grepping `gui/` for `QSettings`/`last_dir` and
+finding nothing — so this introduces the app's first persisted GUI setting,
+using Qt's own built-in mechanism (no new dependency). `QSettings()` picks up
+its storage location from `QApplication`'s existing
+`setOrganizationName("Apollo Tyres")` / `setApplicationName("DTT WFT
+Automation Platform")` in `gui/main.py`, so no extra wiring was needed there.
+
+All four dataset pickers — `_browse_csv`, `_browse_raw`, `_browse_raw_files`,
+`_add_session` — now open via `_last_dir(default)` (falls back to the
+existing fixed defaults, `repo.csv_dir`/`repo.csv_dir.parent`, only if nothing
+is stored yet or the stored path no longer exists) and call `_remember_dir()`
+on a successful pick, storing the picked file's/folder's parent. One shared
+key across raw and processed/CSV pickers, per the brief's "apply consistently
+to every dataset-adding picker" instruction.
+
+**Validated:** `_last_dir()`/`_remember_dir()` round-trip confirmed
+interactively; falls back to the default when `QSettings` is empty or the
+stored directory has been deleted since.
+
+### Item 4 — boxplot styling ported from the analyzer script
+
+**File:** `dtt/analysis/boxplots.py::generate_boxplots`.
+
+**Scope decision (asked and confirmed before implementing):** the analyzer's
+boxplot (`_open_box_popup` in
+`WFT_Analyzer_All_AUC_Gxy_Heatmap_boxplot_PV_July26 (1).py`) is structurally
+per-channel — one popup per individual channel, up to 24 for a 4-wheel study.
+The platform's boxplot is per-force-type with all wheels grouped in one plot
+(3 images: `boxplot_Fx/Fy/Fz.png`), and both `dtt/reporting/report_builder.py`
+(fixed one-image-per-force-type slide insert) and `gui/pages/boxplots_page.py`
+(one grid card per signal) depend on that shape. Switching to per-channel
+images would have meant reworking both of those — a restructure the brief
+explicitly said not to do ("the existing boxplot page/stage stays where it
+is"). Confirmed with the user: kept the platform's grouped 3-image structure,
+ported only the analyzer's drawing/styling onto it.
+
+**Ported (now matches the analyzer's `_open_box_popup` exactly):**
+- Box width `0.38` (was `0.5`); `medianprops`/`whiskerprops`/`capprops` now
+  solid black (`#000000`, was white/`TEXT_SEC`) at the analyzer's linewidths;
+  `flierprops` markersize `2.5`/alpha `0.35` (was `2`/`0.3`); `boxprops`
+  linewidth `1.6` (was `1.5`).
+- Axes face colour `#F5F5F5` (was pure `#FFFFFF`) via `_style_ax`.
+- P5/Mean/P95 reference lines are now scoped per box (`axhline(..., xmin=,
+  xmax=)` spanning only that wheel's box, colours `#1E8449`/`#B7950B`/
+  `#C0392B`, linewidth `2.5`/`2.5`/`2.6`) instead of the old full-plot-width
+  `axhline` — the analyzer's `x_lo/x_hi = (i-1+0.31)/n, (i-1+0.69)/n` formula
+  is already written generically over `n` boxes, so it generalizes from the
+  analyzer's 1-2 datasets to the platform's 4 wheels with no change to the
+  formula itself.
+- Stats footer text: exact analyzer format and content, including `Q1`/`Q3`
+  (which the platform's old text omitted), right-aligned 12-char labels,
+  `│`-separated fields, `fontsize=6.5`, black text, box `facecolor="#F0F0F0"`/
+  `edgecolor="#AAAAAA"`/`alpha=0.95` (was `TEXT_SEC` text on `ENTRY_BG`/
+  `#1B3A5C` at `0.92`).
+- Title format `"Box Plot — {force_type} — All Wheels"` (analyzer's em-dash
+  spacing), replacing the old `"Box Plot  –  {force_type}  (All Wheels)"`.
+
+**Deliberately not ported (platform keeps ownership, per the brief):**
+- `BOX_YLIMS` stays sourced from `dtt/config.py` (Fx/Fy ±1200 daN, Fz
+  5000-13000 daN — this platform's actual vehicle-class ranges), not the
+  analyzer's hardcoded `BOX_YLIM` (±300 daN / 100-1000 daN, tuned for the
+  analyzer's own reference vehicle). Confirmed these were already two
+  independent constants before this change; no accidental overwrite risk.
+- Channel labels/colours stay on the platform's own `chan_colors`/`CHAN_COLORS`
+  (per-wheel channel names from the platform's channel model), not the
+  analyzer's hardcoded `FL_Fx`/`FR_Fx`/... string literals.
+- The legend block was already byte-identical between the two codebases
+  before this round (same author wrote both, evidently copy-pasted once) —
+  including a pre-existing minor inconsistency in the analyzer itself (legend
+  swatch colours for P5/Mean/P95/Whiskers don't exactly match the actual
+  plotted line colours). Left as-is rather than "fixed", since the brief asks
+  to match the analyzer's actual output, inconsistency included, not to
+  improve on it.
+- No N-to-daN conversion heuristic was ported — the platform's data is
+  already in daN by the time it reaches this module, so the `"Force (daN)"`
+  ylabel (unchanged) is already correct for the platform's own units.
+
+**Cleanup:** removed the now-unused `ENTRY_BG` module constant (was only
+referenced by the stats-box styling this replaced).
+
+**Validated:** generated boxplots on synthetic 4-wheel Fx/Fy/Fz data (5000
+samples/wheel) through the real `generate_boxplots(df, RunConfig)` path,
+confirmed all three `boxplot_Fx/Fy/Fz.png` render with black median/whisker/
+cap lines, per-box-scoped P5/Mean/P95 markers, and the new stats-table format
+(screenshot-inspected). Rendered the analyzer's own `_open_box_popup` drawing
+code standalone (matplotlib-only, no tkinter) on the same channel's data for
+a side-by-side: box proportions, line colours/styles, and stats-line format
+match field-for-field; the only visible difference is the platform's 4 grouped
+boxes in one axes vs. the analyzer's one box per popup, which is the
+confirmed, deliberate structural difference. `pytest tests -k "not golden and
+not corpus"` re-run after all four items: 114 passed, 1 pre-existing failure
+unrelated to this round (`test_seq_translation_of_the_real_imc_file` — missing
+a local `.txt` fixture file, fails identically on a clean checkout before any
+of these changes).
+
+### Not touched
+
+No changes to `dtt/pipeline.py`, `dtt/reporting/report_builder.py`,
+`gui/pages/boxplots_page.py`, `gui/workers/pipeline_worker.py`, or any
+preprocessing/FAMOS-recipe code in this round. `RunRequest.raw_folders`
+handling, `dtt/config.py::BOX_YLIMS`, and the platform's channel-colour model
+are all unchanged, reused as-is.
+
+---
+
+## Round 5 — boxplot Y-axis limits reset to measured data (2026-09-03)
+
+**File:** `dtt/config.py::BOX_YLIMS`. Follow-on, same day, to the Round 4
+boxplot-styling work above — the styling port made the axis-scaling problem
+*visible* (a readable box needs headroom, not empty space), which is what
+surfaced this bug in the first place.
+
+**Problem, confirmed by measurement, not assumed:** the old fixed limits
+(`Fx`/`Fy` ±1200 daN, `Fz` 5000-13000 daN) were never derived from real data.
+Measuring the real whisker envelope (Q1/Q3 ± 1.5×IQR, the actual box+whisker
+extent, not the raw min/max which includes the outliers that are *supposed*
+to sit outside it) across every real `processed_data.csv` this project has
+produced gave `Fx` −200…+182, `Fy` −80…+91, `Fz` 484…980 — a 6-16x mismatch
+against the old limits. At the old `Fz` range the box was invisible (0%
+of a rendered plot showed anything at all); at the old `Fx`/`Fy` range the
+box occupied roughly 7-16% of the plot height.
+
+**Data-quality finding made while measuring, before trusting any number:**
+`dtt/outputs/20260807_003524/processed_data.csv` had to be excluded from the
+measurement corpus. It carries no `run_provenance.json` (predates provenance
+tracking) and its `Fz` channels sit ~10x every other study's (median ~7300-
+7900 vs ~600-800 elsewhere) — this matches this project's own known,
+previously flagged, still-open gap: "existing studies predate the unit-decade
+fix… anything processed before that correction holds forces a decade high"
+(§10 of `PROJECT_HISTORY.md`). Including it would have derived the new fixed
+limits from the same class of stale data the fix is meant to stop showing.
+After that exclusion and collapsing duplicate re-ingestions of the same
+source recording (several output folders are the identical Round-3 mentor
+dataset, re-run repeatedly during earlier validation), the measurement corpus
+was 6 distinct real studies / 20 real WFT channels.
+
+**New values** (measured whisker envelope + ~50% margin, rounded):
+
+| type | old | measured envelope | new |
+|---|---|---|---|
+| `Fx` | ±1200 | −200…+182 | **(−300, 300)** |
+| `Fy` | ±1200 | −80…+91 | **(−150, 150)** |
+| `Fz` | 5000-13000 | 484…980 | **(300, 1100)** |
+
+The `Fx` value independently landing on ±300 — the exact number already used
+by `dtt/config.py::FORCE_RANGES_DAN` (the histogram "full range" x-axis span)
+and by the analyzer script's own `BOX_YLIM` constant — is a useful cross-
+check that this isn't an arbitrary pick.
+
+**Deliberately kept fixed, not switched to autoscale:** the user's explicit
+requirement — the same channel must stay visually comparable across
+different studies' boxplots, so the axis can't float per-plot. Confirmed
+after the change: two different real studies (`20260828_121831` and
+`NEW_Pipeline`, visibly different box positions/widths — one study's boxes
+sit near the old plot's P95 line, the other's don't) render at the identical
+`Fx` (−300, 300) axis range.
+
+**Other plots checked for the same class of bug, none found needing a fix:**
+grepped all of `dtt/` for axis-range constants — only `boxplots.py`,
+`histograms.py`, `heatmaps.py`, and `psd.py` have any. `FORCE_RANGES_DAN`
+(histograms) and `FZ_HEATMAP_BINS_DAN`/`FXY_HEATMAP_RANGE_DAN`/
+`HEXBIN_EXTENT_N` (heatmaps) were already close to the measured real-data
+envelope, not crushed the way `BOX_YLIMS` was — consistent with the user's
+note that histograms had already been fixed for this in an earlier round.
+`psd.py`'s only limit, `(0, fs/2)`, is physically derived from the sample
+rate, not a guessed constant. **Reported, not touched:** `heatmaps.py::
+_comp_bins` can already take a per-vehicle `tyre.fx_range_dan`/etc. override
+in addition to the global constants — a more precise mechanism than
+`boxplots.py` has. Left alone as out of scope for this fix; worth knowing
+about if boxplot ranges ever need to be vehicle-specific rather than one
+fixed value per force type.
+
+**Validated:**
+- Rendered `Fx`/`Fy`/`Fz` boxplots on a real study (`20260828_121831`) at
+  both the old and new limits side by side: at the new limits the box,
+  median, quartiles, and P5/P95 markers fill ~60-65% of the plot height
+  (were ~7-16%, and 0% for `Fz`); the far outlier whiskers correctly run off
+  the top/bottom of the plot instead of compressing everything else.
+- Confirmed the stats-footer text (`fig.text`, independent of `ax.set_ylim`)
+  still prints the true, unclipped `Min`/`Max` regardless of what the axis
+  shows — e.g. `FL_Fy` prints `Max: 266` even though the `Fy` axis clips at
+  150.
+- Regenerated `Fx` boxplots through the real (unmodified) `generate_boxplots`
+  path on two different real studies (`20260828_121831`, `NEW_Pipeline`) and
+  confirmed both used the identical `(-300.0, 300.0)` axis range despite
+  visibly different box positions/spreads — the fixed-per-force-type
+  property holds.
+- `pytest tests -k "not golden and not corpus"` re-run after the change: 114
+  passed, the same 1 pre-existing unrelated failure
+  (`test_seq_translation_of_the_real_imc_file`, missing local `.txt`
+  fixture) as before this change.
+
+### Not touched
+
+Only the three `BOX_YLIMS` numbers changed. No drawing/styling code in
+`dtt/analysis/boxplots.py` (the Round 4 analyzer-look port) was touched, no
+other module's range constants were changed, and no other plot type was
+modified.

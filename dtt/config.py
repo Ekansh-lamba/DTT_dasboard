@@ -53,9 +53,9 @@ FORCE_RANGES_DAN: Dict[str, Tuple[float, float]] = {
 }
 
 BOX_YLIMS: Dict[str, Tuple[float, float]] = {
-    "Fx": (-1200.0, 1200.0),
-    "Fy": (-1200.0, 1200.0),
-    "Fz": (5000.0,  13000.0),
+    "Fx": (-300.0, 300.0),
+    "Fy": (-150.0, 150.0),
+    "Fz": (300.0,  1100.0),
 }
 
 FZ_HEATMAP_BINS_DAN = [200.0, 400.0, 600.0, 800.0, 1000.0, 1200.0]

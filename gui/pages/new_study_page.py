@@ -7,11 +7,11 @@ from __future__ import annotations
 import csv as _csv
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QSettings
 from PySide6.QtWidgets import (
     QHBoxLayout, QFormLayout, QLineEdit, QComboBox, QPushButton, QDoubleSpinBox,
     QSpinBox, QCheckBox, QLabel, QFileDialog, QGridLayout, QWidget, QScrollArea,
-    QListWidget, QVBoxLayout,
+    QListWidget, QVBoxLayout, QTreeView, QListView, QAbstractItemView,
 )
 
 from gui import theme
@@ -22,6 +22,23 @@ from gui.workers.pipeline_worker import RunRequest
 from dtt.channels import discover
 from dtt.vehicles import preset_names, match_preset
 from dtt.ingestion.imc_reader import resolve_raw_folder, pipeline_channel_name
+
+
+_LAST_DIR_KEY = "new_study/last_dataset_dir"
+
+
+def _last_dir(default: Path) -> str:
+    """Where a dataset picker should open: the last directory picked from
+    (any of the raw/CSV pickers, they share one setting), or ``default``.
+    """
+    stored = QSettings().value(_LAST_DIR_KEY, "", type=str)
+    return stored if stored and Path(stored).is_dir() else str(default)
+
+
+def _remember_dir(path: Path) -> None:
+    """Persist the parent directory of a just-picked file/folder."""
+    directory = path if path.is_dir() else path.parent
+    QSettings().setValue(_LAST_DIR_KEY, str(directory))
 
 
 class NewStudyPage(BasePage):
@@ -85,6 +102,7 @@ class NewStudyPage(BasePage):
 
         self.source_type = QComboBox()
         self.source_type.addItems(["CSV file", "imc raw folder"])
+        self.source_type.setCurrentIndex(1)   # imc raw folder is the default source
         self.source_type.currentIndexChanged.connect(self._on_source_type)
         form.addRow("Source type", self.source_type)
 
@@ -548,23 +566,32 @@ class NewStudyPage(BasePage):
 
     def _browse_csv(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select WFT CSV", str(self.repo.csv_dir), "CSV files (*.csv)")
+            self, "Select WFT CSV", _last_dir(self.repo.csv_dir), "CSV files (*.csv)")
         if path:
+            _remember_dir(Path(path))
             self.csv_combo.insertItem(0, Path(path).name + "  (browsed)", path)
             self.csv_combo.setCurrentIndex(0)
             self._update_detection()
 
     def _add_session(self) -> None:
-        """Append another session folder to the join list."""
-        folder = QFileDialog.getExistingDirectory(
-            self, "Add an imc raw session folder", str(self.repo.csv_dir.parent))
-        if not folder:
+        """Append one or more session folders to the join list.
+
+        Qt has no native multi-folder picker, so this uses a non-native
+        ``QFileDialog`` in directory mode with multi-selection enabled on its
+        internal view -- it looks different from the native Windows picker
+        (a known, accepted tradeoff), but returns every folder the user
+        selects in one go instead of one add per click.
+        """
+        folders = _select_multiple_dirs(
+            self, "Add imc raw session folder(s)", _last_dir(self.repo.csv_dir.parent))
+        if not folders:
             return
         if self._raw_folder and not self._raw_sessions:
             self._raw_sessions = [self._raw_folder]      # promote the first pick
-        self._raw_sessions.append(Path(folder))
+        self._raw_sessions.extend(Path(f) for f in folders)
         self._raw_folder = None
         self._raw_files = []
+        _remember_dir(Path(folders[-1]))
         self._describe_sessions()
         self._update_detection()
 
@@ -617,8 +644,9 @@ class NewStudyPage(BasePage):
 
     def _browse_raw(self) -> None:
         folder = QFileDialog.getExistingDirectory(
-            self, "Select imc raw channel folder", str(self.repo.csv_dir.parent))
+            self, "Select imc raw channel folder", _last_dir(self.repo.csv_dir.parent))
         if folder:
+            _remember_dir(Path(folder))
             self._raw_folder = Path(folder)
             self._raw_files = []
             self._raw_sessions = []
@@ -627,9 +655,10 @@ class NewStudyPage(BasePage):
 
     def _browse_raw_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select imc .raw files", str(self.repo.csv_dir.parent),
+            self, "Select imc .raw files", _last_dir(self.repo.csv_dir.parent),
             "imc raw files (*.raw *.dat)")
         if paths:
+            _remember_dir(Path(paths[0]))
             self._raw_files = [Path(p) for p in paths]
             self._raw_folder = None
             self._raw_sessions = []
@@ -823,6 +852,29 @@ class NewStudyPage(BasePage):
             req = RunRequest(csv_path=csv_path, **common)
 
         self.start_requested.emit(req)
+
+
+def _select_multiple_dirs(parent, title: str, start_dir: str) -> list[str]:
+    """Directory picker that returns every folder the user selects, not just one.
+
+    ``QFileDialog.getExistingDirectory`` has no multi-select mode; the
+    documented workaround is a non-native ``QFileDialog`` in ``Directory``
+    mode with its internal list/tree view switched to extended selection.
+    """
+    dlg = QFileDialog(parent, title, start_dir)
+    dlg.setFileMode(QFileDialog.Directory)
+    dlg.setOption(QFileDialog.ShowDirsOnly, True)
+    dlg.setOption(QFileDialog.DontUseNativeDialog, True)
+    # "listView"/"treeView" are Qt's internal object names for the actual
+    # file-browsing views (list mode / detail mode); the unnamed "sidebar"
+    # QListView (Favorites/quick-access) is deliberately left single-select.
+    for name, view_type in (("listView", QListView), ("treeView", QTreeView)):
+        view = dlg.findChild(view_type, name)
+        if view is not None:
+            view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+    if dlg.exec() != QFileDialog.Accepted:
+        return []
+    return dlg.selectedFiles()
 
 
 def _card_title(text: str) -> QLabel:

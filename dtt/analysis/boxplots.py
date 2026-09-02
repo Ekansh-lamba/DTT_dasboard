@@ -22,13 +22,12 @@ BG       = PLOT_COLORS["bg"]
 PANEL    = PLOT_COLORS["panel"]
 TEXT_PRI = PLOT_COLORS["text_pri"]
 TEXT_SEC = PLOT_COLORS["text_sec"]
-ENTRY_BG = PLOT_COLORS["entry_bg"]
 DANGER   = PLOT_COLORS["danger"]
 SUCCESS  = PLOT_COLORS["success"]
 
 
 def _style_ax(ax):
-    ax.set_facecolor("#FFFFFF")
+    ax.set_facecolor("#F5F5F5")
     ax.tick_params(colors="#000000", labelsize=10, width=1.2)
     for sp in ax.spines.values():
         sp.set_edgecolor("#333333")
@@ -52,9 +51,6 @@ def generate_boxplots(df: pd.DataFrame, config: RunConfig) -> None:
         data_per_ch  = []
         labels       = []
         colors       = []
-        p5_vals      = []
-        p95_vals     = []
-        mean_vals    = []
 
         for ch in present:
             series = pd.to_numeric(df[ch], errors="coerce").dropna()
@@ -65,9 +61,6 @@ def generate_boxplots(df: pd.DataFrame, config: RunConfig) -> None:
             labels.append(ch)
             _chan_colors = rc.chan_colors if rc is not None else CHAN_COLORS
             colors.append(_chan_colors.get(ch, "#00B4D8"))
-            p5_vals.append(float(np.percentile(vals, 5)))
-            p95_vals.append(float(np.percentile(vals, 95)))
-            mean_vals.append(float(np.mean(vals)))
 
         if not data_per_ch:
             continue
@@ -80,28 +73,36 @@ def generate_boxplots(df: pd.DataFrame, config: RunConfig) -> None:
             data_per_ch,
             patch_artist=True,
             notch=False,
-            widths=0.5,
-            medianprops=dict(color="white", linewidth=2.5),
-            whiskerprops=dict(color=TEXT_SEC, linewidth=1.3, linestyle="--"),
-            capprops=dict(color=TEXT_SEC, linewidth=1.8),
+            widths=0.38,
+            medianprops=dict(color="#000000", linewidth=2.5),
+            whiskerprops=dict(color="#000000", linewidth=1.4, linestyle="--"),
+            capprops=dict(color="#000000", linewidth=2),
             flierprops=dict(
                 marker="o",
-                markersize=2,
+                markersize=2.5,
                 markerfacecolor="#E67E22",
                 markeredgewidth=0,
-                alpha=0.3,
+                alpha=0.35,
             ),
-            boxprops=dict(linewidth=1.5),
+            boxprops=dict(linewidth=1.6),
         )
 
         for patch, col in zip(bp["boxes"], colors):
             patch.set_facecolor(col)
             patch.set_alpha(0.70)
 
-        for i, (p5, p95, mean, col) in enumerate(zip(p5_vals, p95_vals, mean_vals, colors), start=1):
-            ax.axhline(p5,   color=SUCCESS, linewidth=1.5, linestyle=":", alpha=0.7)
-            ax.axhline(p95,  color=DANGER,  linewidth=1.6, linestyle="-.", alpha=0.7)
-            ax.axhline(mean, color="#F1C40F", linewidth=1.5, linestyle="--", alpha=0.7)
+        # Each wheel's P5/Mean/P95 line is scoped to just its own box (xmin/xmax),
+        # not drawn full-width across the other wheels' boxes.
+        n = len(data_per_ch)
+        for i, vals in enumerate(data_per_ch, start=1):
+            p5  = np.percentile(vals, 5)
+            mu  = np.mean(vals)
+            p95 = np.percentile(vals, 95)
+            x_lo = (i - 1 + 0.31) / n
+            x_hi = (i - 1 + 0.69) / n
+            ax.axhline(p5,  xmin=x_lo, xmax=x_hi, color="#1E8449", linewidth=2.5, linestyle=":")
+            ax.axhline(mu,  xmin=x_lo, xmax=x_hi, color="#B7950B", linewidth=2.5, linestyle="--")
+            ax.axhline(p95, xmin=x_lo, xmax=x_hi, color="#C0392B", linewidth=2.6, linestyle="-.")
 
         ylim = BOX_YLIMS.get(force_type)
         if ylim:
@@ -110,7 +111,7 @@ def generate_boxplots(df: pd.DataFrame, config: RunConfig) -> None:
         ax.set_xticks(range(1, len(labels) + 1))
         ax.set_xticklabels(labels, fontsize=11, color="#000000", fontweight="bold")
         ax.set_ylabel("Force (daN)", color="#000000", fontsize=11, fontweight="bold")
-        ax.set_title(f"Box Plot  –  {force_type}  (All Wheels)", color=TEXT_PRI, fontsize=12, fontweight="bold")
+        ax.set_title(f"Box Plot — {force_type} — All Wheels", color=TEXT_PRI, fontsize=12, fontweight="bold")
 
         legend_handles = [
             Line2D([0], [0], color="white",   linewidth=2.5,                label="Median"),
@@ -127,17 +128,21 @@ def generate_boxplots(df: pd.DataFrame, config: RunConfig) -> None:
         stats_lines = []
         for ch, vals in zip(labels, data_per_ch):
             p5  = np.percentile(vals, 5)
+            q1  = np.percentile(vals, 25)
+            med = np.median(vals)
+            mu  = np.mean(vals)
+            q3  = np.percentile(vals, 75)
             p95 = np.percentile(vals, 95)
             stats_lines.append(
-                f"{ch:<10s}  Min={vals.min():.0f}  P5={p5:.0f}  "
-                f"Median={np.median(vals):.0f}  Mean={np.mean(vals):.0f}  "
-                f"P95={p95:.0f}  Max={vals.max():.0f}"
+                f"{ch:>12s} │ Min:{vals.min():>7.0f} │ P5:{p5:>7.0f} │ "
+                f"Q1:{q1:>7.0f} │ Median:{med:>7.0f} │ Mean:{mu:>7.0f} │ "
+                f"Q3:{q3:>7.0f} │ P95:{p95:>7.0f} │ Max:{vals.max():>7.0f}"
             )
         fig.text(
             0.5, 0.01, "\n".join(stats_lines),
-            ha="center", va="bottom", fontsize=7, color=TEXT_SEC,
+            ha="center", va="bottom", fontsize=6.5, color="#000000",
             fontfamily="monospace",
-            bbox=dict(boxstyle="round,pad=0.5", facecolor=ENTRY_BG, edgecolor="#1B3A5C", alpha=0.92),
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="#F0F0F0", edgecolor="#AAAAAA", alpha=0.95),
         )
         fig.tight_layout(rect=[0, 0.14, 1, 0.97])
 
