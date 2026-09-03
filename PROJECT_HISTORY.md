@@ -77,6 +77,9 @@ implementations turned out to be measurably wrong against the real thing.
 | 2026-08-30 | this document, plus detailed method appendices §12–14 (imc3 format, smo kernel search, despike basis) | Claude |
 | 2026-09-01 | packaged Windows `.exe` rebuilt and shipped (onefile) | Claude + user |
 | 2026-09-02 | **Round 3**: moment (`f*_m*`) channels had no stored raw reference — preprocessing was invisible, not absent; golden-corpus scoring automated (§9) | Claude + user |
+| 2026-09 | **Round 4**: four analysis features (distance-weighted heatmaps, Welch PSD, two-run comparison tables, RF Compare), three workflow modes, FAMOS-validation CSV export (§9A) | Claude + user |
+| 2026-09 | **Round 5**: histogram/AUC readability (soft-fill light restyle, x-axis autoscale), rainflow-page histograms restyled, GUI surfacing of terminal-only features (§9B) | Claude + user |
+| 2026-09 | **Round 6**: new-study UX (raw default, multi-session add, last-used dir), boxplot matched to analyzer + `BOX_YLIMS` rescaled, flat-channel diagnosis — no live bug (§9C) | Claude + user |
 
 ---
 
@@ -684,6 +687,135 @@ work".
 
 ---
 
+## 9A. Round 4 — analysis features, workflow modes, FAMOS-validation export (2026-09)
+
+A comparison of the platform's `dtt/analysis/` modules against a standalone
+single-file Tkinter analyzer script (`WFT_Analyzer_..._PV_July26.py`) found four
+genuine capability gaps; the rest of the analyzer's analyses (percentiles, box
+plots, rainflow from-to matrix, AUC/KDE, G-severity/DLC formulas, PNG export)
+already existed in the platform, equal or better. The comparison overturned most
+prior guesses: the from-to matrix, G-severity (byte-for-byte identical formulas,
+including the deliberate Gxy asymmetry), and the platform's AUC (safer boundary
+handling) were all already present or better. Only four were real gaps.
+
+### 9A.1 The four features
+- **Distance-weighted heatmaps** — `heatmaps.py` was count-weighted; the robust
+  distance-weighting already existed in `histograms.py::_get_speed_weights`
+  (handles dead/stuck speed channels, unit auto-detection). Fix was wiring
+  `heatmaps.py` to that existing helper, not porting the analyzer's version.
+- **Welch PSD** — genuinely missing, distinct from the existing single-FFT dB
+  spectrum. Added `welch_psd` in `spectral.py` and `generate_psd` per wheel, wired
+  as a pipeline stage. Sample rate from config, not a typed value.
+- **Two-run comparison tables** — the platform had no concept of comparing two
+  finished studies. Added `study_compare.py` (a new module, deliberately NOT an
+  extension of `comparison.py`, which is built for two raw folders) computing RMS,
+  DLC, and G-severity deltas, reusing the existing severity functions rather than
+  reimplementing them. Backend-only, writes JSON + PNG into `outputs/_comparisons/`.
+- **RF Compare** — front/rear two-dataset Miner damage-ratio overlay, reusing the
+  existing rainflow primitives.
+
+### 9A.2 Comparison plot styling
+Two-run comparison plots (`draw_comparison_kde` / `draw_stats_strip` in
+`plot_style.py`) match the reference EV-vs-IC slides: filled KDE overlays per run,
+P5/P95 dashed lines, a Min→Max stats strip under each plot, and optional
+cross-position overlay (RL of A vs FL of B). Provenance is recorded in the
+comparison JSON so mismatched-recipe/unit comparisons can be caught.
+
+### 9A.3 Workflow modes + FAMOS-validation CSV
+- **Three workflow modes** (`workflow_mode`: `preprocess` / `analysis` / `both`,
+  default `both`). `preprocess` runs ingestion + recipe and stops; `analysis`
+  re-runs analysis in place on an already-processed study's `processed_data.csv`
+  without re-preprocessing; `both` is unchanged. `analysis` mode runs a provenance
+  guard (`check_stale_provenance`) that warns (never blocks) when the stored
+  pipeline version/units differ from the running code or provenance is missing, so
+  stale data isn't analyzed silently. The analysis-only report is visibly marked as
+  analysis-only so a reduced-metadata report can't be mistaken for a full run.
+- **Temporary FAMOS-validation CSV export** (`export_famos_validation_csv`, off by
+  default): writes the post-recipe / pre-analysis signal as one wide CSV
+  (`preprocessed_for_famos_validation.csv`, time + all channels, RunChannels order)
+  for manual cross-check against a licensed FAMOS.
+
+## 9B. Round 5 — histogram/AUC readability, GUI surfacing (2026-09)
+
+### 9B.1 Histogram readability
+- **X-axis range mode** (`histogram_range_mode`: `full` / `autoscale`) — the fixed
+  `FORCE_RANGES_DAN` span crushed in-range data into the middle; autoscale clips to
+  a percentile-based range (P0.5–P99.5 with padding). Default `full`, exposed as a
+  function parameter and a GUI/CLI option.
+- **Force-distribution histograms restyled to the light reference** — the clean
+  look is a filled KDE with no bars and no std-dev banding: light background, thin
+  single-tone curve, soft low-opacity fill, quiet grid, small dark text. Implemented
+  as `draw_histogram(style="soft")` (the default `style="banded"` path is preserved
+  byte-identical for the rainflow range panel). `histograms.py` uses local
+  light-theme constants, not the shared dark `PLOT_COLORS`, so other charts are
+  untouched.
+
+### 9B.2 Rainflow-page histograms restyled
+The range-distribution row under each rainflow matrix was still on the dark banded
+style; switched to the `style="soft"` light look (ax2 only; the from-to matrix ax1
+is untouched). This supersedes Round-2's "keep rainflow byte-identical" constraint.
+
+### 9B.3 GUI surfacing of terminal-only features
+An audit found several recent features were CLI/`RunConfig`-only. Because the GUI
+shells out to the CLI, surfacing a `RunConfig` field requires adding a CLI flag
+first. Added GUI controls (on existing pages, no restructure) with defaults
+pre-filled from `RunConfig` and proper dark-theme contrast for: workflow mode
+(dropdown, `both` default), FAMOS-validation CSV (checkbox), despike + transient
+params (hidden until their checkbox is ticked), stop-removal speed threshold,
+histogram range mode, and a new PSD viewer page (mirroring the histogram page).
+Stop-removal seam params were left at validated defaults with no control
+(internals, not operator knobs). Two-run comparison / RF Compare GUI was
+deliberately deferred to a future round (needs a two-study picker design).
+
+## 9C. Round 6 — new-study UX, boxplot match + scaling, flat-channel diagnosis (2026-09)
+
+### 9C.1 New-study quality-of-life
+- IMC raw folder is now the default source type.
+- Multiple raw sessions can be added in one dialog (non-native Qt directory dialog
+  with extended selection; single-add still works).
+- File pickers remember the last-used directory via `QSettings` (the app had no
+  settings mechanism before; all four pickers now route through one shared helper).
+
+### 9C.2 Boxplot matched to the analyzer, then rescaled
+- **Styling ported** from the analyzer onto the platform's existing grouped
+  structure (3 images, one per force type, all wheels together) — the analyzer's
+  exact colors/widths/median-whisker-cap styling/stats box, while keeping the
+  platform's channel model and units. The grouped structure was kept deliberately;
+  the analyzer's per-channel structure (up to 24 images) would have meant a
+  `report_builder.py` restructure, out of scope.
+- **Scaling fix** — `BOX_YLIMS` (Fx/Fy ±1200, Fz 5000–13000) were never derived
+  from data and crushed the box into a thin smear (Fz rendered empty). Measured
+  across 6 provenance-clean studies (real whisker envelopes: Fx ±200, Fy ±91, Fz
+  484–980) and reset to Fx (−300, 300), Fy (−150, 150), Fz (300, 1100) — box now
+  fills ~60–65% of the plot, extreme outliers clip, and the stats strip still
+  prints the true Min/Max (it's drawn independently of the axis limit). A stale
+  provenance-less study with 10× Fz was excluded from the measurement so it
+  couldn't re-widen the very limits being fixed. Other axis constants
+  (`FORCE_RANGES_DAN`, heatmap bins) were checked and are already sensible.
+
+### 9C.3 Flat-channel diagnosis (investigate-only, no code change)
+Acceleration, vehicle speed, and heading were reported drawing flat in the
+preprocess screen. Diagnosed on a current-build study, cause per channel:
+- **Latacc / Longacc** — never actually flat; they vary at every stage. They only
+  *looked* unprocessed before Round 3's raw-reference fix (no "before" line to
+  compare). Already resolved.
+- **Vehicle_Speed** — genuinely flat in the data, not a code defect. Every
+  speed/distance-derived channel in that recording (GPS.speed, Speed2D, VelForward,
+  VelLateral, Distance) is exactly 0 across all 554,785 samples while heading moves
+  throughout — the speed/GPS source produced no valid signal for that recording.
+  The pipeline already handles this (force-based stop detection, count-weighted
+  histograms). Action is on data acquisition, not code.
+- **AngleHeading** — a genuine FAMOS passthrough (the recipe conditions nothing on
+  it), correctly drawn as a single real trace labelled "FAMOS passthrough". Varies
+  in the data; no bug on the current build. A plausible-but-unconfirmed edge remains
+  for *raw-ingested* heading: `imc_reader.py::_AUX_MAP` has no heading-like alias,
+  so a raw recording whose heading channel isn't already named `AngleHeading` could
+  come through unmapped. Worth checking only if a real raw-sourced case appears.
+
+The recurring lesson across all three: the symptom was almost always a **stale
+study or a pre-fix `.exe`**, not a live bug (see the growing stale-study debt in
+§10).
+
 ## 10. Open items / known gaps
 
 - **Raw reader 58-sample offset** (§4.6, Check 3) — still unfixed. A real,
@@ -728,6 +860,24 @@ work".
   conditioning is destructive and the "before" was never written, so these
   cannot be repaired in place; re-ingest to get the before/after pair
   (§9.8). The same applies to any packaged `.exe` built before 2026-09-02.
+- **Growing stale-study debt** — studies now exist across several evolving
+  pipeline versions (pre-unit-decade-fix, pre-Round-3 moment fix, pre-boxplot
+  scaling) and don't compare cleanly. Worse, old studies repeatedly masquerade
+  as live bugs (§9C.3): the flat-channel report, the 10× Fz study excluded from
+  the boxplot rescale (§9C.2), and the "spikier graph" scare (§8) were all stale
+  artifacts, not code defects. Worth a deliberate cleanup pass: re-run the
+  studies that matter on the current build, and clearly mark/quarantine the old
+  ones so they aren't opened and mistaken for current output.
+- **Two-run comparison / RF Compare have no GUI** — the backend exists and works
+  (§9A.1) but is reachable only via CLI/Python; the GUI was deferred pending a
+  two-study picker design that pairs with the larger GUI restructure (§9B.3).
+- **Histogram/AUC split + readability scaling (items 4 & 7)** — briefed but not
+  yet implemented as of this update: split histograms and AUC into two sections
+  and fix axis/label readability on both.
+- **Vehicle-specific boxplot limits** — `BOX_YLIMS` is now one global set per
+  force type (§9C.2). `heatmaps.py::_comp_bins` already supports per-vehicle range
+  overrides; boxplots don't. Only matters if vehicles with very different load
+  envelopes (e.g. truck vs. passenger car) need comparing.
 
 ---
 
