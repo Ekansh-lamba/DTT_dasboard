@@ -291,6 +291,21 @@ class Study:
         suffix = "" if range_mode == "full" else f"_{range_mode}"
         return self.figure(f"hist_{kind}_{wheel}{suffix}.png")
 
+    def auc(self, wheel: str, signal: str, kind: str = "distance",
+            range_mode: str = "full") -> Optional[Path]:
+        """kind = 'distance' | 'percentage'. Per-channel AUC (density) plot --
+        mirrors :meth:`histogram` exactly, same filename convention under an
+        ``auc_`` prefix instead of ``hist_``.
+        """
+        channel = self.channel_for(wheel, signal) or f"{wheel}_{signal}"
+        suffix = "" if range_mode == "full" else f"_{range_mode}"
+        return self.figure(f"auc_{kind}_{channel}{suffix}.png")
+
+    def auc_combined(self, wheel: str, kind: str = "distance",
+                     range_mode: str = "full") -> Optional[Path]:
+        suffix = "" if range_mode == "full" else f"_{range_mode}"
+        return self.figure(f"auc_{kind}_{wheel}{suffix}.png")
+
     def psd(self, wheel: str) -> Optional[Path]:
         return self.figure(f"psd_{wheel}.png")
 

@@ -11,6 +11,7 @@ from dtt.sanitization.sanitizer import sanitize
 from dtt.processing.signal_processor import apply_filter
 from dtt.analysis.statistics import compute_statistics
 from dtt.analysis.histograms import generate_histograms
+from dtt.analysis.auc_plots import generate_auc
 from dtt.analysis.heatmaps import generate_heatmaps
 from dtt.analysis.boxplots import generate_boxplots
 from dtt.analysis.rainflow import generate_rainflow
@@ -551,6 +552,14 @@ def run(
                             range_mode=getattr(config, "histogram_range_mode", "full"))
     except Exception as exc:
         logger.error("Histogram generation failed: %s", exc, exc_info=True)
+    # Same stage, same data/weighting/range as the histograms just generated
+    # above -- AUC is the Item A split of the histogram stage's own output
+    # (bars vs. curve), not a new pipeline stage.
+    try:
+        generate_auc(analysis_df, config,
+                    range_mode=getattr(config, "histogram_range_mode", "full"))
+    except Exception as exc:
+        logger.error("AUC generation failed: %s", exc, exc_info=True)
 
     logger.info("[7/9]  Heatmap Generation")
     try:

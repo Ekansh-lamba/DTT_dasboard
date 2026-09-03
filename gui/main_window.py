@@ -17,6 +17,7 @@ from gui.pages.signals_page import SignalsPage
 from gui.pages.validation_page import ValidationPage
 from gui.pages.statistics_page import StatisticsPage
 from gui.pages.histograms_page import HistogramsPage
+from gui.pages.auc_page import AucPage
 from gui.pages.heatmaps_page import HeatmapsPage
 from gui.pages.boxplots_page import BoxplotsPage
 from gui.pages.rainflow_page import RainflowPage
@@ -33,6 +34,7 @@ NAV_ITEMS = [
     ("validation", "Validation",  "✓"),
     ("statistics", "Statistics",  "∑"),
     ("histograms", "Histograms",  "▥"),
+    ("auc",        "AUC",         "∫"),
     ("heatmaps",   "Heatmaps",    "▦"),
     ("boxplots",   "Boxplots",    "◫"),
     ("rainflow",   "Rainflow",    "∿"),
@@ -42,7 +44,7 @@ NAV_ITEMS = [
     ("history",    "History",     "≡"),
 ]
 _STUDY_PAGES = {
-    "preprocess", "signals", "validation", "statistics", "histograms",
+    "preprocess", "signals", "validation", "statistics", "histograms", "auc",
     "heatmaps", "boxplots", "rainflow", "psd", "reports",
 }
 
@@ -163,6 +165,7 @@ class MainWindow(QMainWindow):
         self.validation = ValidationPage(self.repo)
         self.statistics = StatisticsPage(self.repo)
         self.histograms = HistogramsPage(self.repo)
+        self.auc        = AucPage(self.repo)
         self.heatmaps   = HeatmapsPage(self.repo)
         self.boxplots   = BoxplotsPage(self.repo)
         self.rainflow   = RainflowPage(self.repo)
@@ -176,6 +179,7 @@ class MainWindow(QMainWindow):
             "processing": self.processing, "preprocess": self.preprocess,
             "signals": self.signals, "validation": self.validation,
             "statistics": self.statistics, "histograms": self.histograms,
+            "auc": self.auc,
             "heatmaps": self.heatmaps, "boxplots": self.boxplots,
             "rainflow": self.rainflow, "psd": self.psd, "reports": self.reports,
             "comparison": self.comparison, "history": self.history,

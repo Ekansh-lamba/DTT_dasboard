@@ -1615,3 +1615,152 @@ Only the three `BOX_YLIMS` numbers changed. No drawing/styling code in
 `dtt/analysis/boxplots.py` (the Round 4 analyzer-look port) was touched, no
 other module's range constants were changed, and no other plot type was
 modified.
+
+---
+
+## Round 6 — split Histogram/AUC into two sections, fix readability (2026-09-03)
+
+**Files:** `dtt/analysis/histograms.py`, new `dtt/analysis/auc_plots.py`,
+`dtt/analysis/plot_style.py`, `dtt/pipeline.py`, `gui/models/repository.py`,
+new `gui/pages/auc_page.py`, `gui/main_window.py`.
+
+### Item A — what "split" actually meant, found during Phase 1
+
+The real finding, before any code changed: **there was no separate AUC
+content to split out — the thing labelled "Histogram" was already an
+AUC-shaped plot.** `histograms.py::_plot_single_histogram` called
+`plot_style.draw_histogram(..., style="soft")`, and that style's own
+docstring says it "draws no bars at all: a single soft low-alpha fill under a
+thin line." Rendered a real figure on real data to confirm before touching
+anything: `hist_distance_FL_Fx.png` was a smooth filled curve, zero bars.
+Meanwhile there was no AUC page/nav item/generator at all for single-study
+data — the only place `auc.py`'s KDE math (`kde_curve`, `compare_distributions`,
+`auc_grid`) reached the GUI was `gui/pages/comparison_page.py`'s two-run
+overlay, a different, already-existing feature, correctly left untouched
+(explicitly out of scope this round per the brief).
+
+So the split was: give "Histogram" actual bars (didn't exist before for
+single-study force data), and extract today's curve-only rendering into its
+own AUC section.
+
+**`histograms.py::_plot_single_histogram`** now calls `draw_histogram(...,
+style="banded", show_kde=False)` instead of `style="soft"` — real binned bars
+(dark-centre-to-light-edge, from the channel's own colour family via the
+existing `banded_colors` helper — already colour-family-aware, no new styling
+code needed), no KDE curve drawn on top (that now lives only in the AUC
+section, so the two sections don't re-conflate). Filenames unchanged
+(`hist_*.png`).
+
+**New `dtt/analysis/auc_plots.py::generate_auc`** mirrors
+`generate_histograms`'s structure (per-wheel combined figures + per-channel
+figures, `distance`/`percentage` modes, `full`/`autoscale` range modes) but
+draws the filled KDE curve (`style="soft", show_kde=True` — literally what
+`_plot_single_histogram` used to draw) plus P5/P95 marker lines and a stats
+strip. Reuses `histograms.py`'s `_get_speed_weights`, `_get_force_type`,
+`_axis_range`, `RANGE_MODES`, `_style_ax`, and the light-theme colour
+constants by import — no duplicated weighting/range logic. New
+`weighted_plot_series()` helper factored out of `_plot_single_histogram` so
+both modules compute distance/percentage weighting identically instead of
+each having its own copy. New filenames: `auc_{distance,percentage}_{wheel or
+channel}[_autoscale].png`.
+
+**Pipeline wiring** (`dtt/pipeline.py`): `generate_auc(...)` is called
+directly after `generate_histograms(...)` inside the same `[6/9]  Histogram
+Generation` log stage, not as a new numbered stage — AUC is the Item A split
+of that stage's own output (bars vs. curve on the same data), not a new
+pipeline concern, and `new_study_page.py`'s GUI tooltip already documents a
+fixed 9-stage pipeline that this round had no reason to renumber.
+
+**GUI:** new `gui/pages/auc_page.py` (`AucPage`), a near-exact structural
+mirror of `histograms_page.py` (same wheel/signal/kind/range-mode selectors,
+same zoomable single-image view) pointed at new `Study.auc()`/
+`Study.auc_combined()` lookup methods in `gui/models/repository.py` that
+mirror `histogram()`/`histogram_combined()` exactly (same filename
+convention, `auc_` prefix instead of `hist_`). Registered as its own nav
+item (`"auc"`, right after `"histograms"` in `NAV_ITEMS`/`_STUDY_PAGES`) —
+matching how Boxplots/Heatmaps/PSD/Rainflow are each already their own
+single-purpose page, the closest fit to "don't restructure navigation."
+
+### Item B — readability, using the user's actual reference slides
+
+The user supplied three real reference slides (EV-vs-IC and SA1-vs-SA2 AUC
+comparison decks) partway through Phase 1/2 after none came through
+automatically. These are two-run comparisons (out of scope to build), but
+their **styling** — white/pale-grey background with light dotted gridlines
+(already what `histograms.py`'s light theme uses, confirmed, not re-themed),
+bold large per-plot labels, a P5(dotted)/P95(dashed) legend, and a
+`Min | P5 | Q1 | Median | Mean | Q3 | P95 | Max` stats strip directly under
+the plot — is exactly the target for the single-study Histogram/AUC sections.
+
+**Font/spacing sizes bumped** (both sections, via new shared constants in
+`histograms.py`: `TICK_FONTSIZE`, `LABEL_FONTSIZE`, `TITLE_FONTSIZE`,
+`SUPTITLE_FONTSIZE`): tick labels 8→10pt, axis labels 8→12pt bold, per-plot
+title 9→13pt bold, figure suptitle 11→13pt bold. Combined-wheel figures
+widened (5.5in→6-6.5in/panel) with added `wspace` so the larger text has
+room; single-channel figures enlarged similarly.
+
+**Axis-scaling fix reuses the existing mechanism, no new one added** — per
+the brief's explicit constraint. Rendered both `range_mode`s on real data to
+confirm before/after: `"full"` mode (the pipeline default) crushes a real
+Fx distribution into a narrow spike inside a ±300 daN axis when the actual
+data sits mostly in 0-30 daN; `"autoscale"` mode (already existed, already
+wired to the GUI's range selector, just not the default) already fits the
+axis to the real data with no math change. No code change was needed here —
+`_axis_range`'s existing full/autoscale logic is reused as-is by both new
+sections via `_axis_range` import; the "crushed" cases shown before/after
+below are both mode choices the platform already supports.
+
+**Stats-strip theming, a real fix needed before reuse worked cleanly:**
+`plot_style.draw_stats_strip` hardcoded the app's dark navy `PLOT_COLORS`
+theme (dark cell backgrounds, white text) — reusing it as-is on the light
+AUC background would have rendered a jarring dark box floating on white,
+not matching either the existing light histogram theme or the reference
+slides (light grey table, dark text). Fixed by parametrizing
+`draw_stats_strip` with a `theme` argument (`"dark"`, the default — byte-
+identical output to before for every existing caller, confirmed by rendering
+one and diffing colours; `"light"` — new, used only by `auc_plots.py`) plus
+optional `fontsize`/`bbox` overrides, rather than writing a second, separate
+stats-strip function — one function, one set of column logic
+(`stats_strip_rows`, untouched), parametrized rather than duplicated.
+Confirmed `study_compare.py` (the only other caller) passes no `theme` kwarg,
+so it's unaffected and keeps the dark theme it always had.
+
+**Deliberately not changed:** `dtt/analysis/auc.py`'s math
+(`kde_curve`/`compare_distributions`/`auc_grid`/`AucComparison`) — untouched,
+byte-for-byte, per the brief's "no change to histogram/AUC math" constraint.
+`gui/pages/comparison_page.py`'s two-run overlay — untouched, out of scope.
+`FORCE_RANGES_DAN`/`_axis_range` — untouched, reused as-is.
+
+**Validated:**
+- Regenerated both sections on a real study (`20260828_121831`) through the
+  real `generate_histograms`/`generate_auc` functions: Histogram now shows
+  actual banded bars (screenshot-confirmed, replacing the old bars-free
+  curve); AUC shows the filled curve with P5/P95 markers and a light-themed
+  stats strip below it, matching the reference slides' layout language.
+- Confirmed both range modes render sensibly: `"full"` still crushes Fx into
+  a spike inside ±300 (expected, unchanged, cross-study-comparable by
+  design), `"autoscale"` fits the real ~0-30 daN peak cleanly — both via the
+  pre-existing mechanism, nothing new invented.
+- Ran the full pipeline stage functions back to back
+  (`generate_histograms` + `generate_auc`) on real data: 64 distinct figures
+  produced (`hist_*` and `auc_*` side by side in the same `figures/` dir),
+  confirming the two sections coexist without filename collisions.
+- Constructed the real `MainWindow` headlessly: the new `"auc"` nav key
+  appears in `w.pages`, `AucPage` instantiates correctly, alongside all 15
+  other existing nav items — no navigation restructure, one item added in
+  place.
+- Confirmed `draw_stats_strip`'s dark-theme default (used by
+  `study_compare.py`, the only other caller) renders identically to before
+  the `theme=` parametrization — no regression to the existing dark
+  comparison-plot styling anywhere else in the app.
+- `pytest tests -k "not golden and not corpus"` re-run after all changes: 114
+  passed, the same 1 pre-existing unrelated failure as every prior round in
+  this document (missing local `.txt` fixture, unrelated to any of these
+  changes).
+
+### Not touched
+
+`dtt/analysis/auc.py` math, `gui/pages/comparison_page.py`, `FORCE_RANGES_DAN`,
+`dtt/analysis/heatmaps.py`, `dtt/analysis/boxplots.py`, and the pipeline's
+9-stage numbering/log messages are all unchanged. `study_compare.py`'s dark
+stats-strip styling is unchanged (confirmed, not assumed).

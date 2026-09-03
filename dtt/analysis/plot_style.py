@@ -315,27 +315,52 @@ def stats_strip_rows(series: Sequence[Tuple[str, np.ndarray]]) -> Tuple[List[str
     return header, rows
 
 
+_STATS_STRIP_THEMES = {
+    # dark: the original navy/cyan theme, for the dark-background comparison
+    # plots (rainflow, heatmaps, comparison_page.py's two-run overlay).
+    "dark": dict(header_bg=PLOT_COLORS["entry_bg"], header_text=PLOT_COLORS["btn_bg"],
+                edge=PLOT_COLORS["panel"],
+                row_bg=(PLOT_COLORS["entry_bg"], PLOT_COLORS["panel"]),
+                row_text="white", default_label_color="white"),
+    # light: for the white-background force histograms/AUC plots -- a pale
+    # grey table with dark text, matching that section's own light theme
+    # rather than the app's dark chrome.
+    "light": dict(header_bg="#EDEDED", header_text="#333333",
+                 edge="#CCCCCC",
+                 row_bg=("#FFFFFF", "#F5F5F5"), row_text="#333333",
+                 default_label_color="#333333"),
+}
+
+
 def draw_stats_strip(ax, series: Sequence[Tuple[str, np.ndarray]],
-                     colors: Optional[Sequence[str]] = None) -> None:
+                     colors: Optional[Sequence[str]] = None,
+                     theme: str = "dark", fontsize: float = 7,
+                     bbox: Optional[List[float]] = None) -> None:
     """Render the Min/P5/Q1/Median/Mean/Q3/P95/Max strip as a small table
     directly under ``ax`` — the "more informative" element the reference
     EV-vs-IC slides carry below their comparison plots, standardised here so
-    every two-run comparison plot in the app gets the same one.
+    every plot in the app that wants one gets the same layout/columns.
+
+    ``theme``: ``"dark"`` (default, unchanged from before) matches the app's
+    navy chrome; ``"light"`` matches the white-background force-histogram/AUC
+    style instead of clashing with it.
     """
     header, rows = stats_strip_rows(series)
     if not rows:
         return
+    th = _STATS_STRIP_THEMES[theme]
     tbl = ax.table(cellText=rows, colLabels=header, loc="bottom",
-                   bbox=[0.0, -0.46, 1.0, 0.32], cellLoc="center")
+                   bbox=bbox or [0.0, -0.46, 1.0, 0.32], cellLoc="center")
     tbl.auto_set_font_size(False)
-    tbl.set_fontsize(7)
+    tbl.set_fontsize(fontsize)
+    row_bg_odd, row_bg_even = th["row_bg"]
     for (r, c), cell in tbl.get_celld().items():
-        cell.set_edgecolor(PLOT_COLORS["panel"])
+        cell.set_edgecolor(th["edge"])
         if r == 0:
-            cell.set_facecolor(PLOT_COLORS["entry_bg"])
-            cell.get_text().set_color(PLOT_COLORS["btn_bg"])
+            cell.set_facecolor(th["header_bg"])
+            cell.get_text().set_color(th["header_text"])
             cell.get_text().set_fontweight("bold")
         else:
-            cell.set_facecolor(PLOT_COLORS["entry_bg"] if r % 2 else PLOT_COLORS["panel"])
-            row_color = colors[r - 1] if colors and (r - 1) < len(colors) else "white"
-            cell.get_text().set_color(row_color if c == 0 else "white")
+            cell.set_facecolor(row_bg_odd if r % 2 else row_bg_even)
+            row_color = colors[r - 1] if colors and (r - 1) < len(colors) else th["default_label_color"]
+            cell.get_text().set_color(row_color if c == 0 else th["row_text"])
