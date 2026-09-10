@@ -1764,3 +1764,74 @@ byte-for-byte, per the brief's "no change to histogram/AUC math" constraint.
 `dtt/analysis/heatmaps.py`, `dtt/analysis/boxplots.py`, and the pipeline's
 9-stage numbering/log messages are all unchanged. `study_compare.py`'s dark
 stats-strip styling is unchanged (confirmed, not assumed).
+
+## Round — Preprocess screen: manual edits switch off the FAMOS-recipe toggle
+
+**Problem:** on the Preprocess screen, `famos_auto` ("FAMOS recipe" checkbox)
+could stay checked while the operator hand-edited a preprocessing value,
+making the checkbox lie about the config being the validated recipe. Concretely
+the bug was worse than just the 5 conditioning controls (smo width, FiltLP
+cutoff/order) the checkbox visibly disabled: `_settings()` always overlaid the
+5 sanitization fields (lower threshold, outlier pct, despike nsigma/strength,
+gap-bridge seconds, decimate factor) from the GUI regardless of the toggle —
+those were never disabled and never wired to it at all, so editing them was
+already silently possible while "FAMOS recipe" read checked.
+
+**Confirmed first:** this toggle is preview-only. `_settings()`/`famos_auto`
+feed only this screen's own `apply_pipeline(...)` preview plot
+([preprocess_page.py:1245+](gui/pages/preprocess_page.py#L1245)) — never
+`pipeline_worker.py` or the real ingestion path (`apply_famos_recipe` in
+`dtt/preprocessing.py` runs unconditionally at study ingestion, independent of
+this checkbox). So this change alters GUI state/labeling only, no run behavior.
+
+**Fix** (`gui/pages/preprocess_page.py`):
+- `_on_famos_auto`: no longer disables the 5 conditioning controls — all 14
+  preprocessing controls now stay enabled all the time, since editing one is
+  exactly what has to flip the checkbox back off. Re-ticking on a genuine user
+  click (guarded by `_syncing` so the programmatic sets in `refresh()` don't
+  trigger this) shows a `QMessageBox.question` warning first; Cancel reverts
+  the checkbox via a `_syncing`-guarded `setChecked(False)` and leaves every
+  field exactly as the operator left it; confirming calls the new
+  `_restore_famos_recipe`.
+- `_restore_famos_recipe(channel)` (new): snaps all 14 controls — conditioning
+  and sanitization alike — to `famos_recipe(channel)`, the same
+  `PreprocessSettings` object `_settings()` already builds when the toggle is
+  checked. One source of truth, no second hardcoded copy of "the recipe."
+  Kept separate from the pre-existing `_apply_recipe_to_controls(channel)`,
+  which still only syncs the 2 channel-dependent conditioning fields on a
+  plain channel switch — sanitization fields are channel-independent operator
+  settings and must not be wiped just by picking a different channel.
+- `_on_param_edited` (new): connected alongside the existing `_schedule`
+  connection on all 14 preprocessing controls (`threshold`, `olo`, `ohi`,
+  `outlier_check`, `spike_check`, `spike_nsigma`, `spike_strength`,
+  `gap_check`, `gap_seconds`, `smooth_check`, `smooth_width`, `filter_check`,
+  `cutoff`, `order`, `resample`). No-ops while `_syncing` is held (so
+  `_restore_famos_recipe`/`_apply_recipe_to_controls`/`refresh()` never
+  self-trigger it); otherwise, if `famos_auto` is checked, unchecks it and
+  calls `_flash_famos_custom()` — only the edited field changes, nothing else
+  is touched or reset.
+- `_flash_famos_custom`/`_unflash_famos_custom` (new, per explicit follow-up
+  ask): the auto-uncheck relabels the checkbox to "FAMOS recipe — now custom"
+  in `theme.WARNING` bold for ~2.2s via a `QTimer`, then reverts text/style —
+  making the toggle-off transition to custom mode visually obvious rather
+  than a checkbox state change easy to miss in a form full of spin boxes.
+
+**Validated (headless, `QT_QPA_PLATFORM=offscreen`):**
+- Manual check-on with confirm accepted -> checked, recipe applied.
+- Editing `smooth_width` while checked -> unchecks automatically, label
+  flashes "now custom", every other field (`resample`, `threshold`, etc.)
+  confirmed unchanged.
+- Re-tick with confirm cancelled -> stays unchecked, edited value confirmed
+  still held.
+- Re-tick with confirm accepted -> re-checks, label reverts to plain text.
+- Programmatic channel-switch sync (`_apply_recipe_to_controls`) while the
+  toggle is checked -> confirmed it does **not** spuriously uncheck it.
+- Editing a control while already unchecked -> no error, stays unchecked.
+- `ast.parse` syntax check and a real headless `PreprocessPage` construction
+  both pass.
+
+### Not touched
+
+No changes to `dtt/preprocessing.py`, `apply_pipeline`, `famos_recipe`,
+`PreprocessSettings`, or any pipeline/ingestion code — this round is GUI
+state/interaction only, confirmed via the preview-only check above.

@@ -596,13 +596,21 @@ class PreprocessPage(BasePage):
                     self.spike_nsigma, self.spike_strength,
                     self.gap_seconds, self.smooth_width):
             wdg.valueChanged.connect(self._schedule)
+            wdg.valueChanged.connect(self._on_param_edited)
         self.order.valueChanged.connect(self._schedule)
+        self.order.valueChanged.connect(self._on_param_edited)
         self.resample.valueChanged.connect(self._schedule)
+        self.resample.valueChanged.connect(self._on_param_edited)
         self.outlier_check.toggled.connect(self._schedule)
+        self.outlier_check.toggled.connect(self._on_param_edited)
         self.filter_check.toggled.connect(self._schedule)
+        self.filter_check.toggled.connect(self._on_param_edited)
         self.spike_check.toggled.connect(self._schedule)
+        self.spike_check.toggled.connect(self._on_param_edited)
         self.gap_check.toggled.connect(self._schedule)
+        self.gap_check.toggled.connect(self._on_param_edited)
         self.smooth_check.toggled.connect(self._schedule)
+        self.smooth_check.toggled.connect(self._on_param_edited)
         # Wheel-proof every value control on the screen, including the header's
         # channel combo and the footer's sigma box — the pointer crosses those
         # too. Focus policy comes down to StrongFocus so a control can only be
@@ -632,7 +640,18 @@ class PreprocessPage(BasePage):
     # ---- FAMOS recipe -> controls -------------------------------------------
 
     def _apply_recipe_to_controls(self, channel: str) -> None:
-        """Drive the stage controls from the imc/FAMOS recipe for ``channel``."""
+        """Drive the *conditioning* controls (smo, FiltLP) from the imc/FAMOS
+        recipe for ``channel``.
+
+        Called on every channel switch, independently of the FAMOS toggle:
+        conditioning is channel-specific (forces smo, Latacc FiltLP+smo, GPS
+        passthrough), so the panel has to state the new channel's recipe
+        whichever way the toggle sits. It deliberately leaves the sanitization
+        controls (threshold/outliers/despike/gap/decimate) alone — those are
+        channel-independent operator settings, not part of what changes when
+        the selected channel changes, and touching them here would wipe a
+        manual sanitization edit on every channel switch.
+        """
         if not channel:
             return
         r = famos_recipe(channel)
@@ -644,6 +663,43 @@ class PreprocessPage(BasePage):
             self.filter_check.setChecked(r.apply_filter)
             self.cutoff.setValue(r.filter_cutoff)
             self.order.setValue(r.filter_order)
+        finally:
+            self._syncing = False
+
+    def _restore_famos_recipe(self, channel: str) -> None:
+        """Snap *every* preprocessing control back to the validated FAMOS
+        recipe for ``channel`` — conditioning and sanitization alike.
+
+        This is the "discard my manual edits" action, used only when the
+        FAMOS toggle is (re-)ticked on: with the toggle checked, a manual
+        edit to any field immediately flips it back off (``_on_param_edited``),
+        so while it stays checked every field is guaranteed to already be at
+        its recipe value — this is what makes that guarantee true again after
+        a custom excursion. Reads the same :class:`PreprocessSettings`
+        ``_settings()`` builds when the toggle is on, so there is exactly one
+        source of truth for "the validated recipe".
+        """
+        if not channel:
+            return
+        r = famos_recipe(channel)
+        self._syncing = True                    # don't re-plot on every setter
+        try:
+            self.smooth_check.setChecked(r.smooth_width_s > 0)
+            if r.smooth_width_s > 0:
+                self.smooth_width.setValue(r.smooth_width_s)
+            self.filter_check.setChecked(r.apply_filter)
+            self.cutoff.setValue(r.filter_cutoff)
+            self.order.setValue(r.filter_order)
+            self.threshold.setValue(r.lower_threshold)
+            self.outlier_check.setChecked(r.remove_outliers)
+            self.olo.setValue(r.outlier_low_pct)
+            self.ohi.setValue(r.outlier_high_pct)
+            self.spike_check.setChecked(r.moderate_spikes)
+            self.spike_nsigma.setValue(r.spike_nsigma)
+            self.spike_strength.setValue(r.spike_strength)
+            self.gap_check.setChecked(r.bridge_gaps)
+            self.gap_seconds.setValue(r.min_gap_s)
+            self.resample.setValue(r.resample_factor)
         finally:
             self._syncing = False
 
@@ -715,12 +771,75 @@ class PreprocessPage(BasePage):
         return f"Study data — {proc.split('— ', 1)[-1]}"
 
     def _on_famos_auto(self, on: bool) -> None:
-        for w in (self.smooth_check, self.smooth_width, self.filter_check,
-                  self.cutoff, self.order):
-            w.setEnabled(not on)
+        """Toggle handler. All preprocessing controls stay enabled at all
+        times now — with the recipe on, editing one of them is exactly what
+        flips this checkbox back off (see ``_on_param_edited``), so disabling
+        them would make that impossible.
+
+        Re-enabling the recipe (a genuine user click, not the programmatic
+        set ``refresh()``/``_load_channel`` make with ``_syncing`` held) has
+        to warn before it discards any manual edits sitting in the controls.
+        """
+        if on and not self._syncing:
+            if not self._confirm_famos_restore():
+                self._syncing = True
+                try:
+                    self.famos_auto.setChecked(False)
+                finally:
+                    self._syncing = False
+                return
         if on:
-            self._apply_recipe_to_controls(self.channel_combo.currentText())
+            self._restore_famos_recipe(self.channel_combo.currentText())
+            if hasattr(self, "_famos_flash_timer"):
+                self._famos_flash_timer.stop()
+            self._unflash_famos_custom()
         self._schedule()
+
+    def _confirm_famos_restore(self) -> bool:
+        """Warn that re-enabling FAMOS discards manual edits. True = proceed."""
+        return QMessageBox.question(
+            self, "Restore FAMOS recipe?",
+            "Turning the FAMOS recipe back on will discard any manual "
+            "edits and restore the validated FAMOS values for every "
+            "preprocessing parameter on this channel.\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) == QMessageBox.Yes
+
+    _FAMOS_LABEL = "FAMOS recipe"
+
+    def _on_param_edited(self, *_) -> None:
+        """A user touched a preprocessing control — the config is no longer
+        the validated recipe, whatever it was a moment ago.
+
+        Guarded by ``_syncing`` so restoring the recipe's own values (or
+        loading a study) never trips this — only a control the user actually
+        moved does.
+        """
+        if self._syncing or not self.famos_auto.isChecked():
+            return
+        self.famos_auto.setChecked(False)
+        self._flash_famos_custom()
+
+    def _flash_famos_custom(self) -> None:
+        """Make the FAMOS->custom transition impossible to miss.
+
+        The checkbox unticking itself is easy to miss in a form full of spin
+        boxes — this briefly relabels and recolors it so the moment the
+        config stopped being the validated recipe is actually noticed, not
+        just technically true.
+        """
+        self.famos_auto.setText(f"{self._FAMOS_LABEL} — now custom")
+        self.famos_auto.setStyleSheet(
+            f"QCheckBox {{ color: {theme.WARNING}; font-weight: 600; }}")
+        if not hasattr(self, "_famos_flash_timer"):
+            self._famos_flash_timer = QTimer(self)
+            self._famos_flash_timer.setSingleShot(True)
+            self._famos_flash_timer.timeout.connect(self._unflash_famos_custom)
+        self._famos_flash_timer.start(2200)
+
+    def _unflash_famos_custom(self) -> None:
+        self.famos_auto.setText(self._FAMOS_LABEL)
+        self.famos_auto.setStyleSheet("")
 
     def refresh(self) -> None:
         self._conditioned = self._study_is_conditioned()
