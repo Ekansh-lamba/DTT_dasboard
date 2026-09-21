@@ -873,6 +873,21 @@ def apply_famos_recipe(df: pd.DataFrame, fs: float,
             if n_dead and np.isfinite(blanked).any():
                 y = blanked
                 steps.append(f"blank dropout({n_dead / fs:.1f}s)")
+            elif n_dead:
+                # Nothing survived the blanking: the channel is dead end to end.
+                # Running smo/red over an all-NaN array returns all-NaN anyway,
+                # but silently -- the report would read like an ordinary
+                # conditioned channel and a reader would never learn the sensor
+                # never produced a reading. Say so instead, and skip the rest.
+                out[col] = np.full(
+                    int(np.ceil(series.size / max(1, decimate_factor))), np.nan)
+                applied[col] = (f"blank dropout(ENTIRE CHANNEL "
+                                f"{series.size / fs:.1f}s) -> DEAD")
+                logger.warning(
+                    "%s: dead for the whole %.1f s record -- no finite sample "
+                    "survived blank_dead_runs; emitting all-NaN and skipping "
+                    "smo/red", col, series.size / fs)
+                continue
         if despike_enabled:
             y, pct_flagged = despike(
                 y, fs,
@@ -1095,9 +1110,15 @@ def count_conditioned(applied: Dict[str, str]) -> int:
     presence says nothing about whether a channel was recognised — counting any
     non-passthrough entry reports "37/38 conditioned" for a run in which only 15
     channels actually matched the recipe, which is exactly the kind of reassuring
-    number that hides an unmatched-channel bug. Only ``smo`` and ``FiltLP`` count.
+    number that hides an unmatched-channel bug.
+
+    ``blank dropout(`` counts too. Blanking a frozen WFT sensor changes the data
+    just as much as smoothing it does, and a channel dead end to end never
+    reaches ``smo`` at all — so counting only ``smo``/``FiltLP`` reported it as
+    untouched, which is the opposite of what happened to it.
     """
-    return sum(1 for v in applied.values() if "smo(" in v or "FiltLP(" in v)
+    return sum(1 for v in applied.values()
+               if "smo(" in v or "FiltLP(" in v or "blank dropout(" in v)
 
 
 def summary_stats(x: np.ndarray) -> dict:
