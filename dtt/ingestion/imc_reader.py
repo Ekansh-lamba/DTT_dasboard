@@ -281,6 +281,39 @@ def _parse_famos_keys(raw: bytes):
     return keys
 
 
+def _cr_scaling(fields: List[bytes]) -> tuple[float, float, str]:
+    """Decode a FAMOS ``CR`` block into (factor, offset, unit).
+
+    Layout: ``<transform>,<factor>,<offset>,...,<unit>``.
+
+    The FIRST field is the transformation flag, and it decides whether the other
+    two mean anything: ``1`` says the stored counts must be scaled to reach
+    physical units, ``0`` says the samples are ALREADY physical and no
+    transformation applies. A flag-0 block carries ``factor=0``, so reading
+    fields 1 and 2 unconditionally -- as this reader did -- multiplies the whole
+    channel by zero and returns a silently empty signal.
+
+    Both FAMOS entry points parse this block, so it lives here once: the two
+    copies are what let the bug sit in one of them unnoticed.
+
+    A malformed flag is treated as ``1`` (scale), which is the behaviour every
+    channel in this project's corpus relies on; only an explicit ``0`` disables
+    scaling, so a parse failure cannot blank a channel.
+    """
+    factor, offset = 1.0, 0.0
+    try:
+        transform = int(fields[0])
+    except (ValueError, IndexError):
+        transform = 1
+    if transform != 0:
+        try:
+            factor, offset = float(fields[1]), float(fields[2])
+        except (ValueError, IndexError):
+            factor, offset = 1.0, 0.0
+    unit = fields[-1].decode("latin1").strip()
+    return factor, offset, unit
+
+
 def read_famos_all(path: Path) -> List[ImcChannel]:
     """Every channel in a FAMOS file, in file order.
 
@@ -320,11 +353,7 @@ def read_famos_all(path: Path) -> List[ImcChannel]:
             except ValueError:
                 pass
         elif key == "CR" and len(fields) >= 3:
-            try:
-                factor, offset = float(fields[1]), float(fields[2])
-            except ValueError:
-                pass
-            unit = fields[-1].decode("latin1").strip()
+            factor, offset, unit = _cr_scaling(fields)
         elif key == "CN" and len(fields) >= 5:
             name = fields[4].decode("latin1").strip()
         elif key == "CS":
@@ -371,11 +400,7 @@ def read_famos(path: Path) -> Optional[ImcChannel]:
             except ValueError:
                 pass
         elif key == "CR" and len(fields) >= 3:
-            try:
-                factor, offset = float(fields[1]), float(fields[2])
-            except ValueError:
-                pass
-            unit = fields[-1].decode("latin1").strip()
+            factor, offset, unit = _cr_scaling(fields)
         elif key == "CN" and len(fields) >= 5:
             name = fields[4].decode("latin1").strip()
         elif key == "CS":
