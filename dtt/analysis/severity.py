@@ -48,7 +48,38 @@ def _clean(df: pd.DataFrame, ch: Optional[str]) -> Optional[np.ndarray]:
 
 def g_severity(fx: np.ndarray, fy: np.ndarray, fz: np.ndarray
                ) -> Tuple[float, float, float]:
-    """Return ``(Gx, Gy, Gxy)`` for one wheel. NaN when nothing is usable."""
+    """Return ``(Gx, Gy, Gxy)`` for one wheel. NaN when nothing is usable.
+
+    Transcribed from ``imc coding_filtering_Channel mapping.txt`` lines 105-119,
+    the Module 1 severity block, which reads on the RL corner::
+
+        105  fxfz=RL_Fx/RL_Fz          110  fyfz=RL_Fy/RL_Fz
+        106  FxFz_2=fxfz*fxfz          111  FyFz_2=fyfz*fyfz
+        107  Avg_Fx=Mean(FxFz_2)       112  Avg_Fy=Mean(FyFz_2)
+        108  Gxf=Sqrt(Avg_Fx)          113  Gyf=Sqrt(Avg_Fy)
+
+        115  Fxy=RL_Fx^2+RL_Fy^2       117  Avg_Fz=mean(RL_Fz)
+        116  Mean_Fxy=mean(Fxy)        118  Sq_fz=Avg_Fz*Avg_Fz
+                                       119  Gxyf=sqrt(Mean_Fxy/Sq_fz)
+
+    Two details the spec fixes and that are easy to get wrong:
+
+    * Gx/Gy divide **per sample** and only then take the mean of the squares --
+      not ``mean(Fx) / mean(Fz)``.
+    * Gxy averages Fz **first** and squares that mean (lines 117-118). Writing
+      it as ``sqrt(mean((Fx^2 + Fy^2) / Fz^2))`` moves Fz inside the mean and
+      gives a different number.
+
+    The inputs must be the **post-FAMOS** channels -- ``smo(x, 0.1)`` then
+    ``red(10)`` -- because the imc block operates on ``RL_Fx``/``RL_Fz``, the
+    conditioned names, not on the raw ``RL_Fx1``. The pipeline satisfies this by
+    running :func:`dtt.processing.signal_processor.apply_filter` before the
+    analysis frame is taken.
+
+    Divergence from the spec, deliberate: samples with ``Fz == 0`` are dropped
+    (see the module docstring). FAMOS divides straight through; a zero vertical
+    load is a wheel-lift or a dropout, and Fx/Fz there is not a friction demand.
+    """
     fx = np.asarray(fx, dtype=float)
     fy = np.asarray(fy, dtype=float)
     fz = np.asarray(fz, dtype=float)

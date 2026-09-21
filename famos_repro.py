@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 from scipy.signal import butter, sosfilt, sosfilt_zi, welch
 
@@ -94,6 +95,18 @@ FIGURE_DPI = 200
 COLOR_RAW = "#9ecbff"                   # light, sits behind
 COLOR_PROC = "#d7263d"
 COLOR_RESID = "#f9a03f"
+
+# Whether to open the figure in a window once it has been saved.
+#   None  -- auto: only when a GUI backend is active AND stdin is a terminal
+#   True  -- always try (a headless backend still just warns)
+#   False -- never
+# Auto is the default because `plt.show()` BLOCKS under a GUI backend. A run
+# with no one at the keyboard -- CI, a redirected shell, a scheduled job --
+# would save the figure and then hang forever without ever printing its
+# verdict, which is a silent failure: exit status never arrives, and the run
+# looks merely slow. The figure is written to FIGURE_PATH either way, so
+# nothing is lost by not opening a window.
+SHOW_FIGURE: Optional[bool] = None
 
 
 # ============================================================================
@@ -718,6 +731,40 @@ def validate(reference_csv: Path, input_col: str, output_col: str,
 # STEP 4: THE PLOT
 # ============================================================================
 
+def _figure_window_available() -> bool:
+    """True when showing a figure would open a real window rather than block.
+
+    Two conditions, both required. The backend must be a GUI one -- `agg` and
+    friends cannot show anything and only emit a warning. And BOTH stdin and
+    stdout must be terminals, because a GUI backend with nobody watching is
+    exactly the case that hangs: the window opens and `plt.show()` waits for a
+    human to close it.
+
+    Checking stdout matters as much as stdin, and is the half that is easy to
+    get wrong. The run that exposed this bug was `python famos_repro.py > log`
+    from an ordinary shell: stdin was still a terminal, stdout was not, and
+    nobody was watching a window. Testing stdin alone would have let that exact
+    run hang again.
+
+    `matplotlib.backends.registry` arrived in matplotlib 3.9 but this project
+    supports >= 3.7, so the lookup falls back to the fixed list of headless
+    backend names, which has not changed across those versions.
+    """
+    backend = matplotlib.get_backend()
+    try:
+        from matplotlib.backends.registry import backend_registry
+        gui = backend_registry.resolve_backend(backend)[1] is not None
+    except Exception:
+        gui = backend.lower() not in {
+            "agg", "cairo", "pdf", "pgf", "ps", "svg", "template"}
+    if not gui:
+        return False
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False        # detached stream -- treat as unattended
+
+
 def _minmax_decimate(t: np.ndarray, y: np.ndarray, max_points: int
                      ) -> Tuple[np.ndarray, np.ndarray, bool]:
     """DISPLAY-ONLY reduction: per-bucket min and max, in time order.
@@ -847,8 +894,20 @@ def plot(proc: Processed, ff: FilterFile, val: Optional[ValidationResult],
     print(f"  saved: {FIGURE_PATH}  ({FIGURE_DPI} dpi)")
     print(f"  display reduction   : min/max to ~{DISPLAY_MAX_POINTS} vertices "
           "(panels 1-2); PSD uses the full-rate series")
-    print()
-    plt.show()
+
+    show = _figure_window_available() if SHOW_FIGURE is None else SHOW_FIGURE
+    if show:
+        print(f"  window              : opening ({matplotlib.get_backend()}); "
+              "close it to continue")
+        print()
+        plt.show()
+    else:
+        print(f"  window              : not opened "
+              f"(backend {matplotlib.get_backend()}, "
+              f"{'unattended run' if SHOW_FIGURE is None else 'SHOW_FIGURE=False'})"
+              " -- see the saved file")
+        print()
+        plt.close(fig)
 
 
 # ============================================================================

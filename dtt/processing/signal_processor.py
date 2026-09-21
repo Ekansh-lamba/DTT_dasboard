@@ -16,7 +16,7 @@ import logging
 
 import numpy as np
 import pandas as pd
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, sosfilt, sosfilt_zi
 
 from dtt.config import RunConfig, MANDATORY_CHANNELS
 from dtt.preprocessing import apply_famos_recipe, count_conditioned
@@ -25,12 +25,36 @@ logger = logging.getLogger(__name__)
 
 
 def _butterworth_lpf(signal: np.ndarray, order: int, cutoff: float, sr: float) -> np.ndarray:
+    """Legacy Butterworth low-pass, reachable only with ``famos_mode=False``.
+
+    FAMOS conditions WFT forces and moments with ``smo(x, 0.1)``, not with this
+    filter at all, so nothing on the default path calls it. It stays for
+    reproducing pre-FAMOS output.
+
+    Causal single-pass (``sosfilt``), never scipy's forward-backward zero-phase
+    helper. Running the filter in both directions cancels the group delay a real
+    filter produces, so every WFT peak comes out earlier than a causal filter
+    would put it and the waveform is smoother than any physical filter could
+    make it. On Fx/Fy/Fz that shifts peaks against the vehicle events they
+    belong to, which is precisely what fatigue analysis lines up. Turning
+    ``famos_mode`` off must give the old filter, not a different wrong one.
+
+    Second-order sections rather than ``b, a``: cascaded biquads keep their
+    precision as the order climbs. Initial conditions are step-response
+    (``sosfilt_zi * x[0]``), so ``y[0] == x[0]`` and the filter starts settled
+    instead of ramping up from zero over the first samples -- the same
+    convention as :func:`famos.ops.filtlp`.
+    """
+    arr = np.asarray(signal, dtype=float)
+    if arr.size == 0:
+        return arr
     nyq = 0.5 * sr
     if cutoff >= nyq:
         cutoff = nyq * 0.9
         logger.warning("Cutoff adjusted to %.2f Hz (below Nyquist)", cutoff)
-    b, a = butter(order, cutoff / nyq, btype="low")
-    return filtfilt(b, a, signal)
+    sos = butter(order, cutoff / nyq, btype="low", output="sos")
+    y, _ = sosfilt(sos, arr, zi=sosfilt_zi(sos) * float(arr[0]))
+    return y
 
 
 def _apply_legacy_butterworth(df: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
