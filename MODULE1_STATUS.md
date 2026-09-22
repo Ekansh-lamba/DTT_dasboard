@@ -156,3 +156,95 @@ difference in static `Fz` is treated as calibration and corrected; anything else
 warns and joins unscaled. Two of the sample folders sit 35 % apart in wheel load,
 which is load state, not calibration — mechanically fine to join, questionable as
 engineering.
+
+---
+
+## 2026-09-21 — Independent validation session (Claude Code)
+
+Everything above this section is the **existing, previously documented** record
+— a licensed-FAMOS comparison performed in an earlier session, not reproduced
+today. Nothing in that record was re-run or re-verified in this session; it is
+carried forward as-is. Everything below was done today, with **no licensed
+FAMOS and no real recording available on this machine** — see "Known
+data-availability limitations" below before reading anything here as FAMOS
+agreement.
+
+### Synthetic correction test coverage
+
+New file: `tests/test_pipeline_corrections_synthetic.py` — 13 tests, covering
+three corrections that had no direct unit test anywhere in the repo before
+today: `_apply_n_to_dan`, `normalise_force_units` (the decade correction), and
+`remove_stops_frame`, plus two despike-rule boundary tests (`detect_rail`,
+`detect_dropout`) found untested the same way.
+
+- 13/13 passed in isolation (`pytest tests/test_pipeline_corrections_synthetic.py -v`)
+- 13/13 passed inside the full suite
+
+**These are synthetic arithmetic tests, not FAMOS-parity evidence.** FAMOS
+does not perform any of the three corrections under test — see "What is *not*
+covered" above — so there is nothing on the FAMOS side for these tests to
+agree or disagree with. What they confirm is only that each correction's own
+documented arithmetic (decade detection, threshold divide, stop-window
+exclusion) does what its docstring claims, on small in-memory fixtures built
+from real production channel names (`FR_Fz_2`, `RR_Fz_1`, …).
+
+### Full test suite
+
+```
+python -m pytest tests/ -q
+```
+
+| | |
+|---|---|
+| Passed | 209 |
+| Failed | 1 |
+| Skipped | 15 |
+| Errors | 0 |
+| Warnings | 0 |
+
+Total collected: 225 (212 pre-existing + 13 new).
+
+### Known data-availability limitations
+
+- **1 failure** — `tests/test_famos_lib.py::test_seq_translation_of_the_real_imc_file`,
+  `FileNotFoundError` on `imc coding_filtering_Channel mapping.txt`. That file
+  is proprietary and gitignored; it is not present in this checkout.
+- **15 skipped** — all of `tests/test_famos_golden_corpus.py`, reason given by
+  the tests themselves: `golden corpus not present (FR_Fx_2.csv is gitignored,
+  2 GB)`.
+- The real raw recording (`raw data in .dat format/…`), the FAMOS-side
+  `.dat`/`.csv` exports (`golden_corpus/famos_in/`, `famos_out/`,
+  `forces_in/`), and a working licensed FAMOS install are all unavailable on
+  this machine — confirmed by directory listing, `git ls-files`, `git status
+  --ignored`, and a repo-wide filename search, all empty.
+- **No real DTT-versus-FAMOS comparison was performed this session.** The
+  Headline table above this section is carried forward from the earlier
+  session, not reproduced today.
+
+### Remaining concerns
+
+`normalise_force_units` (`dtt/ingestion/loader.py`) documents itself as
+correcting "only clean decades," but unlike the equivalent check in
+`dtt/ingestion/sessions.py` (which guards with
+`abs(np.log10(mag / ref) - decades) > 0.25` before accepting a decade), this
+function has no such tolerance guard — `decades = round(log10(...))` alone
+decides. A non-clean mismatch whose ratio happens to round to a nonzero
+integer (e.g. roughly 5×) would be silently divided as if it were a genuine
+decade error, contrary to the docstring's stated intent.
+
+This is a **suspected discrepancy between the docstring and the implementation,
+not a confirmed defect** — it has not been checked against real data, and
+whether it is a bug or an accepted simplification is an open question. The
+production implementation was not modified.
+
+### Validation status
+
+- Synthetic correction tests: **completed**.
+- Full test suite: **completed**, with one known missing-data failure and 15
+  missing-data skips (see above).
+- Independent FAMOS validation: **not completed** — no licensed FAMOS, no raw
+  recording, no golden-corpus export available this session.
+- Real-data discrepancy investigation (the `normalise_force_units` tolerance
+  question above): **pending required data** — a real or crafted mismatch of
+  known ratio, run through the actual pipeline, would settle whether this
+  matters in practice.

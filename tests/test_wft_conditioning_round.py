@@ -32,14 +32,14 @@ FS = 1000.0
 
 # ------------------------------------------------- outlier blanking (defect 1)
 
-def test_outliers_are_blanked_not_only_counted():
+def test_outliers_are_blanked_not_only_counted(tmp_path):
     """The report and the frame must agree: counted means removed."""
     rng = np.random.default_rng(0)
     df = pd.DataFrame({"Time": np.arange(100) / 100.0,
                        "FL_Fz": rng.normal(6000, 300, 100)})
     df.loc[50, "FL_Fz"] = 999_999.0
 
-    out, report = sanitize(df, RunConfig())
+    out, report = sanitize(df, RunConfig(output_dir=tmp_path))
 
     assert np.isnan(out["FL_Fz"].iloc[50]), "the artifact is still in the data"
     assert report.outlier_flags_per_channel.get("FL_Fz", 0) >= 1
@@ -54,13 +54,13 @@ def test_flag_outliers_returns_the_frame_it_modified():
     assert df["FL_Fz"].notna().all(), "input frame must not be mutated in place"
 
 
-def test_outlier_blanking_reaches_every_wft_force_channel():
+def test_outlier_blanking_reaches_every_wft_force_channel(tmp_path):
     cols = {f"{p}_{c}": np.full(200, 5000.0)
             for p in ("FL", "FR", "RL", "RR") for c in ("Fx", "Fy", "Fz")}
     for v in cols.values():
         v[10], v[20] = 9e5, -9e5
     df = pd.DataFrame({"Time": np.arange(200) / FS, **cols})
-    out, report = sanitize(df, RunConfig())
+    out, report = sanitize(df, RunConfig(output_dir=tmp_path))
     for ch in cols:
         assert np.isnan(out[ch].iloc[10]) and np.isnan(out[ch].iloc[20]), ch
         assert ch in report.outlier_flags_per_channel

@@ -7,6 +7,7 @@
 data/
 Raw data_no sanitisation/
 raw data in .dat format/
+dtt data/
 *.raw
 *.dat
 
@@ -16,6 +17,7 @@ csv/
 
 # Generated pipeline outputs (figures, processed data, reports)
 dtt/outputs/
+DTT_Results/
 
 # Engineering reports / presentations
 *.pptx

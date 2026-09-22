@@ -32,6 +32,7 @@ def compute_statistics(df: pd.DataFrame, config: RunConfig) -> Dict:
             continue
         vals = series.values
         entry = {
+            "count":  int(len(vals)),
             "mean":   round(float(np.mean(vals)),   4),
             "median": round(float(np.median(vals)),  4),
             "std":    round(float(np.std(vals)),     4),
