@@ -16,19 +16,29 @@
 ;          --all-channels --report famos_allchannel.csv
 ;
 ; ---------------------------------------------------------------------------
-; PREREQUISITE -- load these from
-;   raw data in .dat format\2006-08-25 09-10-46 (1)\
+; PREREQUISITE -- run this first, in a terminal:
 ;
-; They are already FAMOS format, so File > Open > Data opens them directly
-; with no import assistant, and each arrives named from inside the file --
-; which is already the name used below, so there is nothing to rename.
+;     python tools/stage_famos_inputs.py
+;
+; then File > Open > Data on all 15 .dat files in
+;   golden_corpus\allchannel_in\
+;
+; Do NOT open the original .raw files. They are already FAMOS format inside,
+; but FAMOS dispatches on the EXTENSION: given a .raw it decides this is bus
+; data and asks "Open database for FR_Fx_2.raw" with a FlexRay Description
+; File (*.FRY) filter, which does not exist. The staging step copies them to
+; .dat, which is the whole fix. Originals are untouched.
+;
+; The .dat files open directly, with no import assistant, and each arrives
+; named from inside the file -- which is already the name used below, so
+; there is nothing to rename:
 ;
 ;   FR_Fx_2   FR_Fy_2   FR_Fz_2   FR_Mx_2   FR_My_2   FR_Mz_2
 ;   RR_Fx_1   RR_Fy_1   RR_Fz_1   RR_Mx_1   RR_My_1   RR_Mz_1
 ;   AccelX    AccelY    Speed2D
 ;
-; Do NOT load the "<name> - Copy.raw" duplicates. They are the same channel
-; under a name nothing can be matched back to, and the scorer skips them.
+; The staging step also skips the "<name> - Copy.raw" duplicates: same channel,
+; under a name nothing can be matched back to a wheel.
 ;
 ; ---------------------------------------------------------------------------
 ; WHY EVERYTHING IS EXPORTED AT 100 Hz
