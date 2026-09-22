@@ -89,15 +89,23 @@ class ChannelDelta:
     max_pct_metric: str = ""
     max_pct: float = 0.0
 
-    def to_row(self) -> Dict[str, object]:
+    def to_row(self, previous_label: str = "prev",
+               current_label: str = "curr") -> Dict[str, object]:
+        """One export row, with the two runs' names in the column headings.
+
+        ``prev``/``curr`` are the defaults rather than the only option because
+        an exported column called ``prev_rms`` says nothing when the two runs
+        are an EV and an IC variant. :meth:`ComparisonResult.table` passes the
+        labels it already carries.
+        """
         row: Dict[str, object] = {
             "Channel": self.label,
             "Canonical": self.channel,
             "Status": "CHANGED" if self.changed else "same",
         }
         for m in METRICS:
-            row[f"prev_{m}"] = self.previous.get(m, float("nan"))
-            row[f"curr_{m}"] = self.current.get(m, float("nan"))
+            row[f"{previous_label}_{m}"] = self.previous.get(m, float("nan"))
+            row[f"{current_label}_{m}"] = self.current.get(m, float("nan"))
             row[f"delta_{m}"] = self.delta.get(m, float("nan"))
             row[f"pct_{m}"] = self.pct.get(m, float("nan"))
         return row
@@ -128,10 +136,22 @@ class ComparisonResult:
         return [d for d in self.matched if not d.changed]
 
     def table(self) -> pd.DataFrame:
-        """Per-channel comparison as a DataFrame (the export/table payload)."""
+        """Per-channel comparison as a DataFrame (the export/table payload).
+
+        Column names carry the two runs' labels, so a CSV opened a month later
+        still says which run each number came from.
+        """
         if not self.matched:
             return pd.DataFrame()
-        return pd.DataFrame([d.to_row() for d in self.matched])
+        return pd.DataFrame([d.to_row(self._column_tag(self.previous_label),
+                                      self._column_tag(self.current_label))
+                             for d in self.matched])
+
+    @staticmethod
+    def _column_tag(label: str) -> str:
+        """A label made safe for a column name, without losing what it says."""
+        tag = "".join(c if c.isalnum() else "_" for c in (label or "")).strip("_")
+        return tag or "run"
 
     def summary(self) -> Dict[str, object]:
         return {

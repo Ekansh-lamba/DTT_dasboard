@@ -4,7 +4,9 @@ live before/after preview on the active study's data (aims B, 5, 6)."""
 from __future__ import annotations
 
 import re
+import textwrap
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -159,44 +161,98 @@ def _envelope_line(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POI
 
 
 def _density_style(n_samples: int, npts: int) -> tuple:
-    """``(raw_alpha, raw_lw, proc_lw)`` scaled by how many samples share a pixel.
+    """``(env_alpha, env_lw, mid_lw)`` scaled by how many samples share a pixel.
 
     A min→max stroke means something different at 13 samples per pixel than at
     600. In the first case it is a resolvable event and deserves full ink; in
     the second it is a density smear whose height is set by the two rarest
-    samples in the bucket, and drawn at the same weight it fills the axes and
-    buries the conditioned line underneath it — which is exactly what makes the
-    full-recording view look vague.
+    samples in the bucket, and drawn at full weight it fills the axes and
+    buries the centre line underneath it.
 
-    So the raw's weight falls as the crowd grows and the conditioned line gains
-    a little, keeping the pair legible at every span. Nothing is hidden: the
-    envelope still spans the true min and max, it is just quieter when a single
-    stroke is standing in for hundreds of samples.
+    **These weights are applied identically to both traces.** They used to be
+    asymmetric — the raw faded to alpha 0.20 / lw 0.40 as the crowd grew while
+    the conditioned line went the other way to lw 1.30, so at full-recording
+    zoom the red was drawn three times heavier and five times more opaque than
+    the blue on the same axes. That was compensation for the two traces being
+    reduced by *different statistics* (see :func:`_envelope_and_median`); with
+    that fixed, weighting one trace against the other would only reintroduce
+    the bias in a subtler form. This is now a legibility ramp and nothing else:
+    whatever it does to the blue, it does to the red.
     """
     per_px = max(1.0, n_samples / max(1, npts))
     # log scale: the interesting range spans 1 -> ~1000 samples per pixel
     f = float(np.clip(np.log10(per_px) / 3.0, 0.0, 1.0))
-    raw_alpha = 0.75 - 0.55 * f          # 0.75 sparse -> 0.20 dense
-    raw_lw = 0.70 - 0.30 * f             # 0.70       -> 0.40
-    proc_lw = 0.95 + 0.35 * f            # 0.95       -> 1.30
-    return raw_alpha, raw_lw, proc_lw
+    env_alpha = 0.75 - 0.35 * f          # 0.75 sparse -> 0.40 dense
+    env_lw = 0.70 - 0.30 * f             # 0.70        -> 0.40
+    mid_lw = 0.95 + 0.35 * f             # 0.95        -> 1.30
+    return env_alpha, env_lw, mid_lw
 
 def _median_line(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POINTS):
-    """The conditioned channel as FAMOS draws it — one clean centre line.
+    """One bucket-median centre line — the smooth read of a conditioned trace.
 
-    This is the half of the FAMOS look a min/max envelope cannot give. Reducing
-    the sanitized trace to *its* min/max paints it as a second band the same
-    height as the raw, so the two colours simply overprint and smoothing that
-    demonstrably removed the ripple arrives on screen as an identical smear.
-    The bucket median is immune to the lone sample that sets a bucket's min or
-    max, so the red comes through as the smooth line it actually is — running
-    down the middle of the blue, with the raw's excursions standing outside it,
-    which is exactly how FAMOS shows what the conditioning took off.
+    Used on its own for the recipe's *intermediate* stages, which are drawn as
+    thin reference lines rather than as a before/after pair and so have nothing
+    to be compared like-for-like against.
+
+    For the raw-vs-conditioned pair, do not reach for this alone: pairing a
+    median against the raw's min→max envelope is what made the full-recording
+    view misreport the conditioning. Use :func:`_envelope_and_median`.
     """
     if y.size <= max_points:
         return t, y
     tm, _, mid, _ = _reduce(t, y, max_points)
     return tm, mid
+
+
+def _envelope_and_median(t: np.ndarray, y: np.ndarray,
+                         max_points: int = _MAX_PLOT_POINTS):
+    """``(t_env, y_env, t_mid, y_mid)`` — one trace's envelope *and* its median.
+
+    The two traces on the before/after preview have to be reduced by the **same
+    statistic**, or the difference on screen is partly the reduction rather than
+    the conditioning. They were not: the raw went through ``_envelope_line``
+    (bucket min→max) and the conditioned channel through ``_median_line``
+    (bucket median), and at full-recording zoom — hundreds of samples to a
+    bucket — min/max and median diverge by most of the channel's range *on
+    identical data*.
+
+    Measured on a 5,547 s recording reduced to 950 buckets (584 samples each),
+    comparing the two envelopes like for like against what was actually drawn:
+
+        channel    conditioning removes    drawn as        overstated
+        FR_Fz_2          14.0% of range      76.7%              5.5x
+        FR_Fx_2           4.5%               13.8%              3.1x
+        FR_My_2           2.2%               24.9%             11.5x
+
+    and the same asymmetry, 2-7x, at the 10 s and 120 s spans where the pair
+    was believed to be correct — it simply reads as a thin band there because
+    the channel's range over 10 s is small.
+
+    So both traces get this, and the caller draws the conditioned channel's
+    envelope behind its median. Like is then compared with like: the blue band
+    and the red band are the same measurement of the same buckets, and the gap
+    between their edges is the conditioning, which is the only thing the plot
+    was ever meant to show. The median survives on top because an envelope
+    alone cannot show where the conditioned signal *sits* — at 584 samples per
+    bucket the two envelopes nearly coincide (317 vs 259 daN on ``FR_Fz_2``),
+    since the load's own variation over half a second dwarfs what a 0.1 s
+    smooth takes off. That coincidence is the truth; the median is what makes
+    it readable.
+
+    Costs one extra stroke per bucket and nothing in compute: ``_reduce``
+    already returns ``lo``, ``mid`` and ``hi`` from a single pass, and the
+    envelope half of that was being discarded.
+
+    Both halves keep ``_reduce``'s NaN buckets, so a dropout still breaks both
+    lines rather than being ruled across.
+    """
+    if y.size <= max_points:
+        return t, y, t, y
+    tm, lo, mid, hi = _reduce(t, y, max_points)
+    tt = np.repeat(tm, 2)
+    yy = np.empty(tt.size, dtype=float)
+    yy[0::2], yy[1::2] = lo, hi
+    return tt, yy, tm, mid
 
 
 def _channel_unit(channel: str) -> str:
@@ -309,19 +365,41 @@ class _ChannelLoadWorker(QThread):
 
 
 class _FamosCheckWorker(QThread):
-    """Runs the FAMOS cross-check off the UI thread."""
-    done = Signal(object, object, object)     # (matches, note, error)
+    """Runs the FAMOS cross-check off the UI thread.
 
-    def __init__(self, path: str):
+    Two checks, because they answer different questions and the operator
+    should not have to know which one to ask for:
+
+    * given a raw folder, the **all-channel** cross-check — every channel the
+      recording holds, at every stage the imc recipe gives it, scored against
+      the per-sample export quantum. This is what "does our output match
+      FAMOS" means, and it is the only one that reaches the forces and
+      moments.
+    * without one, the single-export column-pair check, which is all that is
+      possible when the recording that produced the export is not to hand.
+
+    Either way the reading is minutes of CPU on a multi-hundred-MB export, so
+    it cannot happen on the UI thread.
+    """
+    done = Signal(object, object, object)     # (result, note, error)
+
+    def __init__(self, path: str, raw_dir: str = "", report: str = ""):
         super().__init__()
-        self.path = path
+        self.path, self.raw_dir, self.report = path, raw_dir, report
 
     def run(self):
         try:
+            if self.raw_dir:
+                from dtt.validation.famos_validation import crosscheck_all_channels
+                res = crosscheck_all_channels(
+                    [self.path], self.raw_dir,
+                    report_path=self.report or None)
+                self.done.emit(res, None, None)
+                return
             from dtt.validation.famos_validation import crosscheck_csv
             matches, note = crosscheck_csv(self.path)
             self.done.emit(matches, note, None)
-        except Exception as exc:
+        except Exception as exc:                                  # noqa: BLE001
             self.done.emit(None, None, f"{type(exc).__name__}: {exc}")
 
 
@@ -500,10 +578,10 @@ class PreprocessPage(BasePage):
         span_row = QHBoxLayout()
         span_row.addWidget(QLabel("Span:"))
         self.window_combo = QComboBox()
-        for label, secs in (("30 s", 30.0), ("120 s", 120.0), ("600 s", 600.0),
-                            ("Full recording", 0.0)):
+        for label, secs in (("10 s", 10.0), ("30 s", 30.0), ("120 s", 120.0),
+                            ("600 s", 600.0), ("Full recording", 0.0)):
             self.window_combo.addItem(label, secs)
-        self.window_combo.setCurrentIndex(1)              # 120 s
+        self.window_combo.setCurrentIndex(2)              # 120 s
         self.window_combo.setToolTip(
             "How much of the recording to show at once.\n"
             "The full run puts hundreds of samples on every pixel, so detail is "
@@ -1064,17 +1142,43 @@ class PreprocessPage(BasePage):
     def _validate_famos(self) -> None:
         start = str(self.repo.csv_dir) if hasattr(self.repo, "csv_dir") else ""
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select a FAMOS CSV export (raw + *_LPF columns)", start,
-            "CSV files (*.csv)")
+            self, "Select a FAMOS CSV export", start, "CSV files (*.csv)")
         if not path:
             return
+
+        # The export on its own can only be checked against itself. Offered the
+        # recording FAMOS read as well, every channel becomes checkable -- which
+        # is the difference between "the two columns in this file are
+        # consistent" and "our processing reproduces FAMOS". Declining is a
+        # real choice (the recording may not be on this machine), so it falls
+        # back rather than blocking.
+        ask = QMessageBox.question(
+            self, "Validate vs FAMOS",
+            "Also select the raw recording FAMOS read?\n\n"
+            "With it, every channel in the recording is cross-checked against "
+            "the export — forces, moments, Latacc, speed — scored per sample "
+            "against the export's own rounding quantum, and a per-channel "
+            "report is written next to the CSV.\n\n"
+            "Without it, only the intermediate/final column pairs inside the "
+            "export itself can be compared.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        raw_dir = report = ""
+        if ask == QMessageBox.Yes:
+            raw_dir = QFileDialog.getExistingDirectory(
+                self, "Select the raw recording folder FAMOS read", start)
+            if raw_dir:
+                from dtt.ingestion.imc_reader import resolve_raw_folder
+                raw_dir = str(resolve_raw_folder(Path(raw_dir)))
+                report = str(Path(path).with_name(
+                    Path(path).stem + "_famos_report.csv"))
+
         self.famos_btn.setEnabled(False)
         self.famos_btn.setText("Validating…")
-        self._fam_worker = _FamosCheckWorker(path)
+        self._fam_worker = _FamosCheckWorker(path, raw_dir, report)
         self._fam_worker.done.connect(self._on_famos_result)
         self._fam_worker.start()
 
-    def _on_famos_result(self, matches, note, err) -> None:
+    def _on_famos_result(self, result, note, err) -> None:
         self.famos_btn.setEnabled(True)
         self.famos_btn.setText("Validate vs FAMOS…")
         if err:
@@ -1083,6 +1187,11 @@ class PreprocessPage(BasePage):
         if note:
             QMessageBox.information(self, "FAMOS validation", note)
             return
+        if hasattr(result, "rows"):
+            self._show_all_channel_result(result)
+            return
+
+        matches = result
         best = max((m.match_pct for m in matches), default=0.0)
         ok = bool(matches) and all(m.passed for m in matches)
         head = (f"{'✓ FAMOS-GRADE' if ok else '✗ Below 95%'} — "
@@ -1092,6 +1201,51 @@ class PreprocessPage(BasePage):
                  f"{m.within_pct:.1f}% of samples within 2%  (n={m.n:,})"
                  for m in matches]
         QMessageBox.information(self, "FAMOS validation", head + "\n".join(lines))
+
+    def _show_all_channel_result(self, res) -> None:
+        """The per-channel table, in a dialog that can actually hold it.
+
+        A QMessageBox truncates and cannot be scrolled, and a pass/fail summary
+        is not what was asked for -- the number for every channel is. The
+        written report is the copy that survives the dialog being closed.
+        """
+        head = [res.headline(), ""]
+        if res.rows:
+            head.append(f"{'channel':20s} {'stage':8s} {'err/q':>7s} "
+                        f"{'r':>12s} {'within':>8s}  {'n':>9s}")
+            head.append("-" * 70)
+            for r in res.rows:
+                head.append(f"{r['channel']:20s} {r.get('stage',''):8s} "
+                            f"{r.get('err_q',''):>7s} {r.get('r',''):>12s} "
+                            f"{r.get('within_pct',''):>8s} {r.get('n',0):9d}")
+            head += ["", "err/q is the worst error as a fraction of that "
+                         "sample's own export quantum; <= 0.5 is the rounding "
+                         "floor, which is as close as a 6-significant-figure "
+                         "export can record."]
+        if res.direction:
+            head += ["", "Latacc / Latacc_LPF direction (both ways, measured):"]
+            head += [f"  {d}" for d in res.direction]
+        lines = res.not_compared_lines()
+        if lines:
+            head += ["", "Not compared, and why:"] + [f"  {ln}" for ln in lines]
+        head += ["", "Not scored here, by design — these are corrections "
+                     "processed_data.csv applies and FAMOS does not, so "
+                     "folding them in would score our unit and dropout policy "
+                     "rather than our signal processing:",
+                 "  · N→daN and the CR decade fix (force channels)",
+                 "  · dropout blanking",
+                 "  · stop removal, when enabled"]
+        if res.report_path:
+            head += ["", f"Report written: {res.report_path}",
+                     f"                {res.report_path.with_suffix('.md')}"]
+
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("FAMOS validation — all channels")
+        dlg.setText(res.headline())
+        dlg.setDetailedText("\n".join(head))
+        dlg.setIcon(QMessageBox.Information if res.passed
+                    else QMessageBox.Warning)
+        dlg.exec()
     def _settings(self) -> PreprocessSettings:
         if self.famos_auto.isChecked():
             s = famos_recipe(self.channel_combo.currentText())
@@ -1419,7 +1573,7 @@ class PreprocessPage(BasePage):
         # The raw's spikes need no marker of their own — they *are* the blue
         # excursions standing outside the red, which is how FAMOS shows what
         # the conditioning took off.
-        yr = ymark = None
+        yr = ye = ymark = None
         if not active and not have_raw:
             # Without a stored raw, "before" and "after" are the same array.
             # Drawing it twice in two colours is not an empty comparison, it is
@@ -1444,21 +1598,39 @@ class PreprocessPage(BasePage):
                                f"(the recipe conditions nothing on this channel)"
                                if self._conditioned else src))
         else:
-            raw_alpha, raw_lw, proc_lw = _density_style(
+            env_alpha, env_lw, mid_lw = _density_style(
                 raw.size if raw is not None else proc.size, npts)
+            te, ye, tp, yp = _envelope_and_median(t_proc, proc, npts)
+            # The conditioned channel's own envelope: the same statistic, the
+            # same buckets and the same stroke width as the raw's, so where it
+            # sits inside the blue is what the conditioning removed, and where
+            # the two coincide it removed nothing resolvable at this zoom —
+            # which is the honest answer at full-recording span and the thing
+            # the old envelope-vs-median pairing could not say.
+            #
+            # Drawn first and at reduced opacity, with the raw over the top.
+            # Two bands of nearly equal height have to be told apart somehow,
+            # and the one concession is deliberately the opposite of the old
+            # bias: the *raw* keeps full ink at every span and is never faded
+            # or overprinted, while the conditioned band is the quieter one.
+            # Geometry is what carries the comparison here; opacity only
+            # decides which of two superimposed bands stays readable.
+            #
+            # Drawn whenever a reduction happened, not only when the raw
+            # overlay is on: the conditioned trace must not change shape just
+            # because the blue was toggled off.
+            if te is not tp:
+                ax.plot(te, ye, color=_PROC_COLOR, linewidth=env_lw,
+                        alpha=max(0.28, 0.6 * env_alpha), zorder=1)
             if self.show_raw.isChecked():
-                tr, yr = _envelope_line(t, raw, npts)
-                # Underneath, and held back in proportion to how many samples
-                # each stroke is standing in for.
-                ax.plot(tr, yr, color=_RAW_COLOR, linewidth=raw_lw,
-                        alpha=raw_alpha, zorder=1, label=src)
+                tr, yr, _, _ = _envelope_and_median(t, raw, npts)
+                ax.plot(tr, yr, color=_RAW_COLOR, linewidth=env_lw,
+                        alpha=env_alpha, zorder=2, label=src)
             if self.show_stages.isChecked() and raw is not None and raw.size:
                 self._plot_stages(ax, t, raw, ch, npts)
-            tp, yp = _median_line(t_proc, proc, npts)
-            # Red on top, opaque and a touch heavier: it is one thin line now,
-            # not a second band, so it no longer needs transparency to keep the
-            # blue visible — and transparency would only wash it out.
-            ax.plot(tp, yp, color=_PROC_COLOR, linewidth=proc_lw, zorder=3,
+            # Red centre line on top, opaque and a touch heavier, so the
+            # conditioned signal's position stays readable through its own band.
+            ax.plot(tp, yp, color=_PROC_COLOR, linewidth=mid_lw, zorder=3,
                     solid_joinstyle="round", solid_capstyle="round",
                     label=self._proc_label(s, ch, have_raw, sanitizing))
             # Optional, off by default: ring the removed excursions. FAMOS does
@@ -1473,7 +1645,11 @@ class PreprocessPage(BasePage):
                             markeredgewidth=0.8, alpha=0.9, zorder=4,
                             label=f"raw spikes removed ({n_spikes:,})")
 
-        ax.set_title(self._recipe_note(s, ch, have_raw, sanitizing),
+        # Wrapped, not truncated: the note names the operator that produced the
+        # red trace, and matplotlib silently clips a long single-line title at
+        # the axes edge — which loses the end of the sentence that says what is
+        # being drawn.
+        ax.set_title(textwrap.fill(self._recipe_note(s, ch, have_raw, sanitizing), 70),
                      fontsize=9, color=theme.TEXT_MUTED, loc="left")
         unit = _channel_unit(ch)
         ax.set_xlabel("Time (s)")
@@ -1483,13 +1659,14 @@ class PreprocessPage(BasePage):
         ax.set_xlim(t_view0, t_view1)
         ax.margins(x=0)
 
-        # Frame what is actually on screen: the red centre line, widened to the
-        # raw envelope when the overlay is on. Framing on the full-resolution
-        # processed array instead would leave the median line floating in a band
-        # of empty space, since the extremes that set those percentiles are
-        # precisely what the median drops. Robust percentiles either way, so a
+        # Frame what is actually on screen. That is the conditioned channel's
+        # own envelope where one was drawn — framing on its median instead
+        # would clip the band the median sits inside, which is the half of the
+        # pair that carries the like-for-like comparison. Widened to the raw
+        # envelope when the overlay is on. Robust percentiles throughout, so a
         # rare artifact clips off-view rather than squashing the trace flat.
-        fp = yp[np.isfinite(yp)]
+        frame = ye if ye is not None else yp
+        fp = frame[np.isfinite(frame)]
         if fp.size:
             lo, hi = np.percentile(fp, 0.2), np.percentile(fp, 99.8)
             if yr is not None:
@@ -1518,11 +1695,18 @@ class PreprocessPage(BasePage):
             note = ("  ·  already FAMOS-conditioned at ingestion"
                     if self._conditioned else "")
             # Samples-per-pixel is the number that decides whether the trace can
-            # be read at all, so state it rather than leaving it to be guessed.
+            # be read at all, so state it rather than leaving it to be guessed —
+            # and name the reduction itself. Both traces are reduced the same
+            # way, so whatever artefact survives at this zoom applies equally to
+            # blue and red; an operator reading a gap between them should know
+            # how many samples one stroke is standing in for.
             per_px = max(1.0, raw.size / max(1, npts))
+            reduced = (f"  ·  reduced to {npts:,} buckets, min–max per bucket"
+                       if raw.size > npts else "  ·  every sample drawn")
             self.range_label.setText(
                 f"Showing {t_view0:.0f} – {t_view1:.0f} s of {self._full_span:.0f} s"
-                f"  ·  {raw.size:,} samples  ·  ~{per_px:.0f} per pixel{note}")
+                f"  ·  {raw.size:,} samples  ·  ~{per_px:.0f} per pixel"
+                f"{reduced}{note}")
 
         a, b = summary_stats(raw), summary_stats(proc)
         self.stats_label.setText(

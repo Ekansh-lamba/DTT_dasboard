@@ -12,12 +12,12 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
-    QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
-    QWidget,
+    QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QMessageBox, QProgressBar, QPushButton, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from gui import theme
@@ -27,9 +27,22 @@ from gui.widgets.mpl_canvas import PlotPanel
 
 from dtt.comparison import ComparisonResult, align_channel
 from dtt.analysis.auc import auc_grid, compare_distributions
+from dtt.analysis.study_compare import AUC_DS1_COLOR, AUC_DS2_COLOR
 
+# The time-domain overlay keeps the app's blue/red convention, which matches
+# the Preprocess screen's raw/conditioned pair.
 _PREV_COLOR = "#4a9eff"
 _CURR_COLOR = "#ff4d4f"
+
+# The distribution panel does not. It uses the same fixed two-colour scheme as
+# the Compare-studies screen -- dataset 1 green and solid, dataset 2 red and
+# dashed, imported rather than redeclared -- so a distribution comparison reads
+# the same wherever it appears in the app.
+_DS1_COLOR = AUC_DS1_COLOR
+_DS2_COLOR = AUC_DS2_COLOR
+
+_DEFAULT_PREV = "Dataset 1"
+_DEFAULT_CURR = "Dataset 2"
 
 
 class _CompareWorker(QThread):
@@ -76,6 +89,12 @@ class ComparisonPage(BasePage):
         self._curr_folder: Optional[Path] = None
         self._worker: Optional[_CompareWorker] = None
 
+        # Re-rendering on every keystroke would redraw a KDE per character.
+        self._relabel_timer = QTimer(self)
+        self._relabel_timer.setSingleShot(True)
+        self._relabel_timer.setInterval(250)
+        self._relabel_timer.timeout.connect(self._on_labels_changed)
+
         page = ScrollPage()
         body = page.body()
         outer = QVBoxLayout(self)
@@ -96,19 +115,37 @@ class ComparisonPage(BasePage):
         row = QHBoxLayout()
         self.prev_label = QLabel("No folder selected")
         self.curr_label = QLabel("No folder selected")
-        for title, lbl, slot in (("Previous", self.prev_label, self._pick_prev),
-                                 ("Current", self.curr_label, self._pick_curr)):
+        self.name_prev = QLineEdit(_DEFAULT_PREV)
+        self.name_curr = QLineEdit(_DEFAULT_CURR)
+        for title, lbl, edit, slot, colour in (
+                ("Previous  (reference)", self.prev_label, self.name_prev,
+                 self._pick_prev, _DS1_COLOR),
+                ("Current", self.curr_label, self.name_curr,
+                 self._pick_curr, _DS2_COLOR)):
             col = QVBoxLayout()
             head = QLabel(title)
-            head.setStyleSheet("font-weight:700; font-size:12px;")
-            btn = QPushButton(f"Choose {title.lower()} raw folder…")
+            head.setStyleSheet(
+                f"font-weight:700; font-size:12px; color:{colour};")
+            btn = QPushButton(f"Choose {title.split()[0].lower()} raw folder…")
             btn.setObjectName("Secondary")
             btn.clicked.connect(slot)
             lbl.setWordWrap(True)
             lbl.setStyleSheet(f"color:{theme.TEXT_MUTED}; font-size:11px;")
+            name_row = QHBoxLayout()
+            name_row.addWidget(QLabel("Label:"))
+            edit.setPlaceholderText("e.g. EV")
+            edit.setToolTip(
+                "What this recording is called everywhere on this screen — "
+                "plot legends, the distribution panel's P5/P95 entries, the "
+                "titles, the table headers and the exported CSV's columns.\n\n"
+                "Cosmetic only: renaming never changes which recording is the "
+                "reference for the P5/P95 and exceedance figures.")
+            edit.textChanged.connect(lambda *_: self._relabel_timer.start())
+            name_row.addWidget(edit, 1)
             col.addWidget(head)
             col.addWidget(btn)
             col.addWidget(lbl)
+            col.addLayout(name_row)
             row.addLayout(col, 1)
         pick.layout().addLayout(row)
 
@@ -152,9 +189,6 @@ class ComparisonPage(BasePage):
         table_card = Card()
         table_card.layout().addWidget(_mini("Per-channel comparison"))
         self.table = QTableWidget(0, 9)
-        self.table.setHorizontalHeaderLabels(
-            ["Channel", "Status", "Prev mean", "Curr mean", "Δ mean", "% mean",
-             "Prev RMS", "Curr RMS", "% RMS"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -204,6 +238,35 @@ class ComparisonPage(BasePage):
         body.addLayout(exp)
         body.addStretch(1)
         self._set_exports_enabled(False)
+        self._set_table_headers()
+
+    # ------------------------------------------------------------------ labels
+
+    def _labels(self) -> tuple:
+        """The two names, never blank — an unnamed legend entry is worse than
+        a defaulted one."""
+        a = self.name_prev.text().strip() or _DEFAULT_PREV
+        b = self.name_curr.text().strip() or _DEFAULT_CURR
+        return a, b
+
+    def _set_table_headers(self) -> None:
+        a, b = self._labels()
+        self.table.setHorizontalHeaderLabels(
+            ["Channel", "Status", f"{a} mean", f"{b} mean", "Δ mean", "% mean",
+             f"{a} RMS", f"{b} RMS", "% RMS"])
+
+    def _on_labels_changed(self) -> None:
+        """Re-render under the new names. Never re-runs the comparison: a
+        label cannot reach the percentile or exceedance arithmetic, and the
+        result object is where the names already live."""
+        a, b = self._labels()
+        self._set_table_headers()
+        if self._result is None:
+            return
+        self._result.previous_label = a
+        self._result.current_label = b
+        self._draw_channel(self.channel_combo.currentText())
+        self._draw_delta_summary(self._result)
 
     # ------------------------------------------------------------------ picking
 
@@ -236,6 +299,10 @@ class ComparisonPage(BasePage):
         if f:
             self._prev_folder = f
             self.prev_label.setText(self._describe(f))
+            # Default the name to the folder, but never overwrite one the
+            # operator has already typed.
+            if self.name_prev.text().strip() in ("", _DEFAULT_PREV):
+                self.name_prev.setText(f.name)
             self._refresh_ready()
 
     def _pick_curr(self) -> None:
@@ -243,6 +310,8 @@ class ComparisonPage(BasePage):
         if f:
             self._curr_folder = f
             self.curr_label.setText(self._describe(f))
+            if self.name_curr.text().strip() in ("", _DEFAULT_CURR):
+                self.name_curr.setText(f.name)
             self._refresh_ready()
 
     def _refresh_ready(self) -> None:
@@ -276,6 +345,10 @@ class ComparisonPage(BasePage):
             return
         self._result, self._prev, self._curr = result, prev, curr
         self._fs_prev, self._fs_curr = fs_p, fs_c
+        # `compare_frames` names the runs after their folders; whatever the
+        # operator typed wins, and `ComparisonResult` stays the one store for
+        # the names rather than a parallel dict alongside it.
+        result.previous_label, result.current_label = self._labels()
         self.status.setText(
             f"Compared {len(result.matched)} channels · "
             f"{len(result.changed)} changed.")
@@ -285,6 +358,7 @@ class ComparisonPage(BasePage):
     # --------------------------------------------------------------- rendering
 
     def _populate(self, r: ComparisonResult) -> None:
+        self._set_table_headers()
         self.kpi_matched.set_value(str(len(r.matched)))
         self.kpi_changed.set_value(str(len(r.changed)))
         self.kpi_added.set_value(str(len(r.only_current)),
@@ -344,13 +418,14 @@ class ComparisonPage(BasePage):
         d = self._delta_for(label)
         if d is None or self._prev is None or self._curr is None:
             return
+        name_a, name_b = self._labels()
         t, a, b = align_channel(self._prev, self._curr, d,
                                 self._fs_prev, self._fs_curr, max_points=3000)
         ax = self.overlay.ax
         self.overlay.clear()
         if t.size:
-            ax.plot(t, a, lw=0.7, color=_PREV_COLOR, label="previous", alpha=0.85)
-            ax.plot(t, b, lw=0.7, color=_CURR_COLOR, label="current", alpha=0.85)
+            ax.plot(t, a, lw=0.7, color=_PREV_COLOR, label=name_a, alpha=0.85)
+            ax.plot(t, b, lw=0.7, color=_CURR_COLOR, label=name_b, alpha=0.85)
             ax.legend(fontsize=8, facecolor=theme.SURFACE, labelcolor=theme.TEXT,
                       framealpha=0.9)
         ax.set_xlabel("Elapsed time (s)")
@@ -370,32 +445,40 @@ class ComparisonPage(BasePage):
             lo = min(np.percentile(fa, 0.5), np.percentile(fb, 0.5))
             hi = max(np.percentile(fa, 99.5), np.percentile(fb, 99.5))
             if hi > lo:
+                # Two colours only, and the same two the Compare-studies screen
+                # uses: dataset 1 green and solid, dataset 2 red and dashed.
+                # Every element of a dataset -- KDE line, fill, bars and both
+                # percentile rules -- is that dataset's one colour, and P5 is
+                # told from P95 by line style, never by a third colour.
                 bins = np.linspace(lo, hi, 60)
-                ax2.hist(fa, bins=bins, alpha=0.30, color=_PREV_COLOR, density=True)
-                ax2.hist(fb, bins=bins, alpha=0.30, color=_CURR_COLOR, density=True)
+                ax2.hist(fa, bins=bins, alpha=0.30, color=_DS1_COLOR, density=True)
+                ax2.hist(fb, bins=bins, alpha=0.30, color=_DS2_COLOR, density=True)
 
                 x, k_prev, k_curr = auc_grid(fa, fb, xlim=(lo, hi))
-                ax2.fill_between(x, k_prev, alpha=0.28, color=_PREV_COLOR)
-                ax2.fill_between(x, k_curr, alpha=0.28, color=_CURR_COLOR)
-                ax2.plot(x, k_prev, color=_PREV_COLOR, lw=1.8, label="previous")
-                ax2.plot(x, k_curr, color=_CURR_COLOR, lw=1.8, ls="--", label="current")
+                ax2.fill_between(x, k_prev, alpha=0.28, color=_DS1_COLOR)
+                ax2.fill_between(x, k_curr, alpha=0.28, color=_DS2_COLOR)
+                ax2.plot(x, k_prev, color=_DS1_COLOR, lw=1.8, label=name_a)
+                ax2.plot(x, k_curr, color=_DS2_COLOR, lw=1.8, ls="--", label=name_b)
 
                 cmp = compare_distributions(fa, fb)
                 if cmp is not None:
-                    ax2.axvline(cmp.p5_ref, color=_PREV_COLOR, lw=1.2, ls=":")
-                    ax2.axvline(cmp.p95_ref, color=_PREV_COLOR, lw=1.6, ls="--",
-                                label=f"prev P95 {cmp.p95_ref:.0f}")
-                    ax2.axvline(cmp.p95_cur, color=_CURR_COLOR, lw=1.4, ls="--",
-                                label=f"curr P95 {cmp.p95_cur:.0f} "
+                    ax2.axvline(cmp.p5_ref, color=_DS1_COLOR, lw=1.2, ls=":",
+                                label=f"{name_a} P5 {cmp.p5_ref:.0f}")
+                    ax2.axvline(cmp.p95_ref, color=_DS1_COLOR, lw=1.6, ls="--",
+                                label=f"{name_a} P95 {cmp.p95_ref:.0f}")
+                    ax2.axvline(cmp.p5_cur, color=_DS2_COLOR, lw=1.2, ls=":",
+                                label=f"{name_b} P5 {cmp.p5_cur:.0f}")
+                    ax2.axvline(cmp.p95_cur, color=_DS2_COLOR, lw=1.4, ls="--",
+                                label=f"{name_b} P95 {cmp.p95_cur:.0f} "
                                       f"({cmp.delta_p95:+.0f})")
                     ax2.set_title(
-                        f"Distribution — {cmp.pct_exceed_ref_p95:.1f}% of current "
-                        f"beyond previous P95, {cmp.pct_normal_cur:.1f}% within band",
-                        fontsize=9)
+                        f"Distribution — {cmp.pct_exceed_ref_p95:.1f}% of "
+                        f"{name_b} beyond {name_a} P95, "
+                        f"{cmp.pct_normal_cur:.1f}% within band", fontsize=9)
                 ax2.legend(fontsize=8, facecolor=theme.SURFACE,
                            labelcolor=theme.TEXT, framealpha=0.9)
         ax2.set_xlabel(f"{label} (daN)")
-        ax2.set_ylabel("density")
+        ax2.set_ylabel("Normalised density")
         if not ax2.get_title():
             ax2.set_title("Distribution", fontsize=9)
         self.dist.canvas.fig.tight_layout()
@@ -413,7 +496,8 @@ class ComparisonPage(BasePage):
             ax.barh(labels, vals, color=colors)
             ax.axvline(0, color=theme.TEXT_MUTED, lw=0.8)
             ax.invert_yaxis()
-        ax.set_xlabel("Change in RMS, current vs previous (%)")
+        name_a, name_b = self._labels()
+        ax.set_xlabel(f"Change in RMS, {name_b} vs {name_a} (%)")
         ax.set_title("Per-channel load change", fontsize=9)
         self.delta_plot.canvas.fig.tight_layout()
         self.delta_plot.draw()

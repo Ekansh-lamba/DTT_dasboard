@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFrame, QLabel,
     QPushButton, QStackedWidget, QComboBox, QButtonGroup, QMessageBox,
+    QScrollArea,
 )
 from gui import theme
 from gui.models.repository import StudyRepository, Study
@@ -24,6 +25,7 @@ from gui.pages.rainflow_page import RainflowPage
 from gui.pages.psd_page import PsdPage
 from gui.pages.reports_page import ReportsPage
 from gui.pages.comparison_page import ComparisonPage
+from gui.pages.study_compare_page import StudyComparePage
 from gui.pages.history_page import HistoryPage
 NAV_ITEMS = [
     ("dashboard",  "Dashboard",   "▣"),
@@ -41,6 +43,7 @@ NAV_ITEMS = [
     ("psd",        "PSD",         "∼"),
     ("reports",    "Reports",     "▤"),
     ("comparison", "Compare",     "⇄"),
+    ("study_compare", "Compare studies", "⚖"),
     ("history",    "History",     "≡"),
 ]
 _STUDY_PAGES = {
@@ -109,6 +112,24 @@ class MainWindow(QMainWindow):
         lay.addLayout(brand)
         lay.addSpacing(14)
 
+        # The nav list scrolls. Seventeen items at ~50 px plus the brand block
+        # is taller than an 864 px screen, so on a laptop the last entries --
+        # Compare studies and History -- simply fell off the bottom with no
+        # indication they existed. A fixed column only worked while the list
+        # was short enough, which is not a property anyone checks when adding
+        # a screen.
+        nav_scroll = QScrollArea()
+        nav_scroll.setWidgetResizable(True)
+        nav_scroll.setFrameShape(QFrame.NoFrame)
+        nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        nav_scroll.viewport().setStyleSheet("background: transparent;")
+        nav_host = QWidget()
+        nav_host.setStyleSheet("background: transparent;")
+        nav_lay = QVBoxLayout(nav_host)
+        nav_lay.setContentsMargins(0, 0, 0, 0)
+        nav_lay.setSpacing(6)
+
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         from PySide6.QtCore import QSize
@@ -127,9 +148,11 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda _=False, k=key: self.navigate(k))
             self.nav_group.addButton(btn)
             self.nav_buttons[key] = btn
-            lay.addWidget(btn)
+            nav_lay.addWidget(btn)
 
-        lay.addStretch(1)
+        nav_lay.addStretch(1)
+        nav_scroll.setWidget(nav_host)
+        lay.addWidget(nav_scroll, 1)
         ver = QLabel("Module 1 · v1.0")
         ver.setStyleSheet(f"color:{theme.TEXT_FAINT}; font-size:11px;")
         lay.addWidget(ver)
@@ -172,6 +195,7 @@ class MainWindow(QMainWindow):
         self.psd        = PsdPage(self.repo)
         self.reports    = ReportsPage(self.repo)
         self.comparison = ComparisonPage(self.repo)
+        self.study_compare = StudyComparePage(self.repo)
         self.history    = HistoryPage(self.repo)
 
         mapping = {
@@ -182,7 +206,9 @@ class MainWindow(QMainWindow):
             "auc": self.auc,
             "heatmaps": self.heatmaps, "boxplots": self.boxplots,
             "rainflow": self.rainflow, "psd": self.psd, "reports": self.reports,
-            "comparison": self.comparison, "history": self.history,
+            "comparison": self.comparison,
+            "study_compare": self.study_compare,
+            "history": self.history,
         }
         for key, _, _ in NAV_ITEMS:
             page = mapping[key]

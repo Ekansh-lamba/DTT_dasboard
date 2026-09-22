@@ -1835,3 +1835,295 @@ this checkbox). So this change alters GUI state/labeling only, no run behavior.
 No changes to `dtt/preprocessing.py`, `apply_pipeline`, `famos_recipe`,
 `PreprocessSettings`, or any pipeline/ingestion code — this round is GUI
 state/interaction only, confirmed via the preview-only check above.
+
+
+---
+
+## Round 7 — all-channel FAMOS cross-check, preview reduction, two-colour AUC, dataset labels (2026-09-22)
+
+Four items. 1 and 2 are independent; 3 and 4 share the comparison surface and
+were done together. Nothing in the preprocessing mathematics moved: `famos/`
+is untouched, and `smo`, `red` and `FiltLP` are called, never reimplemented.
+
+### Item 1 — FAMOS cross-validation across every channel
+
+**Which validator is the spine, and why it is not the other one.**
+`dtt/validation/famos_validation.py::crosscheck_csv` compares two columns
+*inside one export* and **fits** the operator relating them — searching 33
+cutoff/order combinations and 9 smo widths. That is the right tool for the
+`Latacc`/`Latacc_LPF` direction question and the wrong one for "does our
+output match FAMOS": it reports the best achievable agreement rather than the
+agreement of the code that ships, and no force or moment channel has an
+intermediate-column pair in any export, so it structurally cannot reach them.
+
+`tools/score_golden.py` already scored our own re-derivation against FAMOS's
+output using the per-sample export quantum, and already had an end-to-end
+`--raw-dir` force mode. It is the spine. `crosscheck_csv` is kept and is now
+*called by* the all-channel run, for the direction test alone.
+
+**The core moved into the library.** `dtt/validation/famos_validation.py` now
+holds `register_all_channels`, `match_export`, `canonical_key`, `split_stage`,
+`load_outputs`, `quantum_ratio`, `quantum_within_pct`, `score`, the report
+writer and `crosscheck_all_channels`. `tools/score_golden.py` imports them and
+keeps the CLI, the synthetic-corpus case table and the exit status. The reason
+is concrete: the GUI's "Validate vs FAMOS…" calls the same code, and the
+packaged `.exe` bundles `dtt/` but not `tools/`, so a path import would have
+worked from source and failed once built.
+
+**What changed in the measurement**
+
+- **Channels come from the folder, operators from `famos_recipe`.**
+  `_FORCE_CHANNELS` was six literals — which is why the moments and `Latacc`
+  were *inferred, not measured* (`MODULE1_STATUS.md` §"What is not covered").
+  Adding six more literals would not have fixed it; the next recording has
+  different names again. Every `.raw` in the folder is now dispatched through
+  `dtt.preprocessing.famos_recipe`, the transcription of the imc config file,
+  so this script cannot disagree with the pipeline about what a channel gets.
+- **Canonical matching, two tiers.** Force and moment columns key on
+  `parse_channel` (so `WFT_Fz_fr`, `FR_Fz_2` and `A1R_Fz` are one channel);
+  everything else keys on a normalised name. The second tier is not laziness:
+  `channels.py::_DERIVED_RE` rejects anything matching speed/accel/angle/rpm
+  by design, so a single-tier canonical match would have silently dropped
+  `Latacc` and `Vehicle_Speed` — exactly the channels this round measures.
+- **A `raw` stage.** Our read of the `.raw` against FAMOS's own read of the
+  same file, with nothing computed on either side. Measured **0.000e+00 on
+  all six force channels**, which is a broader version of what only two
+  `_rawred` columns used to cover.
+- **A `lpf_red` stage**, so `FiltLP` answers for itself even when the export
+  is taken at the production (decimated) rate.
+- **`--cut A:B`**, applied before conditioning, mirroring the sequence's own
+  `Cut()`. Without it `FiltLP`'s step-response start-up and `smo`'s edge
+  padding begin on different samples on the two sides and the first
+  half-window disagrees for a reason that has nothing to do with the
+  operators.
+- **`--inputs` is now optional.** It was read unconditionally, so a run that
+  only wanted the real-recording stages died on a 15 MB gitignored file it
+  never needed.
+- **`--report PATH.csv`** writes the per-channel table as CSV and the reasons
+  beside it as `PATH.md`.
+
+**The three deliberate differences are out of the comparison by construction,
+not subtracted from it.** Scoring runs `.raw` → `famos.ops` → export, in the
+file's own units, so the N→daN/CR decade fix, `blank_dead_runs` and stop
+removal are simply not on that path (stop removal runs *after*
+`processed_data.csv` is written — `pipeline.py:519`). The report names which
+apply per channel so a reader diffing our CSV against a FAMOS export knows
+what they are seeing, but no correction of ours can be scored as a
+disagreement.
+
+**"Not compared, and why" is a first-class output**, grouped by stage rather
+than enumerated: passthrough channels (the recipe changes nothing, so there is
+no FAMOS operation to check), `- Copy` duplicates, `Speed_kmph.raw` (the
+recipe derives it as `Speed2D * 3.6`, so scoring it separately would report
+one channel twice), and export columns nothing matched.
+
+**Dry-run result**, against the existing licensed-FAMOS capture
+`golden_corpus/famos_out/FR_Fx_2.csv` (2026-08-29), 200k samples:
+
+```
+channel   stage        n       max err   r              err/q   within
+FR_Fz_2   raw     194000     0.000e+00   1.000000000     0.00   100.00
+FR_Fz_2   rawred   19400     0.000e+00   1.000000000     0.00   100.00
+FR_Fz_2   smo     194000     5.015e-01   1.000000000     0.54    98.02
+FR_Fz_2   red      19400     4.960e-01   1.000000000     0.54    98.00
+```
+
+20/20 channel-stages at or below the export's own rounding floor. The 42
+"not in the export" entries are the moments, `Latacc`, `Longacc` and
+`Vehicle_Speed` — which is the gap, correctly reported as a gap.
+
+**For the operator:** `golden_corpus/famos_allchannel.seq` and
+`golden_corpus/ALLCHANNEL_EXPORT.md`. The export is deliberately **all at
+100 Hz** (every output post-`red`): it is literally what the production recipe
+produces, it lands near 400 MB instead of ~3 GB, and it avoids FAMOS's shared
+x-axis writing decimated channels sparsely. Attribution survives, because
+`_rawred` answers for the reader and `red()`'s phase on its own — with no
+rounding excuse available — so if `_rawred` matches and `_red` does not, the
+fault is `smo` and nothing else.
+
+### Item 2 — the Preprocess preview's reduction asymmetry
+
+**Confirmed by measurement before anything was changed**, and it was worse
+than the code comments admitted — not confined to full-recording zoom.
+`gui/pages/preprocess_page.py` reduced the raw through `_envelope_line`
+(bucket min→max) and the conditioned channel through `_median_line` (bucket
+median). On `dtt/outputs/20260914_181847`, 950 buckets:
+
+| channel | span | conditioning removes | drawn as | overstated |
+|---|---|---|---|---|
+| FR_Fz_2 | 10 s | 5.8 % of range | 29.0 % | 5.0× |
+| FR_Fz_2 | 120 s | 3.6 % | 26.2 % | 7.2× |
+| FR_Fz_2 | full | 14.0 % | **76.7 %** | 5.5× |
+| FR_My_2 | full | 2.2 % | 24.9 % | **11.5×** |
+
+A second contributor: `_density_style` took the raw to `alpha 0.20 / lw 0.40`
+at full zoom while pushing the conditioned line to `lw 1.30` — the red drawn
+three times heavier and five times more opaque than the blue, on the same axes.
+
+**Fix: option (c).** `_envelope_and_median` returns both statistics from the
+single `_reduce` pass that already computed them, and the conditioned channel
+is drawn as its own envelope with its median over it. After the change the
+drawn gap **equals** the conditioning effect exactly, at every span (76.7 % →
+14.0 % on `FR_Fz_2` at full recording).
+
+Why not the other two options, both of which also satisfy symmetry:
+
+- **both as envelopes only** — at 584 samples per bucket the two envelopes
+  nearly coincide (317 vs 259 daN on `FR_Fz_2`), because the load's own
+  variation over half a second dwarfs what a 0.1 s smooth removes. True, but
+  it loses where the conditioned signal *sits*.
+- **both as medians** — the medians differ by 15 daN in a 413 daN range, which
+  is honest, but a median drops isolated samples and **a pothole spike stops
+  being visible as a spike**. That is a stated requirement, so it was
+  disqualified rather than merely not chosen. A test pins it.
+
+Ink order is the one concession, and it is deliberately the opposite of the
+old bias: the conditioned envelope is drawn *first* and at reduced opacity,
+with the **raw over the top at full ink at every span**. Two bands of nearly
+equal height have to be distinguishable; geometry carries the comparison and
+opacity only decides which stays readable. `_density_style` is now symmetric —
+whatever it does to the blue it does to the red — and is a legibility ramp and
+nothing else.
+
+Also: the caption states the reduction (`reduced to N buckets, min–max per
+bucket`); a **10 s span** was added to the span combo, which only offered
+30 s / 120 s / 600 s / Full; and the recipe note is wrapped rather than clipped
+at the axes edge.
+
+`_spikes` **confirmed unaffected, not assumed** — it takes the clipped
+full-rate arrays and never sees the bucket count. Pinned by a test.
+
+Screenshots at 10 s / 120 s / Full recording, before and after, same channel
+and settings, were captured by driving the real page headless.
+
+### Items 3 and 4 — two-dataset AUC, two colours, named datasets
+
+**Who owns it.** `gui/pages/comparison_page.py` is built end to end around two
+**raw imc folders** — it globs `*.raw`, reads with `load_recording`, and
+bypasses the pipeline. `dtt/analysis/study_compare.py` already was the
+two-finished-studies module (loads `processed_data.csv`, builds
+`RunChannels`, carries `label_a`/`label_b`, runs the provenance guard, and
+already used `#27AE60`/`#E74C3C` in `generate_rf_compare`) and had no GUI at
+all. So: the renderer went into `study_compare.py`, and a **sibling page**
+`gui/pages/study_compare_page.py` was added rather than a second input layer
+inside the existing Compare screen. This also closes §10's "Two-run comparison
+/ RF Compare have no GUI".
+
+- `draw_auc_comparison(ax_kde, ax_hist, ...)` takes **axes, not a figure**, so
+  the embedded panel and the PNG export are the same drawing.
+- `PlotPanel(ncols=2, light=True)` — the figure width now scales with the
+  panel count, because at a fixed 6 inches two panels overlap their titles
+  before Qt ever resizes, and a figure saved straight to PNG never gets that
+  resize. Light mode sets only the figure background and leaves the axes to
+  the drawing code, so `histograms.py` stays the single source of the light
+  palette.
+- **Exactly two colours**, dataset 1 green solid and dataset 2 red dashed;
+  P5 is `:` and P95 is `--`. The old `_PREV_COLOR`/`_CURR_COLOR` pair is
+  replaced on the distribution panel of *both* screens, imported from one
+  place rather than redeclared.
+- **`kde_curve` kept.** The reference's `KDE_MAX_SAMPLES = 20000` is not
+  ported: Scott's bandwidth scales as n^(-1/5), so 20k instead of 600k widens
+  the kernel ~1.7× and merges separate peaks. A test drives a bimodal 600k
+  sample set and requires the trough to survive.
+- **Legend fixed, not copied.** The reference sets `labelcolor="white"` on a
+  `#F5F5F5` panel. The light-theme colours from `histograms.py` are used, and
+  handles are passed explicitly so the legend opens with the *reference*
+  dataset — left to draw order it opened with dataset 2, which reads as though
+  that were the baseline. The histogram panel's labels are passed explicitly
+  too, because a `BarContainer`'s own label is an internal `_containerN`.
+- **Axis range reuses `histograms._axis_range`** on the two datasets pooled,
+  in `autoscale` mode, rather than a fresh percentile rule — so both panels,
+  both datasets and the rest of the app agree about where a channel's axis
+  starts.
+- **Channels from `RunChannels`**: `auc_channels()` offers every force **and**
+  moment channel both studies recorded. No fixed twelve-channel FL/FR/RL/RR
+  list, no N-to-daN heuristic — the unit comes from the component in the
+  channel's own name.
+
+**Dataset 1 is the reference.** The reference script makes dataset 2 the
+baseline (`p5_ref = percentile(d2, 5)`); the platform's
+`compare_distributions(a, b)` makes **a** the baseline, and every existing
+call site depends on that. The platform's order was kept and the script's
+flipped. Same arithmetic, opposite argument order — mixing them would silently
+change every exceedance figure. Pinned by a test.
+
+**Labelling.** Two editable fields per screen, defaulting to the study/folder
+name (and never overwriting one already typed). A rename re-renders through a
+250 ms debounce and **never re-runs the comparison** — a label cannot reach
+the percentile arithmetic. `ComparisonResult.previous_label/current_label` and
+`StudyComparisonResult.label_a/label_b` stay the single store; no parallel
+label dict was added.
+
+`ChannelDelta.to_row()` hardcoded `prev_`/`curr_` column prefixes and had no
+access to the labels. It now takes them, with the old strings as defaults, and
+`ComparisonResult.table()` — its only caller, which already holds the labels —
+passes them through a `_column_tag` that makes a label safe for a column name
+without losing what it says.
+
+Verified by renaming to **EV / IC** and re-rendering: the names appear in both
+panel legends, all four percentile entries, the figure suptitle, the footer
+strip, the KPI subtitles, the table headers, the delta plot's axis label, and
+the exported columns (`P5_EV`, `P95_IC`, `Pct_exceed_EV_P95`, `EV_mean`, …).
+
+### Found by running the app, not by reading it
+
+Two GUI changes that came out of launching the built app rather than testing
+headless:
+
+- **The sidebar nav scrolls.** Adding a seventeenth entry put the column at
+  roughly the height of a laptop window, so Compare studies and History were
+  one short window away from being unreachable with nothing to say they
+  existed. The nav buttons now sit in a `QScrollArea`; on a tall enough window
+  no scrollbar appears at all.
+- **A `PlotPanel` canvas no longer forces its page wider than the viewport.**
+  A canvas reports its figure size as its preferred width, and the pages sit
+  in a `ScrollPage` with horizontal scrolling switched off — so a canvas wider
+  than the viewport is not scrolled to, it is cut. The two-panel AUC canvas is
+  12 inches wide, which made that reachable; `QSizePolicy.Ignored` on the
+  horizontal axis lets it shrink to whatever the page has.
+
+**One thing I changed and then put back.** Measuring `minimumSizeHint()` on
+freshly constructed, unlaid-out pages reported Preprocess at 1712 px and the
+window minimum at 1932 against a 1536 px screen, which looked like every
+screen being clipped at the right edge — and screenshots seemed to confirm it.
+Both were wrong: the screenshots were being taken by a DPI-unaware capture that
+grabbed only the top-left 1536x864 of a 1920x1080 display, and the size hints
+of unlaid-out widgets overstate the real minimum. Measured inside the running
+window, the Preprocess page is 1316 px in a 1316 px viewport with its
+horizontal scrollbar range at zero — nothing is clipped. The per-page scroll
+holders added on that false reading were reverted rather than left in.
+
+### A defect found in the data, not the code
+
+While validating the AUC view: **1.6 % of `FR_Fx_2` in
+`dtt/outputs/20260914_181847` and 2.6 % in `20260902_192335` sit frozen at
+≈ −451 daN** — a sensor rail that `blank_dead_runs` did not blank. It is large
+enough to set the P0.5 axis bound and make the channel's distribution
+unreadable. Not touched this round (both studies predate the current build and
+are part of the §10 stale-study debt), but it is a real finding and the
+dropout rule may need a second look.
+
+### Tests
+
+Three new files, 34 tests; 254 pass in total.
+
+- `tests/test_preview_reduction_symmetry.py` — identical data draws no gap,
+  the drawn gap equals the conditioning, the median-only alternative loses the
+  spike, dropouts still break both lines, the density ramp is symmetric, and
+  `_spikes` is scored at the full rate.
+- `tests/test_famos_allchannel_crosscheck.py` — canonical matching across
+  naming schemes, the raw/smo ambiguity of a bare column, moments registered
+  with the same stages as forces, `Latacc` separable into `FiltLP` and `smo`,
+  nothing dropped without a reason, and the quantum rule not punishing large
+  channels.
+- `tests/test_auc_comparison_and_labels.py` — two colours only, style not
+  colour for P5/P95, shared x-range, a readable legend, labels in every
+  legend/footer/column, renaming changing no number, dataset 1 as the
+  reference, and the full-data KDE keeping a bimodal trough.
+
+### Not touched
+
+No change to `famos/`, `dtt/preprocessing.py`, `dtt/pipeline.py`, the KDE,
+binning, percentile or exceedance mathematics, or anything
+`processed_data.csv` contains. Item 1 adds validation tooling only; item 2 is
+a display fix; items 3 and 4 are rendering and labelling.

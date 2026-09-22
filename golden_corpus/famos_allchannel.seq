@@ -1,0 +1,178 @@
+; ===========================================================================
+; ALL-CHANNEL CROSS-CHECK  --  every channel the recording holds
+; ---------------------------------------------------------------------------
+; famos_forces.seq covered six force channels, which is what the 2026-08-29
+; capture happened to contain. Two gaps were left standing in
+; MODULE1_STATUS.md as *inferred rather than measured*:
+;
+;   - the moment channels (Mx / My / Mz)
+;   - Latacc on a real recording (FiltLP + smo, confirmed on synthetic only)
+;
+; This sequence closes both, and covers every other conditioned channel in the
+; same pass. Score it with:
+;
+;   python tools/score_golden.py <export.csv> ^
+;          --raw-dir "raw data in .dat format\2006-08-25 09-10-46 (1)" ^
+;          --all-channels --report famos_allchannel.csv
+;
+; ---------------------------------------------------------------------------
+; PREREQUISITE -- load these from
+;   raw data in .dat format\2006-08-25 09-10-46 (1)\
+;
+; They are already FAMOS format, so File > Open > Data opens them directly
+; with no import assistant, and each arrives named from inside the file --
+; which is already the name used below, so there is nothing to rename.
+;
+;   FR_Fx_2   FR_Fy_2   FR_Fz_2   FR_Mx_2   FR_My_2   FR_Mz_2
+;   RR_Fx_1   RR_Fy_1   RR_Fz_1   RR_Mx_1   RR_My_1   RR_Mz_1
+;   AccelX    AccelY    Speed2D
+;
+; Do NOT load the "<name> - Copy.raw" duplicates. They are the same channel
+; under a name nothing can be matched back to, and the scorer skips them.
+;
+; ---------------------------------------------------------------------------
+; WHY EVERYTHING IS EXPORTED AT 100 Hz
+;
+; Every output below has been through red(x,10), so one export is one sample
+; rate and ~555,000 rows instead of 5.5 million. Three consequences, all good:
+;
+;   - the file lands near 400 MB rather than ~3 GB
+;   - nothing is written sparsely. FAMOS puts every channel on one shared
+;     x-axis, so mixing 1000 Hz and 100 Hz channels in one file writes the
+;     decimated ones as one value every tenth row with blanks between. The
+;     scorer compacts that back, but not mixing rates removes the trap.
+;   - it is literally the production recipe's own output: "cutdata =
+;     red(cutd, 10)" is the last line of the imc config file.
+;
+; Attribution survives the decimation. `_rawred` is the channel decimated with
+; no filtering at all, so it answers for the READER and for red()'s phase on
+; its own -- and it has no rounding excuse available, both sides being copies
+; of stored samples. If `_rawred` matches and `_red` does not, the fault is in
+; smo and nothing else. That is the same separation famos_forces.seq got by
+; exporting smo at full rate, at a tenth of the size.
+; ===========================================================================
+
+
+; ---------------------------------------------------------------------------
+; STAGE A1: forces and moments -- smo(0.1) then red(10)
+; ---------------------------------------------------------------------------
+; From the imc config file: FL_Fx = smo(FL_Fx1, 0.1), and the moments take the
+; identical line. No FiltLP -- that operator belongs to Latacc alone, and
+; running the accel chain on a force would validate something the pipeline
+; never does.
+
+FR_Fx_2_smo = smo(FR_Fx_2, 0.1)
+FR_Fy_2_smo = smo(FR_Fy_2, 0.1)
+FR_Fz_2_smo = smo(FR_Fz_2, 0.1)
+FR_Mx_2_smo = smo(FR_Mx_2, 0.1)
+FR_My_2_smo = smo(FR_My_2, 0.1)
+FR_Mz_2_smo = smo(FR_Mz_2, 0.1)
+
+RR_Fx_1_smo = smo(RR_Fx_1, 0.1)
+RR_Fy_1_smo = smo(RR_Fy_1, 0.1)
+RR_Fz_1_smo = smo(RR_Fz_1, 0.1)
+RR_Mx_1_smo = smo(RR_Mx_1, 0.1)
+RR_My_1_smo = smo(RR_My_1, 0.1)
+RR_Mz_1_smo = smo(RR_Mz_1, 0.1)
+
+FR_Fx_2_red = red(FR_Fx_2_smo, 10)
+FR_Fy_2_red = red(FR_Fy_2_smo, 10)
+FR_Fz_2_red = red(FR_Fz_2_smo, 10)
+FR_Mx_2_red = red(FR_Mx_2_smo, 10)
+FR_My_2_red = red(FR_My_2_smo, 10)
+FR_Mz_2_red = red(FR_Mz_2_smo, 10)
+
+RR_Fx_1_red = red(RR_Fx_1_smo, 10)
+RR_Fy_1_red = red(RR_Fy_1_smo, 10)
+RR_Fz_1_red = red(RR_Fz_1_smo, 10)
+RR_Mx_1_red = red(RR_Mx_1_smo, 10)
+RR_My_1_red = red(RR_My_1_smo, 10)
+RR_Mz_1_red = red(RR_Mz_1_smo, 10)
+
+
+; ---------------------------------------------------------------------------
+; STAGE A2: the same channels with NO filtering -- the reader, alone
+; ---------------------------------------------------------------------------
+; Both sides are copies of samples stored on disk, so a difference here is the
+; imc byte parsing: offsets, |RC5 event-record stripping, the leading and
+; trailing trim. Perfect operators on misread samples still give wrong
+; answers, so this is the row that matters most -- and the moments have never
+; had it.
+
+FR_Fx_2_rawred = red(FR_Fx_2, 10)
+FR_Fy_2_rawred = red(FR_Fy_2, 10)
+FR_Fz_2_rawred = red(FR_Fz_2, 10)
+FR_Mx_2_rawred = red(FR_Mx_2, 10)
+FR_My_2_rawred = red(FR_My_2, 10)
+FR_Mz_2_rawred = red(FR_Mz_2, 10)
+
+RR_Fx_1_rawred = red(RR_Fx_1, 10)
+RR_Fy_1_rawred = red(RR_Fy_1, 10)
+RR_Fz_1_rawred = red(RR_Fz_1, 10)
+RR_Mx_1_rawred = red(RR_Mx_1, 10)
+RR_My_1_rawred = red(RR_My_1, 10)
+RR_Mz_1_rawred = red(RR_Mz_1, 10)
+
+
+; ---------------------------------------------------------------------------
+; STAGE A3: Latacc -- the one channel that uses FiltLP
+; ---------------------------------------------------------------------------
+; Straight from the imc config file, Step 1 and Step 2:
+;
+;     Lat_acc    = AccelY
+;     Latacc_LPF = FiltLP(Lat_acc, 0, 0, 4, 5)      Butterworth, order 4, 5 Hz
+;     Latacc     = smo(Latacc_LPF, 0.5)
+;
+; Note the direction. `Latacc` is the OUTPUT of smoothing `Latacc_LPF`, not a
+; raw channel that `Latacc_LPF` came from -- the suffix reads the other way
+; round and has caused exactly that mistake before.
+;
+; `Latacc_LPF_red` is exported as well as `Latacc_red` so FiltLP and smo can
+; be told apart. Without it a disagreement could be either operator.
+
+Latacc_LPF = FiltLP(AccelY, 0, 0, 4, 5)
+Latacc = smo(Latacc_LPF, 0.5)
+
+Latacc_LPF_red = red(Latacc_LPF, 10)
+Latacc_red = red(Latacc, 10)
+Latacc_rawred = red(AccelY, 10)
+
+
+; ---------------------------------------------------------------------------
+; STAGE A4: Longacc and Vehicle_Speed -- smo(0.5), no filter
+; ---------------------------------------------------------------------------
+;     Long_acc      = AccelX
+;     Long_acc      = smo(Long_acc, 0.5)
+;     Speed_kmph    = Speed2D * 3.6
+;     Vehicle_Speed = smo(Speed_kmph, 0.5)
+;
+; Speed_kmph is derived here rather than loaded, even though the folder also
+; holds a recorded Speed_kmph.raw: the recipe's own definition is the one
+; under test, and scoring both paths would report one channel twice.
+
+Longacc = smo(AccelX, 0.5)
+Longacc_red = red(Longacc, 10)
+Longacc_rawred = red(AccelX, 10)
+
+Speed_kmph = Speed2D * 3.6
+Vehicle_Speed = smo(Speed_kmph, 0.5)
+Vehicle_Speed_red = red(Vehicle_Speed, 10)
+Vehicle_Speed_rawred = red(Speed_kmph, 10)
+
+
+; ===========================================================================
+; EXPORT -- see ALLCHANNEL_EXPORT.md for the dialog settings, which matter.
+;
+; Select these 31 variables and no others:
+;
+;   *_red      (24)   the production output for every force and moment
+;   *_rawred   (12)   the same channels unfiltered
+;   Latacc_LPF_red, Latacc_red, Latacc_rawred
+;   Longacc_red, Longacc_rawred
+;   Vehicle_Speed_red, Vehicle_Speed_rawred
+;
+; Do not include the un-decimated intermediates (*_smo, Latacc_LPF, Latacc,
+; Longacc, Vehicle_Speed). They are 1000 Hz, and putting them in the same file
+; forces every decimated channel to be written sparsely onto a 1000 Hz axis --
+; ten times the file for no extra evidence.
+; ===========================================================================

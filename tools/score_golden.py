@@ -20,7 +20,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 import numpy as np
 import pandas as pd
@@ -28,7 +28,13 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from famos import ops                                            # noqa: E402
-from dtt.ingestion.imc_reader import read_famos_all              # noqa: E402
+# The all-channel cross-check core lives in the library, not here: the GUI's
+# "Validate vs FAMOS..." action calls the same code, and the packaged app
+# bundles dtt/ but not tools/. This file keeps the CLI, the synthetic corpus
+# case table, and the exit status.
+from dtt.validation.famos_validation import (                    # noqa: E402,F401
+    crosscheck_all_channels, load_outputs, quantum_ratio, score,
+)
 
 FS = 1000.0                       # golden inputs are dx = 0.001 s
 INPUTS = Path("golden_corpus/famos_golden_inputs.csv")
@@ -128,134 +134,83 @@ def _register_wft(raw_path: Path) -> Dict[str, tuple]:
     }
 
 
-def load_outputs(path: Path, wanted=None) -> Dict[str, np.ndarray]:
-    """FAMOS results, from a directory of .dat files or a single CSV."""
-    out: Dict[str, np.ndarray] = {}
-    if path.is_dir():
-        for f in sorted(path.glob("*")):
-            if f.suffix.lower() not in (".dat", ".raw"):
-                continue
-            try:
-                chans = read_famos_all(f)
-            except Exception as exc:                             # noqa: BLE001
-                print(f"  ! could not read {f.name}: {exc}")
-                continue
-            # FAMOS writes every selected variable into one file, so a single
-            # .dat routinely holds the whole export.
-            for ch in chans:
-                if ch.data.size:
-                    # the name inside the file wins; the filename is a fallback
-                    out[(ch.raw_name or f.stem).strip()] = ch.data
-        return out
+def run_all_channels(args) -> int:
+    """CLI front end for :func:`crosscheck_all_channels`.
 
-    # A FAMOS ASCII export may carry metadata lines above the channel names, and
-    # the separator follows the machine's locale, so neither is assumed. The
-    # layout is settled from the first few lines only: a real force export runs
-    # to 1.2 GB, and probing that by re-parsing the whole file (let alone with
-    # the python engine) is not a thing that finishes.
-    head = []
-    with open(path, "r", encoding="latin1", errors="replace") as fh:
-        for _ in range(6):
-            line = fh.readline()
-            if not line:
-                break
-            head.append(line)
-
-    sep, hdr_row = ",", 0
-    for i, line in enumerate(head):
-        for cand in (",", ";", "	"):
-            names = [c.strip() for c in line.split(cand)]
-            if len(names) > 2 and sum(bool(n) for n in names) > 2:
-                sep, hdr_row = cand, i
-                break
-        else:
-            continue
-        break
-
-    # FAMOS writes a units row directly under the channel names. Left in, every
-    # channel shifts by one sample and the comparison silently misaligns.
-    skip = []
-    if len(head) > hdr_row + 1:
-        cells = [c.strip() for c in head[hdr_row + 1].split(sep)]
-        numeric = 0
-        for c in cells:
-            try:
-                float(c)
-                numeric += 1
-            except ValueError:
-                pass
-        if numeric == 0:
-            skip = [hdr_row + 1]
-
-    # FAMOS pads the header names out to a fixed width, and usecols matches the
-    # raw text, so the comparison has to strip before it decides.
-    use = (lambda c: str(c).strip() in wanted) if wanted else None
-    df = pd.read_csv(path, sep=sep, header=hdr_row, skiprows=skip,
-                     usecols=use, engine="c", low_memory=False)
-    df.columns = [str(c).strip() for c in df.columns]
-
-    for c in df.columns:
-        v = pd.to_numeric(df[c], errors="coerce").to_numpy(float)
-        # One wide export, one shared x-axis. A channel FAMOS decimated is
-        # written *sparsely* onto that axis -- for red(x,10), one value every
-        # tenth row with blanks between -- so the column has to be compacted
-        # back to the channel's own rate before it means anything. Comparing
-        # across the blanks reads as a total mismatch (r ~ 0) while the data is
-        # in fact identical, which is a very convincing way to be wrong.
-        finite = np.flatnonzero(np.isfinite(v))
-        if finite.size > 2:
-            step = np.diff(finite)
-            if step[0] > 1 and np.all(step == step[0]):
-                v = v[finite]                       # regular stride: compact
-            else:
-                v = v[:finite[-1] + 1]              # merely padded at the end
-        out[str(c).strip()] = v
-    return out
-
-
-def quantum_ratio(err: np.ndarray, ref: np.ndarray, sig_figs: int = 6) -> float:
-    """Worst error as a multiple of *that sample's* own export quantum.
-
-    Six significant figures is a different absolute precision at every
-    magnitude: 0.1 at 79,000 but 1.0 the moment a peak crosses 100,000. Judging
-    a channel by one quantum taken from its typical value therefore mis-scores
-    exactly the samples where the largest errors live -- the biggest ones. So
-    each sample is compared against the quantum at its own magnitude, and the
-    verdict is the worst of those ratios. At or below 0.5 means every sample
-    agrees to within half a stored digit, which is as close as the file can
-    record.
+    The measurement lives in the library so the GUI's "Validate vs FAMOS..."
+    action and this command cannot disagree about what they scored or what
+    counts as a pass. Everything here is printing and the exit status.
     """
-    m = np.isfinite(err) & np.isfinite(ref) & (np.abs(ref) > 0)
-    if not m.any():
-        return 0.0
-    q = 10.0 ** (np.floor(np.log10(np.abs(ref[m]))) - (sig_figs - 1))
-    return float(np.max(np.abs(err[m]) / q))
+    raw_dir = Path(args.raw_dir)
+    if not raw_dir.is_dir():
+        print(f"--raw-dir is not a folder: {raw_dir}")
+        return 2
+    cut = None
+    if args.cut:
+        a, _, b = args.cut.partition(":")
+        cut = (int(a or 0), int(b) if b else None)
 
+    export_paths = [Path(p) for p in args.outputs_list]
+    print(f"recording: {raw_dir}")
+    print(f"export   : {', '.join(str(p) for p in export_paths)}")
+    if cut:
+        print(f"cut      : samples {cut[0]}:{cut[1]}  (applied before "
+              f"conditioning, exactly as the sequence does)")
 
-def score(ours: np.ndarray, theirs: np.ndarray, skip: int = 0) -> dict:
-    """Max/mean absolute error and correlation over the comparable region."""
-    n = min(ours.size, theirs.size)
-    a, b = ours[:n], theirs[:n]
-    if skip:
-        # A causal filter's startup transient is real output, not error, but it
-        # swamps the comparison; report with and without so neither hides.
-        a, b = a[skip:n - skip or None], b[skip:n - skip or None]
-    m = np.isfinite(a) & np.isfinite(b)
-    if m.sum() < 2:
-        return {"n": 0, "max": float("nan"), "mean": float("nan"), "r": float("nan")}
-    a, b = a[m], b[m]
-    d = np.abs(a - b)
-    r = (float(np.corrcoef(a, b)[0, 1])
-         if np.std(a) > 0 and np.std(b) > 0 else float("nan"))
-    return {"n": int(a.size), "max": float(d.max()),
-            "mean": float(d.mean()), "r": r,
-            "qratio": quantum_ratio(a - b, b)}
+    res = crosscheck_all_channels(export_paths, raw_dir, cut=cut,
+                                  skip=args.skip, tol=args.tol,
+                                  report_path=args.report)
+    if not res.rows and not res.skipped:
+        print("No conditionable channels found in the recording.")
+        return 2
+
+    hdr = (f"{'channel':22s} {'stage':8s} {'n':>9s} {'max err':>12s} "
+           f"{'mean err':>12s} {'r':>12s} {'err/q':>7s} {'within':>8s}  verdict")
+    print()
+    print(hdr)
+    print("-" * len(hdr))
+    print("   err/q  = worst error as a fraction of that sample's own export "
+          "quantum; <= 0.5 is the rounding floor")
+    print("   within = % of samples inside that floor")
+    print()
+    for r in res.rows:
+        print(f"{r['channel']:22s} {r.get('stage', ''):8s} "
+              f"{r.get('n', 0):9d} {r.get('max_err', ''):>12s} "
+              f"{r.get('mean_err', ''):>12s} {r.get('r', ''):>12s} "
+              f"{r.get('err_q', ''):>7s} {r.get('within_pct', ''):>8s}  "
+              f"{r['verdict']}")
+
+    if res.direction:
+        print("\nLatacc / Latacc_LPF direction (both ways, measured):")
+        for d in res.direction:
+            print(f"   {d}")
+
+    print("-" * len(hdr))
+    print(f"{res.n_ok} at or below the export's precision, {res.n_miss} above, "
+          f"{len(res.not_found)} not in the export, "
+          f"{len(res.skipped)} channels not registered")
+    lines = res.not_compared_lines()
+    if lines:
+        print("\nNot compared, and why:")
+        for line in lines:
+            print(f"   {line}")
+
+    if res.report_path:
+        print(f"\nreport: {res.report_path}  and  "
+              f"{res.report_path.with_suffix('.md')}")
+    return 1 if res.n_miss else 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("outputs", help="FAMOS results: a directory of .dat, or a .csv")
-    ap.add_argument("--inputs", default=str(INPUTS))
+    ap.add_argument("outputs", nargs="+",
+                    help="FAMOS results: a directory of .dat, or one or more "
+                         ".csv exports (the 1000 Hz and 100 Hz files of an "
+                         "all-channel run are usually separate)")
+    ap.add_argument("--inputs", default=None,
+                    help=f"synthetic corpus inputs (default {INPUTS}); only "
+                         f"needed for the gc_* operator corpus, and not read "
+                         f"at all by --all-channels")
     ap.add_argument("--skip", type=int, default=3000,
                     help="samples to drop at each end for the settled score")
     ap.add_argument("--tol", type=float, default=1e-4,
@@ -266,7 +221,28 @@ def main() -> int:
     ap.add_argument("--raw", default=None,
                     help="the .raw file Stage 4 was run on, e.g. AccelY.raw; "
                          "scores our reader and operators against FAMOS end to end")
+    ap.add_argument("--all-channels", action="store_true",
+                    help="score EVERY channel in --raw-dir at every recipe "
+                         "stage, matched canonically to the export, instead "
+                         "of the synthetic corpus and the six named forces")
+    ap.add_argument("--cut", default=None, metavar="A:B",
+                    help="sample range the sequence's own Cut() used, e.g. "
+                         "0:600000 — applied before conditioning on our side "
+                         "too, so both sides' filter start-up begins on the "
+                         "same sample")
+    ap.add_argument("--report", default=None, metavar="PATH.csv",
+                    help="write the per-channel table to PATH.csv and the "
+                         "reasons alongside it as PATH.md")
     args = ap.parse_args()
+    args.outputs_list = list(args.outputs)
+    args.outputs = args.outputs_list[0]
+
+    if args.all_channels:
+        if not args.raw_dir:
+            print("--all-channels needs --raw-dir: the recording is what the "
+                  "channel list and the comparison both come from")
+            return 2
+        return run_all_channels(args)
 
     _register()
     wft = _register_wft(Path(args.raw)) if args.raw else {}
@@ -279,9 +255,22 @@ def main() -> int:
             print(f"No WFT .raw files found in {args.raw_dir}")
         CASES.update(forces)
 
-    src = pd.read_csv(args.inputs)
-    inputs = {c: pd.to_numeric(src[c], errors="coerce").to_numpy(float)
-              for c in src.columns}
+    # The synthetic corpus is 15 MB and gitignored, so it is routinely absent
+    # on a machine that only wants the real-recording stages. Reading it
+    # unconditionally made those runs die on a file they never needed.
+    inputs: Dict[str, np.ndarray] = {}
+    inputs_path = Path(args.inputs) if args.inputs else INPUTS
+    if inputs_path.exists():
+        src = pd.read_csv(inputs_path)
+        inputs = {c: pd.to_numeric(src[c], errors="coerce").to_numpy(float)
+                  for c in src.columns}
+    elif args.inputs:
+        print(f"--inputs not found: {inputs_path}")
+        return 2
+    else:
+        print(f"note: {INPUTS} absent — the gc_* corpus stages will be "
+              f"reported as not exported. Run tools/make_golden_inputs.py to "
+              f"regenerate it.")
     got = load_outputs(Path(args.outputs), wanted=set(CASES))
     if not got:
         print(f"No FAMOS channels found in {args.outputs}")
