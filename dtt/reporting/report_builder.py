@@ -1,7 +1,7 @@
 import datetime
 import logging
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 import matplotlib
 matplotlib.use("Agg")
@@ -68,18 +68,38 @@ def _add_title(slide, title: str, subtitle: str = "") -> None:
                      font_size=14, color=_SEC_RGB, align=PP_ALIGN.LEFT)
 
 
-def _insert_image(slide, img_path: Path, left, top, width, height) -> None:
-    if img_path.exists():
-        slide.shapes.add_picture(str(img_path), left, top, width, height)
+def _insert_image_or_message(slide, img_path: Path, left, top, width, height,
+                             reason: str = "") -> bool:
+    """Insert ``img_path`` if it exists, is non-empty, and decodes as an
+    image; otherwise leave an explanatory textbox in its place instead of a
+    bare title with nothing under it. Returns whether the image was inserted."""
+    if img_path.exists() and img_path.stat().st_size > 0:
+        try:
+            slide.shapes.add_picture(str(img_path), left, top, width, height)
+            return True
+        except Exception as exc:
+            logger.warning("Image could not be opened, skipping: %s (%s)", img_path.name, exc)
+            msg = f"Not available: {img_path.name} could not be opened ({exc})."
     else:
         logger.warning("Image not found, skipping: %s", img_path.name)
+        msg = reason or f"Not available: {img_path.name} was not generated for this study."
+    _add_textbox(slide, msg, left, top, width, min(height, Emu(500000)),
+                font_size=12, color=_SEC_RGB)
+    return False
 
 
-def _add_stats_table(slide, stats: Dict, left, top, width, height) -> None:
-    channels = [ch for ch in MANDATORY_CHANNELS if ch in stats]
+def _add_stats_table(slide, stats: Dict, channels: List[str], left, top, width, height) -> None:
+    """``channels`` is this study's own mandatory-channel list
+    (``config.run_channels.mandatory_channels``, generalized axle names like
+    ``FR_Fx_2``) -- never the legacy ``FL_Fx``-style constant, which will
+    never match a real study's stats keys."""
+    channels = [ch for ch in channels if ch in stats]
     if not channels:
+        _add_textbox(slide, "Not available: no statistics could be matched to "
+                            "this study's channels.", left, top, width,
+                    Emu(400000), font_size=13, color=_SEC_RGB)
         return
-    cols    = ["Channel", "Mean", "Median", "Std", "Min", "Max"] + [f"P{p}" for p in PERCENTILES]
+    cols    = ["Channel", "Count", "Mean", "Median", "Std", "Min", "Max"] + [f"P{p}" for p in PERCENTILES]
     n_rows  = len(channels) + 1
     n_cols  = len(cols)
     table   = slide.shapes.add_table(n_rows, n_cols, left, top, width, height).table
@@ -97,17 +117,52 @@ def _add_stats_table(slide, stats: Dict, left, top, width, height) -> None:
 
     for ri, ch in enumerate(channels, start=1):
         s = stats[ch]
-        row_vals = [ch, s["mean"], s["median"], s["std"], s["min"], s["max"]] + \
-                   [s[f"P{p}"] for p in PERCENTILES]
+        row_vals = [ch, s.get("count"), s.get("mean"), s.get("median"), s.get("std"),
+                   s.get("min"), s.get("max")] + [s.get(f"P{p}") for p in PERCENTILES]
         for ci, val in enumerate(row_vals):
             cell = table.cell(ri, ci)
-            cell.text = str(val) if ci == 0 else f"{val:.2f}"
+            if ci == 0:
+                cell.text = str(val)
+            elif val is None:
+                cell.text = "N/A"
+            elif ci == 1:
+                cell.text = str(int(val))
+            else:
+                cell.text = f"{val:.2f}"
             cell.fill.solid()
             cell.fill.fore_color.rgb = _BG_RGB if ri % 2 == 0 else RGBColor(0x0A, 0x25, 0x40)
             for para in cell.text_frame.paragraphs:
                 for run in para.runs:
                     run.font.color.rgb = _TEXT_RGB
                     run.font.size      = Pt(8)
+
+
+def _grid_positions(n: int, left, top, width, height, max_cols: int = 2):
+    """``n`` evenly-sized (left, top, width, height) cells, up to
+    ``max_cols`` per row. Generic replacement for a hardcoded 2x2 quad --
+    a fixed 4-slot grid silently drops any wheel past the 4th on a 6-wheel
+    truck, since zip() truncates to the shorter of the two sequences."""
+    if n <= 0:
+        return []
+    cols = min(max_cols, n)
+    rows = -(-n // cols)  # ceil division
+    cw, ch = width // cols, height // rows
+    return [(left + (i % cols) * cw, top + (i // cols) * ch, cw, ch) for i in range(n)]
+
+
+def _audit_slides(prs: Presentation) -> List[str]:
+    """Slides that ended up with only a title and nothing else -- should be
+    impossible now that every image slot falls back to an explanatory
+    textbox via :func:`_insert_image_or_message`, so this is a regression
+    guard, not expected to ever fire."""
+    warnings = []
+    for i, slide in enumerate(prs.slides, start=1):
+        n_pics   = sum(1 for sh in slide.shapes if sh.shape_type == 13)
+        n_tables = sum(1 for sh in slide.shapes if sh.has_table)
+        n_text   = sum(1 for sh in slide.shapes if sh.has_text_frame and sh.text_frame.text.strip())
+        if n_pics == 0 and n_tables == 0 and n_text <= 1:
+            warnings.append(f"slide {i} has only a title, no content and no explanation")
+    return warnings
 
 
 def _add_validation_table(slide, vr: ValidationReport, left, top, width, height) -> None:
@@ -162,6 +217,17 @@ def build_report(
     blank_layout = prs.slide_layouts[6]
     figs = config.figures_dir
 
+    # This study's own axle-generalized channel model, not the legacy fixed
+    # FL/FR/RL/RR constants -- a recording with only FR/RR (or a 6-wheel
+    # truck) must get exactly the slides its own data supports, matching
+    # every analysis module upstream (dtt.analysis.statistics/histograms/
+    # heatmaps/boxplots/rainflow already key off config.run_channels the
+    # same way; report_builder was the one module still on the old constants).
+    rc = config.run_channels
+    wheel_groups = rc.wheel_groups if rc is not None else WHEEL_GROUPS
+    stat_channels = rc.mandatory_channels if rc is not None else MANDATORY_CHANNELS
+    wheels = list(wheel_groups.keys())
+
     W = Emu(PPTX_SLIDE_WIDTH_EMU)
     H = Emu(PPTX_SLIDE_HEIGHT_EMU)
     L = Emu(457200)
@@ -213,10 +279,13 @@ def build_report(
     slide3 = prs.slides.add_slide(blank_layout)
     _set_slide_bg(slide3, prs)
     _add_title(slide3, "Statistical Summary  –  P80 / P90 / P95")
-    if stats:
-        _add_stats_table(slide3, stats, L, T, IMG_W, IMG_H)
+    _add_stats_table(slide3, stats, stat_channels, L, T, IMG_W, IMG_H)
 
-    wheels = list(WHEEL_GROUPS.keys())
+    slide_sev = prs.slides.add_slide(blank_layout)
+    _set_slide_bg(slide_sev, prs)
+    _add_title(slide_sev, "Load Severity  –  Gx / Gy / Gxy / DLC")
+    _insert_image_or_message(slide_sev, figs / "severity_table.png", L, T, IMG_W, IMG_H)
+
     for wheel in wheels:
         slide = prs.slides.add_slide(blank_layout)
         _set_slide_bg(slide, prs)
@@ -224,8 +293,8 @@ def build_report(
         img_dist = figs / f"hist_distance_{wheel}.png"
         img_pct  = figs / f"hist_percentage_{wheel}.png"
         half_h   = (H - Emu(1400000)) // 2
-        _insert_image(slide, img_dist, L, T, IMG_W, half_h)
-        _insert_image(slide, img_pct, L, T + half_h + Emu(100000), IMG_W, half_h)
+        _insert_image_or_message(slide, img_dist, L, T, IMG_W, half_h)
+        _insert_image_or_message(slide, img_pct, L, T + half_h + Emu(100000), IMG_W, half_h)
 
     for hm_name, hm_title in [
         ("heatmap_fx_fy_all",  "Heatmap  –  Fx vs Fy  (All Wheels)"),
@@ -235,30 +304,42 @@ def build_report(
         slide = prs.slides.add_slide(blank_layout)
         _set_slide_bg(slide, prs)
         _add_title(slide, hm_title)
-        _insert_image(slide, figs / f"{hm_name}.png", L, T, IMG_W, IMG_H)
+        _insert_image_or_message(slide, figs / f"{hm_name}.png", L, T, IMG_W, IMG_H)
 
     slide_hex = prs.slides.add_slide(blank_layout)
     _set_slide_bg(slide_hex, prs)
     _add_title(slide_hex, "Hexbin Density  –  Fy vs Fx  (All Wheels)")
-    quad_w = IMG_W // 2
-    quad_h = IMG_H // 2
-    positions = [(L, T), (L + quad_w, T), (L, T + quad_h), (L + quad_w, T + quad_h)]
-    for (lf, tf), wheel in zip(positions, wheels):
-        _insert_image(slide_hex, figs / f"heatmap_hexbin_{wheel}.png", lf, tf, quad_w, quad_h)
+    for (lf, tf, gw, gh), wheel in zip(_grid_positions(len(wheels), L, T, IMG_W, IMG_H), wheels):
+        _insert_image_or_message(slide_hex, figs / f"heatmap_hexbin_{wheel}.png", lf, tf, gw, gh)
 
     slide_box = prs.slides.add_slide(blank_layout)
     _set_slide_bg(slide_box, prs)
     _add_title(slide_box, "Boxplots  –  Force Distribution (Fx / Fy / Fz)")
     third_w = IMG_W // 3
     for i, ft in enumerate(["Fx", "Fy", "Fz"]):
-        _insert_image(slide_box, figs / f"boxplot_{ft}.png",
-                      L + i * third_w, T, third_w, IMG_H)
+        _insert_image_or_message(slide_box, figs / f"boxplot_{ft}.png",
+                                 L + i * third_w, T, third_w, IMG_H)
 
     for wheel in wheels:
         slide = prs.slides.add_slide(blank_layout)
         _set_slide_bg(slide, prs)
         _add_title(slide, f"Rainflow  –  {wheel}  (From-To Matrix + Range Distribution)")
-        _insert_image(slide, figs / f"rainflow_{wheel}.png", L, T, IMG_W, IMG_H)
+        _insert_image_or_message(slide, figs / f"rainflow_{wheel}.png", L, T, IMG_W, IMG_H)
+
+    for wheel in wheels:
+        slide = prs.slides.add_slide(blank_layout)
+        _set_slide_bg(slide, prs)
+        _add_title(slide, f"AUC Distribution  –  {wheel}  (Distance & Percentage)")
+        half_h = (H - Emu(1400000)) // 2
+        _insert_image_or_message(slide, figs / f"auc_distance_{wheel}.png", L, T, IMG_W, half_h)
+        _insert_image_or_message(slide, figs / f"auc_percentage_{wheel}.png",
+                                 L, T + half_h + Emu(100000), IMG_W, half_h)
+
+    for wheel in wheels:
+        slide = prs.slides.add_slide(blank_layout)
+        _set_slide_bg(slide, prs)
+        _add_title(slide, f"Welch PSD  –  {wheel}")
+        _insert_image_or_message(slide, figs / f"psd_{wheel}.png", L, T, IMG_W, IMG_H)
 
     slide_end = prs.slides.add_slide(blank_layout)
     _set_slide_bg(slide_end, prs)
@@ -272,7 +353,7 @@ def build_report(
             "*** ANALYSIS-ONLY MODE — no fresh preprocessing/validation pass. "
             "Generated from an existing processed_data.csv. ***\n\n"
         )
-    conclusions += f"Channels validated:   {len(present_ch)} / {len(MANDATORY_CHANNELS)} mandatory\n"
+    conclusions += f"Channels validated:   {len(present_ch)} / {len(stat_channels)} mandatory\n"
     if missing_ch:
         conclusions += f"Missing channels:     {', '.join(missing_ch)}\n"
     conclusions += f"Total records:        {metadata.get('rows', 0):,}\n"
@@ -286,7 +367,15 @@ def build_report(
     _add_textbox(slide_end, conclusions, L, T, IMG_W, IMG_H, font_size=13, color=_TEXT_RGB)
 
     date_str  = datetime.datetime.now().strftime("%Y%m%d")
-    out_fname = config.run_output_dir / f"WFT_Report_{config.vehicle_name}_{date_str}.pptx"
+    out_fname = (config.run_output_dir / f"WFT_Report_{config.vehicle_name}_{date_str}.pptx").resolve()
     prs.save(str(out_fname))
-    logger.info("PowerPoint report saved: %s", out_fname.name)
+
+    blank_slides = _audit_slides(prs)
+    if blank_slides:
+        logger.warning("Report has %d title-only slide(s) with no content or "
+                       "explanation: %s", len(blank_slides), "; ".join(blank_slides))
+    logger.info("PowerPoint report saved: %s  (%d slides, %d wheel(s): %s, "
+               "stats for %d/%d channels)",
+               out_fname, len(prs.slides), len(wheels), ", ".join(wheels),
+               len([ch for ch in stat_channels if ch in stats]), len(stat_channels))
     return out_fname
