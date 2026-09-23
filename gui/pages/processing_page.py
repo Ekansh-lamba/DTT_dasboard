@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 
 from gui import theme
 from gui.pages.base_page import BasePage
-from gui.widgets.common import SectionTitle, Card
+from gui.widgets.common import SectionTitle, Card, _rgba
 from gui.workers.pipeline_worker import STAGES
 
 
@@ -137,7 +137,7 @@ class ProcessingPage(BasePage):
         self._tick.start()
         self.badge.setText("Running")
         self.badge.setStyleSheet(
-            f"background:{theme.ORANGE}33; color:{theme.ORANGE};"
+            f"background:{_rgba(theme.ORANGE, 0.20)}; color:{theme.ORANGE};"
             f"border-radius:10px; padding:4px 12px; font-weight:600;")
         self.cancel_btn.setEnabled(True)
         self.append_log(f"Starting analysis: {study_name or '(timestamp study)'}")
@@ -174,7 +174,7 @@ class ProcessingPage(BasePage):
             self.progress.setValue(self.progress.maximum())
             self.badge.setText("Complete")
             self.badge.setStyleSheet(
-                f"background:{theme.SUCCESS}33; color:{theme.SUCCESS};"
+                f"background:{_rgba(theme.SUCCESS, 0.20)}; color:{theme.SUCCESS};"
                 f"border-radius:10px; padding:4px 12px; font-weight:600;")
             self.append_log(f"✔ Finished — study '{info}'")
         else:
@@ -183,7 +183,7 @@ class ProcessingPage(BasePage):
                     row.set_state("error")
             self.badge.setText("Error")
             self.badge.setStyleSheet(
-                f"background:{theme.DANGER}33; color:{theme.DANGER};"
+                f"background:{_rgba(theme.DANGER, 0.20)}; color:{theme.DANGER};"
                 f"border-radius:10px; padding:4px 12px; font-weight:600;")
             self.append_log(f"✘ {info}")
 

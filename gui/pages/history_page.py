@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 
 from gui import theme
 from gui.pages.base_page import BasePage
-from gui.widgets.common import SectionTitle, Card, status_badge
+from gui.widgets.common import SectionTitle, Card, status_badge, _rgba
 
 
 class HistoryPage(BasePage):
@@ -81,7 +81,7 @@ class HistoryPage(BasePage):
             delete_btn = QPushButton("Delete")
             delete_btn.setObjectName("Secondary")
             delete_btn.setStyleSheet(
-                f"color:{theme.DANGER}; border-color:{theme.DANGER}55;")
+                f"color:{theme.DANGER}; border-color:{_rgba(theme.DANGER, 0.33)};")
             delete_btn.clicked.connect(lambda _=False, n=s.name: self._delete_study(n))
             hl.addWidget(open_btn)
             hl.addWidget(folder_btn)

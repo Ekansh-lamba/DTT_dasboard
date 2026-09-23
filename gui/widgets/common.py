@@ -64,6 +64,21 @@ class KpiCard(QFrame):
             self._sub.setText(sub)
 
 
+def _rgba(hex_color: str, alpha: float) -> str:
+    """``rgba(r, g, b, a)`` for a ``#RRGGBB`` string.
+
+    Qt stylesheets accept an 8-digit hex but read it as ``#AARRGGBB``, which
+    is the opposite end from where CSS puts the alpha — so appending two hex
+    digits to a colour silently produces a different colour, not a
+    transparent one.
+    """
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return hex_color
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r}, {g}, {b}, {alpha:.2f})"
+
+
 class Badge(QLabel):
     """Small status pill."""
 
@@ -73,8 +88,15 @@ class Badge(QLabel):
 
     def set_status(self, text: str, color: str = theme.ACCENT) -> None:
         self.setText(text)
+        # rgba(), not an 8-digit hex. `f"{color}22"` reads as "the colour at
+        # 13% alpha" and is not what Qt does with it: Qt parses a 9-character
+        # hex as #AARRGGBB, so "#6A6A6A" + "22" became alpha 0x6A over
+        # RGB(0x6A, 0x6A, 0x22) -- an olive that has nothing to do with the
+        # status colour. Every badge in the app was tinted by its own colour
+        # shifted one byte left.
         self.setStyleSheet(
-            f"background:{color}22; color:{color}; border:1px solid {color}55;"
+            f"background:{_rgba(color, 0.13)}; color:{color};"
+            f"border:1px solid {_rgba(color, 0.33)};"
             f"border-radius:10px; padding:3px 10px; font-size:11px; font-weight:600;"
         )
 

@@ -1,22 +1,37 @@
 """Centralised dark theme: colour palette + global Qt stylesheet.
 
-Palette mirrors the engineering colours already used by the backend plots
-(`dtt/config.py` PLOT_COLORS) so the GUI and the generated figures feel like
-one product.
+**Neutral dark greys, chosen deliberately (2026-09-23, user preference).** The
+palette used to be a navy set mirroring `dtt/config.py` PLOT_COLORS so the GUI
+and the generated report figures felt like one product. That link is now
+broken on purpose: the app is grey, the report figures are still navy. If the
+two are ever to match again, PLOT_COLORS is the other half of the job.
+
+The greys below are sampled from the look that was preferred — Qt's own dark
+default, which the app showed once when a test harness constructed the window
+without applying this stylesheet at all. Flat surfaces, low contrast between
+panel and background, and the colour carried by the accents rather than by the
+chrome. Reproduced here as a real theme rather than as the absence of one.
+
+Accents are unchanged: cyan for selection and primary actions, Apollo orange,
+and the semantic success/warning/danger set. Those read the same on grey as on
+navy, and moving them would have changed what the colours *mean* rather than
+how the app looks.
 """
 
 from __future__ import annotations
 
-# Palette
-BG          = "#0D1B2A"   # app background
-SURFACE     = "#13243A"   # cards / panels
-SURFACE_2   = "#1B3A5C"   # elevated panels, table headers
-BORDER      = "#234263"
-ENTRY_BG    = "#0A2540"
+# Palette — sampled greys, with a little hierarchy kept between the layers so
+# cards still read as cards. Qt's default was flat #1E1E1E everywhere, which
+# looks clean but leaves a card and the page behind it indistinguishable.
+BG          = "#171717"   # app background — a shade under the surfaces
+SURFACE     = "#1E1E1E"   # cards / panels / sidebar / topbar
+SURFACE_2   = "#2B2B2B"   # elevated panels, table headers, inputs
+BORDER      = "#2E2E2E"
+ENTRY_BG    = "#141414"   # recessed: entry fields, plot canvas backgrounds
 
-TEXT        = "#E6F1FF"
-TEXT_MUTED  = "#90A4C4"
-TEXT_FAINT  = "#5C7494"
+TEXT        = "#E8E8E8"   # neutral, not the old blue-tinted white
+TEXT_MUTED  = "#9A9A9A"
+TEXT_FAINT  = "#6A6A6A"
 
 ACCENT      = "#00B4D8"   # primary action / selection
 ACCENT_DK   = "#0086A8"
@@ -170,10 +185,10 @@ def stylesheet() -> str:
 
     /* ── Misc ────────────────────────────────────────────── */
     QPlainTextEdit, QTextEdit {{
-        background: #06121F;
+        background: {ENTRY_BG};
         border: 1px solid {BORDER};
         border-radius: 10px;
-        color: #C7E8F5;
+        color: {TEXT};
         font-family: 'JetBrains Mono', 'Consolas', monospace;
         font-size: 12px;
     }}
