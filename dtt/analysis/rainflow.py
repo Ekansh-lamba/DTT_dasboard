@@ -22,6 +22,7 @@ from dtt.config import (
     RunConfig,
 )
 from dtt.analysis.plot_style import draw_histogram
+from dtt.channel_names import display_name
 # The range-distribution row (ax2) uses the Histograms page's light theme;
 # the from-to matrix (ax1) stays on this module's own dark _style_ax below,
 # unchanged. Reused, not duplicated, so the two pages can't silently drift.
@@ -178,7 +179,7 @@ def generate_rainflow(df: pd.DataFrame, config: RunConfig) -> None:
             mat, edges = _build_fromto_matrix(cycles, RAINFLOW_BINS, shared_edges)
 
             ax1 = axes[0][col_idx]
-            _draw_fromto_ax(ax1, mat, edges, f"{ch}  –  From-To Matrix", col)
+            _draw_fromto_ax(ax1, mat, edges, f"{display_name(ch)}  –  From-To Matrix", col)
 
             rng_arr = np.array([c[0] for c in cycles]) if cycles else np.array([0.0])
             cnt_arr = np.array([c[2] for c in cycles]) if cycles else np.array([1.0])
@@ -200,7 +201,7 @@ def generate_rainflow(df: pd.DataFrame, config: RunConfig) -> None:
                                bar_is_density=True, boundary=0.0, style="soft")
                 ax2.axvline(p95_val, color=LIGHT_TEXT_PRI, linewidth=1.4, linestyle="--",
                             label=f"P95: {p95_val:.0f} daN")
-            ax2.set_title(f"{ch}  –  Range Distribution", color=LIGHT_TEXT_PRI, fontsize=8, fontweight="bold")
+            ax2.set_title(f"{display_name(ch)}  –  Range Distribution", color=LIGHT_TEXT_PRI, fontsize=8, fontweight="bold")
             ax2.set_xlabel("Range (daN)", color=LIGHT_TEXT_SEC, fontsize=7)
             ax2.set_ylabel("Density", color=LIGHT_TEXT_SEC, fontsize=7)
 

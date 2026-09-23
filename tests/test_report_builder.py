@@ -144,7 +144,11 @@ def test_stats_table_uses_this_studys_channel_names_not_legacy_constant(tmp_path
     assert len(tables) == 1
     table = tables[0].table
     assert len(table.rows) == 1 + 6   # header + 6 real channels
-    assert table.cell(1, 0).text == "FR_Fx_2"
+    # rows are this study's channels (FR_Fx_2 ...), shown under the one
+    # naming convention: the standard name, or the user's display name
+    from dtt.channel_names import display_name
+    assert table.cell(1, 0).text == display_name("FR_Fx_2")
+    assert display_name("FR_Fx_2", names={}) == "FR_Fx"
 
 
 def test_stats_table_handles_missing_fields_safely(tmp_path):
@@ -180,7 +184,9 @@ def test_full_report_stats_slide_is_populated_for_fr_rr_data(tmp_path):
     cfg = _fr_rr_config(tmp_path)
     out = build_report(cfg, _fr_rr_validation_report(), _fr_rr_stats(), _fr_rr_metadata())
     prs = Presentation(str(out))
-    stats_slide = prs.slides[2]   # slide 1: overview, 2: validation, 3: stats
+    titles = _slide_titles(out)
+    stats_slide = prs.slides[next(i for i, t in enumerate(titles)
+                                  if t.startswith("Statistical Summary"))]
     tables = [sh for sh in stats_slide.shapes if sh.has_table]
     assert len(tables) == 1
     assert len(tables[0].table.rows) == 1 + 6
@@ -263,3 +269,24 @@ def test_no_title_only_blank_slides_with_missing_figures_and_partial_wheels(tmp_
     out = build_report(cfg, _fr_rr_validation_report(), _fr_rr_stats(), _fr_rr_metadata())
     prs = Presentation(str(out))
     assert _audit_slides(prs) == []
+
+
+# ------------------------------------------------------- Apollo template
+
+def test_report_uses_the_apollo_template_layouts(tmp_path):
+    """Cover, dividers and content slides come from the charter deck's own
+    layouts, 16:9, with no empty "Click to add" placeholders left behind."""
+    from dtt.reporting.report_builder import (TEMPLATE, _LAYOUT_CONTENT,
+                                              _LAYOUT_COVER, _LAYOUT_DIVIDER)
+    assert TEMPLATE.exists()
+    cfg = _fr_rr_config(tmp_path)
+    out = build_report(cfg, _fr_rr_validation_report(), _fr_rr_stats(), _fr_rr_metadata())
+    prs = Presentation(str(out))
+    assert (prs.slide_width, prs.slide_height) == (12192000, 6858000)
+    layouts = [s.slide_layout.name for s in prs.slides]
+    assert layouts[0] == _LAYOUT_COVER
+    assert layouts.count(_LAYOUT_DIVIDER) == 3
+    assert layouts.count(_LAYOUT_CONTENT) == len(layouts) - 4
+    for i, slide in enumerate(prs.slides, start=1):
+        for ph in slide.placeholders:
+            assert ph.has_text_frame and ph.text_frame.text.strip(), (i, ph.name)

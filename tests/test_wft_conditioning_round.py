@@ -66,6 +66,24 @@ def test_outlier_blanking_reaches_every_wft_force_channel(tmp_path):
         assert ch in report.outlier_flags_per_channel
 
 
+def test_real_peaks_outside_p1_p99_are_kept(tmp_path):
+    """Blanking the P1/P99 tails removed 2 % of every force channel -- its
+    highest and lowest real loads -- and flat-topped the conditioned trace.
+    Only samples far past the band are artefacts."""
+    rng = np.random.default_rng(5)
+    t = np.arange(20_000) / 100.0
+    fy = 40 * np.sin(t / 3) + rng.normal(0, 8, t.size)     # real road load
+    fy[5_000] = 5_000.0                                    # DAQ glitch
+    df = pd.DataFrame({"Time": t, "FL_Fy": fy})
+    out, report = sanitize(df, RunConfig(output_dir=tmp_path))
+    kept = out["FL_Fy"]
+    assert np.isnan(kept.iloc[5_000]), "the glitch must still be removed"
+    assert report.outlier_flags_per_channel.get("FL_Fy") == 1
+    real = np.delete(fy, 5_000)
+    assert kept.max() == pytest.approx(np.sort(real)[-1])
+    assert kept.min() == pytest.approx(real.min())
+
+
 # --------------------------------------------------- NaN gap fill (defect 3)
 
 def test_short_gap_is_interpolated_linearly_not_held_flat():

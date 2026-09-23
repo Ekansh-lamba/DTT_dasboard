@@ -18,6 +18,7 @@ from dtt.config import (
     RunConfig,
 )
 from dtt.analysis.plot_style import draw_histogram
+from dtt.channel_names import display_name
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +233,7 @@ def _plot_single_histogram(ax, vals, weights, bins, xlim, ch, mode, total_m, col
         ax.set_xlim(xlim)
     ax.set_xlabel("Force (daN)", fontsize=LABEL_FONTSIZE, fontweight="bold", color=TEXT_SEC)
     ax.set_ylabel(ylabel, fontsize=LABEL_FONTSIZE, fontweight="bold", color=TEXT_SEC)
-    ax.set_title(f"{ch}  [{mode}]  {total_label}", fontsize=TITLE_FONTSIZE,
+    ax.set_title(f"{display_name(ch)}  [{mode}]  {total_label}", fontsize=TITLE_FONTSIZE,
                 fontweight="bold", color=TEXT_PRI)
 
 

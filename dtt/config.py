@@ -103,6 +103,11 @@ SPEED_COLUMN:    str = "Vehicle_Speed"
 SPEED_CANDIDATES: List[str] = [
     "Vehicle_Speed", "VehicleSpeed", "Speed",
     "Velocity_Speed2D", "Vehicle Speed", "VEHICLE_SPEED",
+    # GPS/IMU speed as the imc exports name it. Tried after the vehicle speed;
+    # _speed_as_mps rejects a dead or implausible one with the reason, so a
+    # recording whose Vehicle_Speed is all zero still gets distance weighting
+    # from a live GPS speed instead of silently falling back to sample count.
+    "GPS.speed", "Speed2D",
 ]
 
 EXCLUDE_KEYWORDS: List[str] = [
@@ -115,6 +120,10 @@ N_TO_DAN_FACTOR:    float = 10.0
 
 OUTLIER_LOW_PCTILE:  float = 1.0
 OUTLIER_HIGH_PCTILE: float = 99.0
+# How far past the P1..P99 band a sample must sit, in band-widths, to be
+# blanked as an artefact. 0 would blank the band's own 2 % tails -- the
+# highest and lowest real loads of every force channel.
+OUTLIER_FENCE_WIDTHS: float = 1.0
 
 GPS_SPIKE_THRESHOLD_M: float = 200.0
 

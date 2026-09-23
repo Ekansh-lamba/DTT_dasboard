@@ -24,6 +24,7 @@ from dtt.config import (
     RunConfig,
 )
 from dtt.spectral import welch_psd
+from dtt.channel_names import display_name
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ def generate_psd(df: pd.DataFrame, config: RunConfig) -> None:
             series = pd.to_numeric(df[ch], errors="coerce").dropna().values
             freq, psd = welch_psd(series, fs)
             ax.semilogy(freq, psd, color=col, linewidth=1.3)
-            ax.set_title(ch, color=col, fontsize=9, fontweight="bold")
+            ax.set_title(display_name(ch), color=col, fontsize=9, fontweight="bold")
             ax.set_xlabel("Frequency (Hz)", color=TEXT_SEC, fontsize=8)
             ax.set_ylabel("PSD (daN²/Hz)", color=TEXT_SEC, fontsize=8)
             ax.set_xlim(0, fs / 2.0)

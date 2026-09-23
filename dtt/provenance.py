@@ -52,6 +52,12 @@ def build_provenance(config, metadata: Dict[str, Any]) -> Dict[str, Any]:
         "remove_stops": bool(getattr(config, "remove_stops", False)),
         "filter_order": getattr(config, "filter_order", None),
         "filter_cutoff": getattr(config, "filter_cutoff", None),
+        # Session join facts: a joined study must stay recognisable as one
+        # after the run, for the GUI's seam markers and the report's slide.
+        "sessions": int(metadata.get("sessions") or 1),
+        "seam_times_s": list(metadata.get("seam_times_s") or []),
+        "session_durations_s": list(metadata.get("session_durations_s") or []),
+        "session_sources": [str(x) for x in (metadata.get("session_sources") or [])],
         "famos_version": libs.get("famos", "unknown"),
         "libraries": libs,
         "git": git,

@@ -21,6 +21,8 @@ DTT_Results/
 
 # Engineering reports / presentations
 *.pptx
+# ...except the report template the pipeline builds every report on
+!dtt/reporting/templates/*.pptx
 *.ppt
 *.xlsx
 *.xls

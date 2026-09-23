@@ -14,6 +14,7 @@ from gui.pages.dashboard_page import DashboardPage
 from gui.pages.new_study_page import NewStudyPage
 from gui.pages.processing_page import ProcessingPage
 from gui.pages.preprocess_page import PreprocessPage
+from gui.pages.auc_compare_page import AucComparePage
 from gui.pages.signals_page import SignalsPage
 from gui.pages.validation_page import ValidationPage
 from gui.pages.statistics_page import StatisticsPage
@@ -27,11 +28,13 @@ from gui.pages.reports_page import ReportsPage
 from gui.pages.comparison_page import ComparisonPage
 from gui.pages.study_compare_page import StudyComparePage
 from gui.pages.history_page import HistoryPage
+from gui.pages.channel_names_page import ChannelNamesPage
 NAV_ITEMS = [
     ("dashboard",  "Dashboard",   "▣"),
     ("new_study",  "New Study",   "＋"),
     ("processing", "Processing",  "⟳"),
     ("preprocess", "Preprocess",  "⚙"),
+    ("auc_compare", "AUC Compare", "≈"),
     ("signals",    "Signals",     "≋"),
     ("validation", "Validation",  "✓"),
     ("statistics", "Statistics",  "∑"),
@@ -44,11 +47,12 @@ NAV_ITEMS = [
     ("reports",    "Reports",     "▤"),
     ("comparison", "Compare",     "⇄"),
     ("study_compare", "Compare studies", "⚖"),
+    ("channel_names", "Channel Names", "✎"),
     ("history",    "History",     "≡"),
 ]
 _STUDY_PAGES = {
     "preprocess", "signals", "validation", "statistics", "histograms", "auc",
-    "heatmaps", "boxplots", "rainflow", "psd", "reports",
+    "heatmaps", "boxplots", "rainflow", "psd", "reports", "channel_names",
 }
 
 
@@ -184,6 +188,7 @@ class MainWindow(QMainWindow):
         self.new_study  = NewStudyPage(self.repo)
         self.processing = ProcessingPage(self.repo)
         self.preprocess = PreprocessPage(self.repo)
+        self.auc_compare = AucComparePage(self.repo)
         self.signals    = SignalsPage(self.repo)
         self.validation = ValidationPage(self.repo)
         self.statistics = StatisticsPage(self.repo)
@@ -197,10 +202,12 @@ class MainWindow(QMainWindow):
         self.comparison = ComparisonPage(self.repo)
         self.study_compare = StudyComparePage(self.repo)
         self.history    = HistoryPage(self.repo)
+        self.channel_names = ChannelNamesPage(self.repo)
 
         mapping = {
             "dashboard": self.dashboard, "new_study": self.new_study,
             "processing": self.processing, "preprocess": self.preprocess,
+            "auc_compare": self.auc_compare,
             "signals": self.signals, "validation": self.validation,
             "statistics": self.statistics, "histograms": self.histograms,
             "auc": self.auc,
@@ -209,6 +216,7 @@ class MainWindow(QMainWindow):
             "comparison": self.comparison,
             "study_compare": self.study_compare,
             "history": self.history,
+            "channel_names": self.channel_names,
         }
         for key, _, _ in NAV_ITEMS:
             page = mapping[key]

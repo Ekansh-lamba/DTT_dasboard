@@ -96,6 +96,15 @@ def _find_speed_column(df):
     return None
 
 
+def _draw_session_join(df, metadata, config):
+    """Draw the seams of a multi-session study; nothing for a single session."""
+    try:
+        from dtt.analysis.sessions_plot import generate_sessions_figure, session_info
+        generate_sessions_figure(df, session_info(metadata), config.figures_dir)
+    except Exception as exc:                                  # noqa: BLE001
+        logger.error("Session join figure failed: %s", exc, exc_info=True)
+
+
 def _raw_reference_frame(df, config):
     """Time plus every channel the FAMOS recipe conditions — the before/after set.
 
@@ -391,6 +400,11 @@ def run(
             "duration_s": (len(df) / config.sampling_rate) if config.sampling_rate else 0.0,
             "n_to_dan_applied": bool((stored_prov or {}).get("n_to_dan_applied")),
         }
+        # a joined study stays one: carry its seams into this run's report
+        for _k in ("sessions", "seam_times_s", "session_durations_s", "session_sources"):
+            if stored_prov and _k in stored_prov:
+                metadata[_k] = stored_prov[_k]
+        _draw_session_join(df, metadata, config)
 
         logger.info("[2/9]  Channel Validation  (re-checked against the existing processed data)")
         validation_report = validate(df, metadata, config)
@@ -484,6 +498,15 @@ def run(
         processed_csv = config.run_output_dir / "processed_data.csv"
         df.to_csv(processed_csv, index=False, float_format=CSV_FLOAT_FORMAT)
         logger.info("Processed data saved: %s  (%d rows)", processed_csv, len(df))
+        # The same data laid out like the team's FAMOS export
+        # (csv/RLDA WFT PV data sample.csv): Time then A-Z, standard channel
+        # names, 16-wide fields, FAMOS number format, forces in N.
+        try:
+            from dtt.famos_csv import processed_export_path, write_famos_csv
+            write_famos_csv(df, processed_export_path(
+                config.run_output_dir, config.vehicle_name, config.study_name))
+        except Exception as exc:                              # noqa: BLE001
+            logger.error("FAMOS-style CSV export failed: %s", exc, exc_info=True)
 
         if getattr(config, "export_famos_validation_csv", False):
             _write_famos_validation_csv(df, config)
@@ -494,6 +517,7 @@ def run(
         # load difference between two runs.
         from dtt.provenance import build_provenance, write_provenance
         write_provenance(config.run_output_dir, build_provenance(config, metadata))
+        _draw_session_join(df, metadata, config)
 
         if config.workflow_mode == "preprocess":
             elapsed = time.perf_counter() - t0

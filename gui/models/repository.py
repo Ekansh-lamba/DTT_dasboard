@@ -13,6 +13,8 @@ Backend output contract (one folder per study under ``dtt/outputs/``)::
         stats_summary.json
         severity_summary.json
         processed_data.csv      raw_data.csv
+        WFT_Processed_{vehicle}_{study}.csv   same data, FAMOS export layout (forces N)
+        WFT_Statistics_{vehicle}_{study}.csv  every channel's statistics, same layout
         figures/
             hist_distance_*.png      hist_percentage_*.png
             heatmap_*.png            heatmap_hexbin_*.png
@@ -70,18 +72,28 @@ class ChannelStat:
     p80: float
     p90: float
     p95: float
+    name: str = ""          # standard name, as in the FAMOS-style CSV
+    unit: str = ""
+
+    @property
+    def label(self) -> str:
+        """What to show: the standard name (FR_Fx, not FR_Fx_2)."""
+        if self.name:
+            return self.name
+        from dtt.famos_csv import export_name
+        return export_name(self.channel)
 
     @property
     def wheel(self) -> str:
-        return self.channel.split("_")[0]
+        return self.label.split("_")[0]
 
     @property
     def signal(self) -> str:
-        return self.channel.split("_")[-1]
+        return self.label.split("_")[-1]
 
     def as_row(self) -> List:
         return [
-            self.channel, self.mean, self.median, self.std,
+            self.label, self.mean, self.median, self.std,
             self.min, self.max, self.p80, self.p90, self.p95,
         ]
 
@@ -226,9 +238,15 @@ class Study:
                     p80=_num(vals.get("P80")),
                     p90=_num(vals.get("P90")),
                     p95=_num(vals.get("P95")),
+                    name=str(vals.get("name") or ""),
+                    unit=str(vals.get("unit") or ""),
                 )
             self._stats = parsed
         return self._stats
+
+    def stats_raw(self) -> Dict[str, dict]:
+        """stats_summary.json as written, for exporting it unchanged."""
+        return _read_json(self.stats_file) or {}
 
     # Channel configuration
     def run_channels(self):

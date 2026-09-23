@@ -30,6 +30,9 @@ hiddenimports = (
 
 # matplotlib needs its data files (fonts, mpl-data); scipy ships compiled libs.
 datas = collect_data_files("matplotlib")
+# the Apollo report template (charter deck masters/layouts) for dtt.reporting
+datas += [("dtt/reporting/templates/apollo_report_template.pptx",
+           "dtt/reporting/templates")]
 
 excludes = [
     # Heavy Qt modules the app never imports

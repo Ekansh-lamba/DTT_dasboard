@@ -609,7 +609,9 @@ def auc_comparison_stats(values_a: np.ndarray, values_b: np.ndarray,
         f"P95_{label_a}": round(cmp.p95_ref, 2),
         f"P5_{label_b}": round(cmp.p5_cur, 2),
         f"P95_{label_b}": round(cmp.p95_cur, 2),
-        f"Delta_P95_{unit}": round(cmp.delta_p95, 2),
+        # No unit suffix when the unit is unknown (a bare CSV): a column
+        # called "Delta_P95_" reads as a truncated name.
+        (f"Delta_P95_{unit}" if unit else "Delta_P95"): round(cmp.delta_p95, 2),
         f"Pct_exceed_{label_a}_P95": round(cmp.pct_exceed_ref_p95, 2),
         f"Pct_normal_{label_b}": round(cmp.pct_normal_cur, 2),
         f"Pct_normal_{label_a}": round(cmp.pct_normal_ref, 2),
@@ -826,6 +828,11 @@ def draw_auc_comparison(ax_kde, ax_hist, values_a: np.ndarray,
     ylabel = ("Distance-weighted density" if wa is not None
               else "Normalised density")
     for ax in (ax_kde, ax_hist):
+        # Scientific ticks: a density's absolute size depends on the channel's
+        # units and is rarely read off, but its width is not harmless -- ticks
+        # like "0.00012" (a distance-weighted Fx in N) pushed the left panel's
+        # y-label clean off the canvas edge.
+        ax.ticklabel_format(axis="y", style="sci", scilimits=(-3, 4))
         ax.set_xlim(lo, hi)
         ax.set_xlabel(f"{channel} ({unit})" if unit else channel,
                       fontsize=LABEL_FONTSIZE, fontweight="bold")
@@ -852,7 +859,7 @@ def auc_figure_layout(fig):
     than a third panel.
     """
     gs = fig.add_gridspec(2, 2, height_ratios=[4.2, 1.0], hspace=0.45,
-                          wspace=0.16, left=0.06, right=0.98,
+                          wspace=0.24, left=0.06, right=0.98,
                           top=0.87, bottom=0.05)
     return (fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1]),
             fig.add_subplot(gs[1, :]))
@@ -909,7 +916,8 @@ class AucSummaryRow:
 
 def auc_summary(channels: List[tuple], df_a: pd.DataFrame, df_b: pd.DataFrame,
                 weights_a: Optional[np.ndarray] = None,
-                weights_b: Optional[np.ndarray] = None) -> List[AucSummaryRow]:
+                weights_b: Optional[np.ndarray] = None,
+                unit_fn=None) -> List[AucSummaryRow]:
     """Run :func:`compare_distributions` for every channel in ``channels``.
 
     Percentiles only, no KDE -- this is what the all-channels chart needs, and
@@ -926,7 +934,8 @@ def auc_summary(channels: List[tuple], df_a: pd.DataFrame, df_b: pd.DataFrame,
         b, wb = _paired(vb, weights_b)
         cmp = compare_distributions(a, b, wa, wb)
         if cmp is not None:
-            rows.append(AucSummaryRow(display, channel_unit(display), cmp))
+            rows.append(AucSummaryRow(display, (unit_fn or channel_unit)(display),
+                                      cmp))
     return rows
 
 
@@ -1001,7 +1010,7 @@ def export_auc_batch(channels: List[tuple], df_a: pd.DataFrame,
                      out_dir: Path, range_mode: str = "autoscale",
                      weights_a: Optional[np.ndarray] = None,
                      weights_b: Optional[np.ndarray] = None,
-                     progress=None) -> tuple:
+                     progress=None, unit_fn=None) -> tuple:
     """A PNG per channel plus one summary CSV and the all-channels chart.
 
     The reference generates every channel in one go; one-at-a-time "Save
@@ -1028,7 +1037,7 @@ def export_auc_batch(channels: List[tuple], df_a: pd.DataFrame,
             progress(i, len(channels), display)
         va = pd.to_numeric(df_a[ca], errors="coerce").to_numpy(float)
         vb = pd.to_numeric(df_b[cb], errors="coerce").to_numpy(float)
-        unit = channel_unit(display)
+        unit = (unit_fn or channel_unit)(display)
         png = out_dir / safe(f"auc_{display}_{label_a}_vs_{label_b}.png")
         generate_auc_comparison(va, vb, label_a, label_b, display, png, unit,
                                 range_mode=range_mode, weights_a=weights_a,
@@ -1043,7 +1052,8 @@ def export_auc_batch(channels: List[tuple], df_a: pd.DataFrame,
     csv_path = out_dir / safe(f"auc_summary_{label_a}_vs_{label_b}.csv")
     pd.DataFrame(rows).to_csv(csv_path, index=False)
 
-    summary = auc_summary(channels, df_a, df_b, weights_a, weights_b)
+    summary = auc_summary(channels, df_a, df_b, weights_a, weights_b,
+                          unit_fn=unit_fn)
     fig, ax = plt.subplots(figsize=(11, 1.2 + 0.42 * max(1, len(summary))),
                            facecolor=BG)
     draw_auc_summary(ax, summary, label_a, label_b)
@@ -1054,3 +1064,174 @@ def export_auc_batch(channels: List[tuple], df_a: pd.DataFrame,
     if progress is not None:
         progress(len(channels), len(channels), "done")
     return pngs, csv_path, summary_png
+
+
+# --------------------------------------------------------------------------
+# Processed CSV files -- the AUC Compare screen's input
+#
+# Two already-processed CSV files compared directly, without first building a
+# study folder around them. Nothing here conditions, converts or corrects:
+# these files have already been through a pipeline (ours or FAMOS), and
+# running any of it again would double-process them. In particular this does
+# NOT go through `ingestion.loader.load_csv`, which applies the N->daN
+# heuristic -- so values are compared exactly as stored, and the screen says
+# so rather than asserting a unit it cannot know.
+# --------------------------------------------------------------------------
+
+_RAW_SUFFIXES = (".raw", ".dat")
+
+
+def _is_header(line: str) -> bool:
+    """A header names at least two columns and is not a row of numbers."""
+    named = [c.strip() for c in line.split(",") if c.strip()]
+    if len(named) < 2:
+        return False
+    numeric = 0
+    for c in named:
+        try:
+            float(c)
+            numeric += 1
+        except ValueError:
+            pass
+    return numeric < len(named)
+
+
+def load_processed_csv(path) -> tuple:
+    """``(frame, RunChannels, name)`` for one processed CSV file.
+
+    Refuses raw imc data outright (``.raw``, ``.dat``): that has to go through
+    New Study / Preprocess first, and comparing it here would compare
+    unconditioned signals while calling them processed. Handles blank lead
+    lines, space-padded names and a units row under the names. The time
+    column is found case-insensitively and named ``Time``.
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix in _RAW_SUFFIXES:
+        raise ValueError(
+            f"{path.name} is raw imc data ({suffix}). AUC Compare takes "
+            f"processed CSV files only -- run the recording through New Study "
+            f"or Preprocess first, then compare the processed CSV it writes.")
+    if suffix != ".csv":
+        raise ValueError(f"{path.name} is not a .csv file.")
+
+    # FAMOS ASCII exports open with blank CRLF lines and pad every name to a
+    # fixed width -- csv/RLDA WFT PV data sample.csv has two blank lines and
+    # names like '            Time'. The header line is found by content and
+    # the file handle is left *on* it, so pandas starts reading there.
+    #
+    # Not by passing a line number as skiprows: Python and pandas count stray
+    # carriage returns differently, and a file with CR-CR-LF endings made
+    # pandas start one row late and read the units row as the column names.
+    # Nothing is counted twice when the position is handed over instead.
+    with open(path, "r", encoding="latin1", errors="replace", newline="") as fh:
+        for _ in range(25):
+            pos = fh.tell()
+            line = fh.readline()
+            if not line:
+                break
+            if _is_header(line):
+                fh.seek(pos)
+                break
+        else:
+            fh.seek(0)
+        df = pd.read_csv(fh, header=0, low_memory=False)
+    df.columns = [str(c).strip() for c in df.columns]
+    df = df.loc[:, [c for c in df.columns if c and not c.startswith("Unnamed")]]
+
+    # A units row under the names ("s, N, N, ...") parses as text; drop it
+    # before anything becomes numeric, or every column shifts by one row.
+    if len(df) and (df.dtypes == object).any():
+        first = pd.to_numeric(df.iloc[0], errors="coerce")
+        if first.isna().mean() > 0.5:
+            df = df.iloc[1:].reset_index(drop=True)
+    for c in df.columns:
+        if not pd.api.types.is_numeric_dtype(df[c]):
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    time_col = next((c for c in df.columns if c.lower() in ("time", "t", "x")),
+                    None)
+    if time_col is None:
+        shown = ", ".join(df.columns[:6])
+        raise ValueError(f"{path.name} has no Time column -- found {shown}.")
+    if time_col != "Time":
+        df = df.rename(columns={time_col: "Time"})
+    df = df[np.isfinite(df["Time"].to_numpy(float))].reset_index(drop=True)
+    df = df.loc[:, [c for c in df.columns
+                    if c == "Time" or np.isfinite(df[c].to_numpy(float)).any()]]
+    if len(df) < 2:
+        raise ValueError(f"{path.name} has no data rows.")
+    return df, build_run_channels(list(df.columns)), path.stem
+
+
+def _numeric_columns(df: pd.DataFrame) -> List[str]:
+    return [c for c in df.columns
+            if c != "Time" and pd.api.types.is_numeric_dtype(df[c])]
+
+
+def csv_channels(rc_a: RunChannels, rc_b: RunChannels,
+                 df_a: pd.DataFrame, df_b: pd.DataFrame) -> List[tuple]:
+    """Every channel the two files share: wheel channels matched
+    **canonically**, then every other numeric column matched by name.
+
+    Canonically for the wheels because two exports routinely name the same
+    wheel differently (``FR_Fz_2`` / ``WFT_Fz_fr`` / ``A1R_Fz``). By name for
+    the rest -- Latacc, Vehicle_Speed, GPS -- because the channel model
+    deliberately does not parse them, and a processed-CSV comparison that
+    silently dropped Latacc would be a smaller comparison than the one asked
+    for.
+    """
+    wheel = auc_channels(rc_a, rc_b, df_a, df_b)
+    wheel_a = set(rc_a.channel_set.source_map)
+    wheel_b = set(rc_b.channel_set.source_map)
+    cols_b = set(_numeric_columns(df_b))
+    other = [c for c in _numeric_columns(df_a)
+             if c in cols_b and c not in wheel_a and c not in wheel_b]
+    return wheel + [(c, c, c) for c in other]
+
+
+def channel_differences(rc_a: RunChannels, rc_b: RunChannels,
+                        df_a: pd.DataFrame, df_b: pd.DataFrame) -> tuple:
+    """``(only_in_a, only_in_b)`` on the same basis :func:`csv_channels`
+    matches on -- so the warning lists exactly what the comparison drops."""
+    def keys(rc, df):
+        idx = _channel_index(rc)
+        wheel = {f"{l}_{c}" for (l, c), col in idx.items() if col in df.columns}
+        return wheel | {c for c in _numeric_columns(df)
+                        if c not in rc.channel_set.source_map}
+    ka, kb = keys(rc_a, df_a), keys(rc_b, df_b)
+    return sorted(ka - kb), sorted(kb - ka)
+
+
+def unit_scale_warning(channels: List[tuple], df_a: pd.DataFrame,
+                       df_b: pd.DataFrame, label_a: str,
+                       label_b: str) -> Optional[str]:
+    """A warning when the two files look like the same load in different units.
+
+    Bare CSVs carry no provenance, so there is no recipe or units record to
+    compare -- the check a study comparison gets for free. The tell is static
+    wheel load: the median |Fz| of the same wheel is set by the vehicle
+    weight, so two files whose medians differ by a clean power of ten are far
+    more likely N-vs-daN than a vehicle ten times heavier. Nothing is
+    converted; the operator is told, with the number.
+    """
+    ratios = []
+    for display, ca, cb in channels:
+        if not display.endswith("_Fz"):
+            continue
+        a = pd.to_numeric(df_a[ca], errors="coerce").abs().median()
+        b = pd.to_numeric(df_b[cb], errors="coerce").abs().median()
+        if np.isfinite(a) and np.isfinite(b) and a > 0 and b > 0:
+            ratios.append(b / a)
+    if not ratios:
+        return None
+    r = float(np.median(ratios))
+    decades = np.log10(r)
+    if abs(decades) >= 0.85 and abs(decades - round(decades)) <= 0.15:
+        bigger, smaller = (label_b, label_a) if r > 1 else (label_a, label_b)
+        factor = r if r > 1 else 1.0 / r
+        return (f"{bigger} static wheel load (median |Fz|) is {factor:.0f}x "
+                f"{smaller} across {len(ratios)} wheel(s) -- a clean power of "
+                f"ten, so the two files are probably in different units (N vs "
+                f"daN). Values are compared as stored; nothing is converted.")
+    return None

@@ -47,6 +47,23 @@ def _self_test() -> int:
     return 1 if failed else 0
 
 
+def _quit_on_ctrl_c(app) -> None:
+    """Ctrl+C in the launching terminal closes the app cleanly.
+
+    Python's default handler raises KeyboardInterrupt inside whichever Python
+    callback Qt happens to be running -- usually matplotlib's eventFilter --
+    which prints an alarming traceback. Route the signal to ``app.quit`` and
+    give the interpreter a regular tick so the handler runs promptly even
+    while the event loop is idle in C++.
+    """
+    import signal
+    from PySide6.QtCore import QTimer
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    tick = QTimer(app)
+    tick.timeout.connect(lambda: None)
+    tick.start(250)
+
+
 def main() -> int:
     # Frozen-exe backend dispatch: run the pipeline CLI instead of the GUI.
     if len(sys.argv) > 1 and sys.argv[1] == "--run-pipeline":
@@ -72,6 +89,7 @@ def main() -> int:
 
     window = MainWindow()
     window.show()
+    _quit_on_ctrl_c(app)
     return app.exec()
 
 

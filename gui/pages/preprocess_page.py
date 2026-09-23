@@ -22,6 +22,7 @@ from gui import theme
 from gui.pages.base_page import BasePage
 from gui.widgets.common import SectionTitle, Card
 from gui.widgets.mpl_canvas import PlotPanel
+from dtt.channel_names import channel_unit, display_name
 from dtt.preprocessing import (
     PreprocessSettings, PreprocessStage, apply_pipeline, summary_stats,
     famos_recipe, is_wft_channel, blank_dead_runs, conditions_channel,
@@ -37,6 +38,15 @@ _MOMENT_RE = re.compile(r"(?:^|[_\W])M[xyz](?:$|[_\W])", re.I)
 
 _RAW_COLOR = "#4a9eff"
 _PROC_COLOR = "#ff4d4f"
+# The conditioned envelope sits on top of the raw, nearly opaque, as FAMOS
+# draws a second trace -- so the blue left visible around it is what the
+# conditioning removed.
+_PROC_ENV_ALPHA = 0.9
+# At reduced zoom the conditioned band spans each bucket's P5..P95, not its
+# min..max -- on every channel. The smoothed trace keeps ~90% of the raw's
+# per-bucket reach, so a min..max red covered nearly all the blue and read as
+# a solid slab. The full reach still frames the plot; peaks stay in the blue.
+_PROC_BAND_PCT = 5.0
 
 
 def _plot_points(canvas) -> int:
@@ -255,34 +265,136 @@ def _envelope_and_median(t: np.ndarray, y: np.ndarray,
     return tt, yy, tm, mid
 
 
-def _channel_unit(channel: str) -> str:
-    """Axis unit for ``channel``, following the imc config file's YUNIT lines.
+def _inner_band(t: np.ndarray, y: np.ndarray, max_points: int = _MAX_PLOT_POINTS,
+                pct: float = _PROC_BAND_PCT):
+    """Each bucket's ``pct``..``100-pct`` percentile range, drawn like the
+    envelope (a stroke from low to high per bucket). Same buckets as
+    ``_reduce``, so it lines up with the raw envelope bucket for bucket."""
+    if y.size <= max_points:
+        return t, y
+    tp, yp = _buckets(t, y, max_points)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        lo = np.nanpercentile(yp, pct, axis=1)
+        hi = np.nanpercentile(yp, 100.0 - pct, axis=1)
+        tm = np.nanmean(tp, axis=1)
+    ok = np.isfinite(tm)
+    tt = np.repeat(tm[ok], 2)
+    yy = np.empty(tt.size, dtype=float)
+    yy[0::2], yy[1::2] = lo[ok], hi[ok]
+    return tt, yy
 
-    The screen used to hard-code "daN" because the channel list only ever held
-    forces. It now lists every column in the processed CSV, so a hard-coded
-    force unit would label Latacc in daN and Vehicle_Speed in daN — a plot that
-    states the wrong unit is worse than one that states none.
+
+# How far past the conditioned trace the frame may reach to take in the raw,
+# in multiples of the conditioned trace's own height. One means the body always
+# gets at least a third of the frame, and a real raw peak up to twice the
+# body's height still draws in full.
+_RAW_REACH = 1.0
+_MAX_EDGE_MARKS = 300
+
+
+def _edge_marks(ax, t: np.ndarray, raw: np.ndarray, y0: float, y1: float):
+    """Mark every raw excursion the frame does not contain, at the frame edge.
+
+    Returns ``(count, largest |value|)`` of the samples beyond, or None when
+    there are none. Scored on the full-rate window, not the reduced envelope,
+    so nothing that sits between drawn points can escape the count. At most
+    ``_MAX_EDGE_MARKS`` markers are drawn -- the largest excursions -- so a
+    sustained run does not paint the edge solid; the caption carries the
+    full count either way.
     """
-    key = channel.strip().lower()
-    if key in ("latacc", "lat_acc", "longacc", "long_acc", "latacc_lpf",
-               "acceleration", "accelz"):
-        return "m/s²"
-    if key in ("velforward", "vellateral"):
-        return "m/s"                       # velocities, not accelerations
-    if key in ("vehicle_speed", "speed_kmph", "speed2d", "gps.speed"):
-        return "km/h"
-    if key in ("yawrate", "angratex", "angratey") or "anglespeed" in key:
-        return "°/s"
-    if key.startswith("angle") or key.endswith("_angle") or "_angle_" in key:
-        return "°"
-    if key in ("distance", "dist", "altitude"):
-        return "m"
-    if key in ("latitude", "longitude"):
-        return "°"
-    if is_wft_channel(channel):
-        # forces daN, moments daN·m — both smo(0.1) in the recipe
-        return "daN·m" if _MOMENT_RE.search(channel) else "daN"
-    return ""
+    if raw is None or t is None or raw.size == 0:
+        return None
+    n = min(t.size, raw.size)
+    tt, rr = t[:n], raw[:n]
+    ok = np.isfinite(rr)
+    above = ok & (rr > y1)
+    below = ok & (rr < y0)
+    count = int(above.sum() + below.sum())
+    if count == 0:
+        return None
+    worst = float(np.max(np.abs(rr[above | below])))
+    inset = 0.012 * (y1 - y0)
+    for mask, y, marker in ((above, y1 - inset, "^"), (below, y0 + inset, "v")):
+        idx = np.flatnonzero(mask)
+        if idx.size == 0:
+            continue
+        if idx.size > _MAX_EDGE_MARKS:
+            idx = idx[np.argsort(np.abs(rr[idx]))[-_MAX_EDGE_MARKS:]]
+        ax.plot(tt[idx], np.full(idx.size, y), linestyle="none", marker=marker,
+                markersize=5, color=_RAW_COLOR, markeredgecolor="#FFFFFF",
+                markeredgewidth=0.4, zorder=6, clip_on=False)
+    return count, worst
+
+
+def _frame_note(values: np.ndarray, lo: float, hi: float,
+                threshold: float = 0.2) -> str:
+    """A caption fragment when a few far samples squash the rest of the trace.
+
+    The frame always spans the full data range (see ``_update``), so a lone
+    far excursion -- an angle wrapping through 360, a single hard glitch --
+    can leave the bulk of the channel in a thin stripe. That is the truth
+    about the data in the window, so it is not hidden; it is *named*, with
+    how much of the height the body actually gets, so the operator reads a
+    flat-looking trace as "one extreme sample" and reaches for the zoom
+    rather than concluding the conditioning flattened it.
+    """
+    v = np.asarray(values, dtype=float)
+    v = v[np.isfinite(v)]
+    if v.size < 20 or not hi > lo:
+        return ""
+    body = float(np.percentile(v, 99) - np.percentile(v, 1))
+    frac = body / (hi - lo)
+    if frac >= threshold:
+        return ""
+    return (f"  ·  frame spans a few far samples — the P1–P99 body uses "
+            f"{100 * frac:.0f}% of the height; zoom to inspect")
+
+
+def span_window(start: float, end: float, span: float, frac: float) -> tuple:
+    """``(t0, t1)`` for a span placed along a recording.
+
+    ``span <= 0`` asks for the whole recording, and so does any span at least
+    as long as it -- a 600 s span on a 400 s recording is the recording, not
+    600 s of axis with the data in one corner. Otherwise the window is exactly
+    ``span`` wide and ``frac`` (0..1) slides it from the start to the end.
+
+    Pure and module-level so it can be tested without a window.
+    """
+    length = end - start
+    if span <= 0 or length <= 0 or span >= length:
+        return start, end
+    frac = min(max(float(frac), 0.0), 1.0)
+    t0 = start + frac * (length - span)
+    return t0, t0 + span
+
+
+def recording_extent(*times) -> tuple:
+    """``(start, end)`` covering every given time axis.
+
+    The raw and processed traces each carry their own Time column, and they
+    need not agree: sanitisation drops rows, so either can end first, and a
+    cut recording need not start at zero. The window has to be chosen over
+    both, or the span measured on one trace clips the other's tail off --
+    and "span >= length" can wrongly conclude the whole recording fits.
+    """
+    starts, ends = [], []
+    for t in times:
+        if t is None:
+            continue
+        t = np.asarray(t, dtype=float)
+        t = t[np.isfinite(t)]
+        if t.size:
+            starts.append(float(t[0]))
+            ends.append(float(t[-1]))
+    if not starts:
+        return 0.0, 0.0
+    return min(starts), max(ends)
+
+
+def _channel_unit(channel: str) -> str:
+    """Axis unit for ``channel`` -- see :func:`dtt.channel_names.channel_unit`."""
+    return channel_unit(channel)
 
 
 def _famos_op(channel: str) -> str:
@@ -919,8 +1031,21 @@ class PreprocessPage(BasePage):
         self.famos_auto.setText(self._FAMOS_LABEL)
         self.famos_auto.setStyleSheet("")
 
+    def _study_seams(self) -> list:
+        """Seam times of a multi-session study, from its provenance record."""
+        if self.study is None:
+            return []
+        try:
+            from dtt.provenance import load_provenance
+            from dtt.analysis.sessions_plot import session_info
+            info = session_info(provenance=load_provenance(self.study.path))
+        except Exception:                                         # noqa: BLE001
+            return []
+        return info["seam_times_s"] if info else []
+
     def refresh(self) -> None:
         self._conditioned = self._study_is_conditioned()
+        self._seams = self._study_seams()
         # Re-applying the recipe on top of an already-conditioned study would
         # smooth it twice, so the auto checkbox only defaults on when nothing
         # has run yet. The per-channel recipe controls are *not* cleared with
@@ -1064,11 +1189,11 @@ class PreprocessPage(BasePage):
     def _apply_loaded(self, ch, t, y, t_raw, y_raw) -> None:
         # Red is the pipeline's own sanitized output, not a second pass over it.
         self._data = y
-        # Longest of the two: sanitisation drops rows, so the processed array
-        # ends earlier than the raw and would under-report the recording length.
-        self._full_span = max(
-            float(t[-1]) if t is not None and t.size else 0.0,
-            float(t_raw[-1]) if t_raw is not None and t_raw.size else 0.0)
+        # The recording's length over both traces: sanitisation drops rows, so
+        # either can end first. A length, not an end time -- the old max() of
+        # the two end times was only a length for a recording starting at 0.
+        _start, _end = recording_extent(t, t_raw)
+        self._full_span = max(0.0, _end - _start)
         if t is not None:
             self._time = t
             dt = np.nanmedian(np.diff(t[:1000])) if t.size > 2 else 0.01
@@ -1105,17 +1230,21 @@ class PreprocessPage(BasePage):
         except (TypeError, ValueError):
             return 0.0
 
-    def _view_range(self, t_full: np.ndarray) -> tuple:
-        """``(t0, t1)`` of the visible window, from the span and slider."""
-        if t_full is None or t_full.size == 0:
-            return 0.0, 0.0
-        start, end = float(t_full[0]), float(t_full[-1])
-        span = self._view_span()
-        if span <= 0 or span >= (end - start):
-            return start, end
-        frac = self.window_slider.value() / 1000.0
-        t0 = start + frac * ((end - start) - span)
-        return t0, t0 + span
+    def _view_range(self, *times) -> tuple:
+        """``(t0, t1)`` of the visible window, from the span and slider.
+
+        Measured over *every* trace on screen, not one of them. This took a
+        single time axis -- the raw's when there was one -- so a processed
+        trace running past the raw's end had its tail clipped at the full
+        recording, and the "span covers the whole thing" test was made
+        against the wrong length. It happened not to bite on the reference
+        study (both start at 0 and the raw is the longer); it would on any
+        recording where sanitisation leaves the processed one longer, or where
+        a cut recording starts somewhere other than zero.
+        """
+        start, end = recording_extent(*times)
+        return span_window(start, end, self._view_span(),
+                           self.window_slider.value() / 1000.0)
 
     @staticmethod
     def _clip(t: np.ndarray, y: np.ndarray, t0: float, t1: float):
@@ -1557,7 +1686,7 @@ class PreprocessPage(BasePage):
 
         # Clip to the visible span before reducing, so the reduction spends its
         # ~950 buckets on what is actually on screen.
-        t_view0, t_view1 = self._view_range(t if t is not None else t_proc)
+        t_view0, t_view1 = self._view_range(t, t_proc)
         t, raw = self._clip(t, raw, t_view0, t_view1)
         t_proc, proc = self._clip(t_proc, proc, t_view0, t_view1)
         if proc is None or proc.size == 0:
@@ -1601,38 +1730,37 @@ class PreprocessPage(BasePage):
             env_alpha, env_lw, mid_lw = _density_style(
                 raw.size if raw is not None else proc.size, npts)
             te, ye, tp, yp = _envelope_and_median(t_proc, proc, npts)
-            # The conditioned channel's own envelope: the same statistic, the
-            # same buckets and the same stroke width as the raw's, so where it
-            # sits inside the blue is what the conditioning removed, and where
-            # the two coincide it removed nothing resolvable at this zoom —
-            # which is the honest answer at full-recording span and the thing
-            # the old envelope-vs-median pairing could not say.
+            reduced = te is not tp
+            # Drawn the way FAMOS draws two traces: each as its own full
+            # min->max reach, the conditioned one on top. Where blue shows
+            # above or below the red is exactly what the conditioning took
+            # off; where red covers blue, the conditioning kept it.
             #
-            # Drawn first and at reduced opacity, with the raw over the top.
-            # Two bands of nearly equal height have to be told apart somehow,
-            # and the one concession is deliberately the opposite of the old
-            # bias: the *raw* keeps full ink at every span and is never faded
-            # or overprinted, while the conditioned band is the quieter one.
-            # Geometry is what carries the comparison here; opacity only
-            # decides which of two superimposed bands stays readable.
-            #
-            # Drawn whenever a reduction happened, not only when the raw
-            # overlay is on: the conditioned trace must not change shape just
-            # because the blue was toggled off.
-            if te is not tp:
-                ax.plot(te, ye, color=_PROC_COLOR, linewidth=env_lw,
-                        alpha=max(0.28, 0.6 * env_alpha), zorder=1)
+            # The conditioned trace used to be an opaque bucket *median* line,
+            # with its envelope faded underneath the blue. At full-recording
+            # zoom a bucket is ~600 samples, and a median over six seconds of
+            # driving barely moves -- so the red read as a flat line and the
+            # channel looked grossly over-filtered, when the stored data keeps
+            # 76-99% of every wheel channel's variation (checked against a
+            # one-pass FAMOS smo(0.1) of the source files: identical
+            # high-frequency content, no double smoothing). FAMOS has no median
+            # line; neither does this now.
             if self.show_raw.isChecked():
                 tr, yr, _, _ = _envelope_and_median(t, raw, npts)
                 ax.plot(tr, yr, color=_RAW_COLOR, linewidth=env_lw,
-                        alpha=env_alpha, zorder=2, label=src)
+                        alpha=env_alpha, zorder=1, label=src)
             if self.show_stages.isChecked() and raw is not None and raw.size:
                 self._plot_stages(ax, t, raw, ch, npts)
-            # Red centre line on top, opaque and a touch heavier, so the
-            # conditioned signal's position stays readable through its own band.
-            ax.plot(tp, yp, color=_PROC_COLOR, linewidth=mid_lw, zorder=3,
-                    solid_joinstyle="round", solid_capstyle="round",
-                    label=self._proc_label(s, ch, have_raw, sanitizing))
+            if reduced:
+                tb, yb = _inner_band(t_proc, proc, npts)
+                ax.plot(tb, yb, color=_PROC_COLOR, linewidth=env_lw,
+                        alpha=_PROC_ENV_ALPHA, zorder=3,
+                        label=self._proc_label(s, ch, have_raw, sanitizing))
+            else:
+                # Every sample drawn: the envelope is the line itself.
+                ax.plot(tp, yp, color=_PROC_COLOR, linewidth=mid_lw, zorder=3,
+                        solid_joinstyle="round", solid_capstyle="round",
+                        label=self._proc_label(s, ch, have_raw, sanitizing))
             # Optional, off by default: ring the removed excursions. FAMOS does
             # not do this, so it stays opt-in for when the blue-vs-red reading is
             # too dense to pick them out by eye.
@@ -1659,32 +1787,62 @@ class PreprocessPage(BasePage):
         ax.set_xlim(t_view0, t_view1)
         ax.margins(x=0)
 
-        # Frame what is actually on screen. That is the conditioned channel's
-        # own envelope where one was drawn — framing on its median instead
-        # would clip the band the median sits inside, which is the half of the
-        # pair that carries the like-for-like comparison. Widened to the raw
-        # envelope when the overlay is on. Robust percentiles throughout, so a
-        # rare artifact clips off-view rather than squashing the trace flat.
-        frame = ye if ye is not None else yp
-        fp = frame[np.isfinite(frame)]
-        if fp.size:
-            lo, hi = np.percentile(fp, 0.2), np.percentile(fp, 99.8)
-            if yr is not None:
-                fr = yr[np.isfinite(yr)]
-                if fr.size:
-                    lo = min(lo, float(np.percentile(fr, 0.5)))
-                    hi = max(hi, float(np.percentile(fr, 99.5)))
-            if ymark is not None:
-                # With the overlay off the red line is the only thing setting the
-                # scale, and the rings sit by definition outside it — every one
-                # of them would clip off-view. Same robust percentiles, so one
-                # freak artifact still cannot flatten the trace.
-                fm = ymark[np.isfinite(ymark)]
-                if fm.size:
-                    lo = min(lo, float(np.percentile(fm, 1.0)))
-                    hi = max(hi, float(np.percentile(fm, 99.0)))
-            pad = 0.15 * (hi - lo) if hi > lo else 1.0
+        # Frame: built around the conditioned trace, which is never cut, with
+        # room for the raw beyond it -- up to one conditioned-height on each
+        # side. Raw beyond that is *marked* at the frame edge and counted in
+        # the caption, never silently dropped.
+        #
+        # History, because both simpler rules were tried and both were wrong:
+        #  - Robust percentiles of the drawn envelope cut real peaks, by a
+        #    different amount at every span (one drawn point is 1 sample at
+        #    10 s, ~617 at the full recording): 28 of 38 channels hid samples,
+        #    the conditioned trace itself up to 4.2 frame-heights off-screen.
+        #  - The full extent of everything drawn hid nothing -- and on the
+        #    4-wheel imc3 recording, where 1-6 sample spikes of up to
+        #    5,000 daN hit 13-20 of the 24 wheel channels at the *same
+        #    instant* (an acquisition artefact, not road load), it squashed a
+        #    +/-200 daN channel into a few pixels. Front Fx/My/Mz read as
+        #    flat lines at full-recording zoom: the "over-filtered" look.
+        # So the conditioned trace sets the frame, a real raw peak up to one
+        # body-height beyond it still draws in full, and anything past that is
+        # flagged where it happens. The body always gets at least a third of
+        # the height, at every span.
+        frame_note = ""
+        edge_marks = None
+        body = ye if ye is not None else yp
+        body = body[np.isfinite(body)] if body is not None else np.empty(0)
+        outer = [a[np.isfinite(a)] for a in (yr, ymark) if a is not None]
+        outer = np.concatenate(outer) if outer else np.empty(0)
+        if body.size or outer.size:
+            ref = body if body.size else outer
+            p_lo, p_hi = float(ref.min()), float(ref.max())
+            span = p_hi - p_lo if p_hi > p_lo else max(1.0, abs(p_hi) * 0.05)
+            lim_lo, lim_hi = (p_lo - _RAW_REACH * span, p_hi + _RAW_REACH * span)
+            lo, hi = p_lo, p_hi
+            if outer.size:
+                lo = max(min(lo, float(outer.min())), lim_lo)
+                hi = min(max(hi, float(outer.max())), lim_hi)
+            pad = 0.05 * (hi - lo) if hi > lo else max(1.0, 0.05 * abs(hi))
             ax.set_ylim(lo - pad, hi + pad)
+            if raw is not None and raw is not proc and t is not None:
+                edge_marks = _edge_marks(ax, t, raw, lo - pad, hi + pad)
+            frame_note = _frame_note(proc, lo, hi)
+            if edge_marks:
+                n_out, worst = edge_marks
+                frame_note += (f"  ·  {n_out:,} raw sample"
+                               f"{'s' if n_out != 1 else ''} beyond the frame "
+                               f"(up to {worst:,.0f}) marked ▲▼ at the edge — "
+                               f"zoom to see them")
+        # A study joined from several sessions shows where each one starts:
+        # the record is continuous in time, and a step or a stop at a join
+        # should read as the join it is, not as road load.
+        seams = [x for x in getattr(self, "_seams", []) if t_view0 <= x <= t_view1]
+        for k, x in enumerate(seams):
+            ax.axvline(x, color="#FFD166", linestyle="--", linewidth=1.3, zorder=5,
+                       label="session seam" if k == 0 else None)
+        if seams:
+            frame_note += (f"  ·  {len(seams)} session seam"
+                           f"{'s' if len(seams) != 1 else ''} in view (yellow dashed)")
         ax.legend(fontsize=8, facecolor=theme.SURFACE, labelcolor=theme.TEXT, framealpha=0.9)
         self.canvas.fig.tight_layout()
         # draw_idle coalesces repaints: dragging a spinbox queues one
@@ -1701,12 +1859,13 @@ class PreprocessPage(BasePage):
             # blue and red; an operator reading a gap between them should know
             # how many samples one stroke is standing in for.
             per_px = max(1.0, raw.size / max(1, npts))
-            reduced = (f"  ·  reduced to {npts:,} buckets, min–max per bucket"
+            reduced = (f"  ·  reduced to {npts:,} buckets: blue min–max, red "
+                       f"P{_PROC_BAND_PCT:g}–P{100 - _PROC_BAND_PCT:g} per bucket"
                        if raw.size > npts else "  ·  every sample drawn")
             self.range_label.setText(
                 f"Showing {t_view0:.0f} – {t_view1:.0f} s of {self._full_span:.0f} s"
                 f"  ·  {raw.size:,} samples  ·  ~{per_px:.0f} per pixel"
-                f"{reduced}{note}")
+                f"{reduced}{frame_note}{note}")
 
         a, b = summary_stats(raw), summary_stats(proc)
         self.stats_label.setText(

@@ -132,6 +132,19 @@ def stylesheet() -> str:
         color: {TEXT};
         padding: 4px;
     }}
+    /* Lists had no rule, so they took the OS palette's base colour while text
+       took this theme's near-white: readable only on a dark-mode Windows
+       install, white-on-white on a light-mode one. */
+    QListWidget, QListView {{
+        background: {ENTRY_BG};
+        alternate-background-color: {SURFACE};
+        border: 1px solid {BORDER};
+        border-radius: 8px;
+        color: {TEXT};
+        selection-background-color: {ACCENT_DK};
+        selection-color: #FFFFFF;
+        padding: 4px;
+    }}
     QCheckBox {{ color: {TEXT}; spacing: 8px; }}
     QCheckBox::indicator {{
         width: 16px; height: 16px;

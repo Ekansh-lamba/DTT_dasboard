@@ -9,6 +9,7 @@ from dtt.config import (
     MANDATORY_CHANNELS,
     OUTLIER_LOW_PCTILE,
     OUTLIER_HIGH_PCTILE,
+    OUTLIER_FENCE_WIDTHS,
     TIME_COLUMN,
     RunConfig,
 )
@@ -85,34 +86,33 @@ def _remove_duplicate_timestamps(df: pd.DataFrame) -> tuple:
     return df, n_removed
 
 
-# A percentile band removes a fixed fraction of every channel whether or not
-# anything is actually wrong with it: P1/P99 blanks ~2 % of samples by
-# construction. Warn when the blanked fraction sits at that floor, because then
-# the band is clipping the load distribution rather than catching artifacts.
-_EXPECTED_BAND_TOLERANCE = 0.15      # relative; 2.00 % vs an expected 2.00 %
-
-
 def _flag_outliers(df: pd.DataFrame,
                    channels: List[str]) -> tuple[pd.DataFrame, Dict[str, int]]:
-    """Blank samples outside the [P_low, P_high] band and count them.
+    """Blank gross artefacts in the force channels and count them.
+
+    A sample is an artefact when it sits more than ``OUTLIER_FENCE_WIDTHS``
+    band-widths outside the channel's [P1, P99] band. The band alone is not the
+    fence: blanking everything outside P1..P99 removes exactly 2 % of every
+    channel whatever the data -- its highest and lowest real loads. On the
+    reference studies that flat-topped every Fx/Fy/Fz trace at its P1/P99 (the
+    "over-filtered" look), left 8-11 k NaN holes per channel in
+    processed_data.csv, and took the peaks that dominate fatigue damage out of
+    rainflow, histograms and box plots. One band-width out, the same recordings
+    lose 0-93 samples per channel: the DAQ glitches, not the road.
 
     This used to count without blanking, so the report said an artifact had been
-    detected while the frame handed downstream still carried it: a spike five
-    times the physical maximum went into ``smo(0.1)``, spread across the 99-tap
-    kernel, and landed in the fatigue analysis. Counting and removing are now
-    the same pass, so the report and the data cannot disagree.
+    detected while the frame handed downstream still carried it. Counting and
+    removing are the same pass, so the report and the data cannot disagree.
 
     Blanked samples are left as NaN rather than refilled here. The FAMOS
     operators downstream bridge gaps for their own pass and restore them
-    afterwards, which is the project's established NaN policy; filling them in
-    this stage would hide the gap from that machinery.
+    afterwards, which is the project's established NaN policy.
 
     Returns the modified frame alongside the counts -- the caller must take the
     frame, or the blanking is silently discarded.
     """
     flag_counts: Dict[str, int] = {}
     df = df.copy()
-    expected_frac = (OUTLIER_LOW_PCTILE + (100.0 - OUTLIER_HIGH_PCTILE)) / 100.0
     for ch in channels:
         if ch not in df.columns:
             continue
@@ -122,20 +122,16 @@ def _flag_outliers(df: pd.DataFrame,
             continue
         lo = np.nanpercentile(valid, OUTLIER_LOW_PCTILE)
         hi = np.nanpercentile(valid, OUTLIER_HIGH_PCTILE)
-        mask = (col < lo) | (col > hi)
+        reach = OUTLIER_FENCE_WIDTHS * (hi - lo)
+        mask = (col < lo - reach) | (col > hi + reach)
         n = int(mask.sum())
         if n > 0:
             df.loc[mask, ch] = np.nan
             flag_counts[ch] = n
-            frac = n / max(1, int(col.notna().sum()))
-            if abs(frac - expected_frac) <= _EXPECTED_BAND_TOLERANCE * expected_frac:
-                logger.warning(
-                    "%s: blanked %d samples (%.2f %%), which is the %.2f %% the "
-                    "P%g/P%g band removes from any distribution -- this is "
-                    "clipping the load range (kept %.6g..%.6g), not removing "
-                    "artifacts. A physical limit would target real faults.",
-                    ch, n, 100 * frac, 100 * expected_frac,
-                    OUTLIER_LOW_PCTILE, OUTLIER_HIGH_PCTILE, lo, hi)
+            logger.info("%s: blanked %d artefact samples outside %.6g..%.6g "
+                        "(P%g/P%g band +/- %g widths)", ch, n, lo - reach,
+                        hi + reach, OUTLIER_LOW_PCTILE, OUTLIER_HIGH_PCTILE,
+                        OUTLIER_FENCE_WIDTHS)
     return df, flag_counts
 
 
@@ -168,7 +164,7 @@ def sanitize(df: pd.DataFrame, config: RunConfig) -> tuple:
     df, report.outlier_flags_per_channel = _flag_outliers(df, force_channels)
     if report.outlier_flags_per_channel:
         total_flags = sum(report.outlier_flags_per_channel.values())
-        logger.info("Outlier flags (P1/P99): %d samples across %d channels",
+        logger.info("Outlier flags (P1/P99 fence): %d samples across %d channels",
                     total_flags, len(report.outlier_flags_per_channel))
 
     report.rows_output = len(df)
