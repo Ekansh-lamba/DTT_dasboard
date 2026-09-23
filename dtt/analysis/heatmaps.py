@@ -43,6 +43,26 @@ def _comp_bins(tyre):
     }
 
 
+def bins_from_ranges(bin_ranges):
+    """Build bin edges from user-entered ``{comp: (min, max, step)}`` (daN).
+
+    Mirrors the reference WFT analyzer's Min/Max/Step force-heatmap inputs.
+    Raises ``ValueError`` with a message naming the offending component.
+    """
+    bins = {}
+    for comp, (mn, mx, step) in bin_ranges.items():
+        mn, mx, step = float(mn), float(mx), float(step)
+        if step <= 0:
+            raise ValueError(f"{comp}: step must be greater than 0.")
+        if mx <= mn:
+            raise ValueError(f"{comp}: max must be greater than min.")
+        edges = np.arange(mn, mx + step / 2.0, step)
+        if len(edges) < 2:
+            raise ValueError(f"{comp}: range/step produces fewer than 2 bin edges.")
+        bins[comp] = edges
+    return bins
+
+
 def _series(df, rc, wheel, comp):
     name = rc.channel_for(wheel, comp) if rc is not None else f"{wheel}_{comp}"
     if name and name in df.columns:
@@ -132,14 +152,18 @@ def _pair_heatmap(df, rc, wheels, wheel_colors, x_comp, y_comp, x_bins, y_bins,
     logger.info("Saved heatmap: %s", path.name)
 
 
-def generate_heatmaps(df: pd.DataFrame, config: RunConfig) -> None:
-    out = config.figures_dir
-    rc = config.run_channels
-    wheels = list(rc.wheel_groups.keys()) if rc is not None else list(WHEEL_GROUPS.keys())
-    wheel_colors = rc.wheel_colors if rc is not None else WHEEL_COLORS
-    bins = _comp_bins(config.tyre)
+def generate_correlation_heatmaps(df: pd.DataFrame, out, rc, wheels, wheel_colors,
+                                   sampling_rate, tyre=None, bin_ranges=None) -> None:
+    """(Re)generate the Fx-Fy / Fz-Fy / Fz-Fx correlation heatmaps.
 
-    weights_full, total_m, speed_unit = _get_speed_weights(df, config.sampling_rate)
+    ``bin_ranges``, when given, is ``{"Fx": (min, max, step), "Fy": ..., "Fz": ...}``
+    (daN) and overrides the tyre/default bin edges — this is what lets the GUI
+    regenerate these three figures on demand with a user-chosen bin range,
+    without re-running the whole pipeline.
+    """
+    bins = bins_from_ranges(bin_ranges) if bin_ranges else _comp_bins(tyre)
+
+    weights_full, total_m, speed_unit = _get_speed_weights(df, sampling_rate)
     weighted = weights_full is not None
     metric = "% Distance" if weighted else "% Occurrence"
     weight_line = (f"Speed weighting: {speed_unit}" if weighted
@@ -157,6 +181,16 @@ def generate_heatmaps(df: pd.DataFrame, config: RunConfig) -> None:
                   "Fx (daN)", "Fz (daN)", out, "heatmap_fz_fx_all.png",
                   f"Fz vs Fx  –  {metric} Heatmap\n{weight_line}",
                   weights=weights_full, weighted=weighted)
+
+
+def generate_heatmaps(df: pd.DataFrame, config: RunConfig) -> None:
+    out = config.figures_dir
+    rc = config.run_channels
+    wheels = list(rc.wheel_groups.keys()) if rc is not None else list(WHEEL_GROUPS.keys())
+    wheel_colors = rc.wheel_colors if rc is not None else WHEEL_COLORS
+
+    generate_correlation_heatmaps(df, out, rc, wheels, wheel_colors,
+                                   config.sampling_rate, config.tyre)
 
     for wheel in wheels:
         col = wheel_colors[wheel]["pri"]
