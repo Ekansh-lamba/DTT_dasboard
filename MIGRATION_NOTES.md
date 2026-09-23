@@ -2127,3 +2127,62 @@ No change to `famos/`, `dtt/preprocessing.py`, `dtt/pipeline.py`, the KDE,
 binning, percentile or exceedance mathematics, or anything
 `processed_data.csv` contains. Item 1 adds validation tooling only; item 2 is
 a display fix; items 3 and 4 are rendering and labelling.
+
+---
+
+## Round 8 — AUC comparison: stats strip, weighting, cross-axle, batch, all-channels view (2026-09-23)
+
+Eight gaps listed against the Compare-studies AUC view, all closed. Unweighted
+results are byte-identical to before; every new behaviour is opt-in.
+
+**A bug found on the way — moments were never offered.** `RunChannels` is
+built for severity and keeps Fx/Fy/Fz only (`build_run_channels` filters on
+FORCE_COMPONENTS), so `rc.channel_for(label, "Mx")` returns None. The Round 7
+comparison asked it for moments and silently got nothing: the screen offered
+6 channels, not 12, against a brief that required moments. `_channel_index()`
+now reads the channel set underneath, labelling moments under the same wheel
+names the forces resolved to.
+
+1. **Stats strip in the app** — Min/P5/Q1/Median/Mean/Q3/P95/Max per run, in
+   its own gridspec row spanning both panels (`auc_figure_layout`, shared by
+   the canvas and the PNG so they cannot drift). The first attempt hung it off
+   the left axes with a negative bbox; sized in axes fractions, it collided
+   with the x-label.
+2. **Coverage line** — samples, seconds and (when weighted) km per run, and a
+   warning when one run is ≥1.25× the other.
+3. **Both P5s in the footer**, not only the reference's.
+4. **Distance weighting.** `compare_distributions`, `auc_grid` and the stats
+   strip take optional per-sample weights from `histograms._get_speed_weights`
+   — the same speed search the Histogram/AUC sections use. New
+   `auc.weighted_percentile` (equal weights reproduce `np.percentile` to one
+   sample's width). Weighting one run and not the other raises. The selector
+   disables Distance, with the reason, when either study lacks speed.
+5. **X-axis range mode.** *Correction:* this was first described as the cure
+   for a stuck-sensor rail. It is not — Full is the configured sensor range
+   while ≥98% of samples fit, else the data's own range. A small rail is
+   cropped; the reference studies' FR_Fx rail (1.6–2.6% at −451 daN) is kept by
+   both modes. Tooltip and a test now say what it actually does.
+6. **Cross-axle** (reference `_run_auc_cross`) — front wheel in one run vs the
+   rear on the same side in the other, both ways, forces and moments. Paired by
+   position (front-most vs rear-most axle per side), not by name; a side with
+   one axle is skipped.
+7. **Export all…** — a PNG per channel, one summary CSV with `P95_<label>`
+   columns, and the all-channels chart; cancellable, keeps finished files.
+8. **All channels at a glance** — % of dataset 2 beyond dataset 1's P95 per
+   channel. Chosen over ΔP95 because it is unitless with a built-in zero: 5% is
+   no change by the definition of a 95th percentile, so forces and moments
+   share one axis. ΔP95 printed at each bar, precision following magnitude.
+
+**Found, not changed — flagged for a decision.** Study 20260914_181847 has a
+live `GPS.speed` (median 42 km/h) that `SPEED_CANDIDATES` does not list, while
+`Speed2D`, and so the recipe's `Vehicle_Speed`, is all zero. That study's
+histograms, heatmaps and AUC have therefore been silently sample-count
+weighted. Adding `GPS.speed` to the list would fix it but changes every
+existing study's distance-weighted output, so it is left to the team.
+
+**Layout:** the selectors started as one row of six at ~1,900 px minimum
+width, inside a ScrollPage with horizontal scrolling off — clipped on a
+laptop. Now a 2×2 grid with the actions beside the title; the page's minimum
+is 988 px, inside even the un-maximised default window.
+
+Tests: `tests/test_auc_compare_extensions.py`, 18 new; 299 pass in total.

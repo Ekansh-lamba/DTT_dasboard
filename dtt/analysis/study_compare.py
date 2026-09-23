@@ -420,9 +420,175 @@ _P95_STYLE = "--"
 _HIST_BINS_OVERLAY = 55        # as the reference draws it
 
 
+# ---------------------------------------------------------------- channels
+
+def _channel_index(rc: RunChannels) -> Dict[tuple, str]:
+    """``{(wheel label, component): column}`` for **every** component.
+
+    Not ``rc.channel_for``: ``RunChannels`` is built for the severity analysis
+    and keeps Fx/Fy/Fz only (``build_run_channels`` filters on
+    FORCE_COMPONENTS), so asking it for ``Mx`` returns None. Relying on it is
+    how the comparison screen quietly offered six force channels and no
+    moments at all. The channel set underneath has every component; the wheel
+    label is taken from the same position the forces already resolved to, so
+    moments line up under the same "FR" / "A2RO" names.
+    """
+    pos_label: Dict[object, str] = {}
+    for label, cols in rc.wheel_groups.items():
+        for col in cols:
+            parsed = rc.channel_set.source_map.get(col)
+            if parsed is not None:
+                pos_label[parsed[0]] = label
+    out: Dict[tuple, str] = {}
+    for col, (pos, comp) in rc.channel_set.source_map.items():
+        label = pos_label.get(pos, pos.id)
+        key = (label, comp)
+        # imc exports carry "<name> - Copy" duplicates; the plain name wins.
+        if key in out and "copy" in col.lower():
+            continue
+        out[key] = col
+    return out
+
+
+def _positions(rc: RunChannels) -> Dict[str, object]:
+    """``{wheel label: Position}``, for pairing wheels by axle and side."""
+    out: Dict[str, object] = {}
+    for label, cols in rc.wheel_groups.items():
+        for col in cols:
+            parsed = rc.channel_set.source_map.get(col)
+            if parsed is not None:
+                out[label] = parsed[0]
+                break
+    return out
+
+
+def _component_order(comp: str) -> int:
+    from dtt.channels import COMPONENTS
+    return COMPONENTS.index(comp) if comp in COMPONENTS else 99
+
+
+def auc_channels(rc_a: RunChannels, rc_b: RunChannels,
+                 df_a: pd.DataFrame, df_b: pd.DataFrame) -> List[tuple]:
+    """``[(display, column in A, column in B)]`` — the same wheel and
+    component in both studies, forces **and** moments, position order.
+
+    No fixed twelve-channel list: a two-WFT recording has six force channels,
+    a three-axle truck has more, and the reference script's hardcoded
+    FL/FR/RL/RR would offer entries that can never load.
+    """
+    ia, ib = _channel_index(rc_a), _channel_index(rc_b)
+    out: List[tuple] = []
+    for label in _common_labels(rc_a, rc_b):
+        comps = sorted({c for (l, c) in ia if l == label}
+                       & {c for (l, c) in ib if l == label}, key=_component_order)
+        for comp in comps:
+            ca, cb = ia[(label, comp)], ib[(label, comp)]
+            if ca in df_a.columns and cb in df_b.columns:
+                out.append((f"{label}_{comp}", ca, cb))
+    return out
+
+
+def auc_cross_channels(rc_a: RunChannels, rc_b: RunChannels,
+                       df_a: pd.DataFrame, df_b: pd.DataFrame) -> List[tuple]:
+    """Cross-position pairs: a front wheel in one run against the rear wheel
+    on the same side in the other, **both ways round**.
+
+    The reference script's `_run_auc_cross`: ``FL(DS1) vs RL(DS2)`` and
+    ``RL(DS1) vs FL(DS2)``, forces and moments. It answers a different
+    question from the same-channel view -- whether a load one axle sees in
+    one vehicle is what the other axle sees in the other, the case when a
+    powertrain change moves weight fore and aft.
+
+    Pairs are formed from positions, not names: for each side (and inner /
+    outer, on a dual), the front-most axle is paired with the rear-most. A
+    single-axle side has no partner and is skipped rather than guessed.
+    """
+    ia, ib = _channel_index(rc_a), _channel_index(rc_b)
+    pa, pb = _positions(rc_a), _positions(rc_b)
+
+    def ends(positions: Dict[str, object]) -> Dict[tuple, tuple]:
+        by_side: Dict[tuple, List[tuple]] = {}
+        for label, pos in positions.items():
+            by_side.setdefault((pos.side, pos.sub), []).append((pos.axle, label))
+        out = {}
+        for side, items in by_side.items():
+            items.sort()
+            if len(items) >= 2 and items[0][0] != items[-1][0]:
+                out[side] = (items[0][1], items[-1][1])      # (front, rear)
+        return out
+
+    ea, eb = ends(pa), ends(pb)
+    out: List[tuple] = []
+    for side in sorted(set(ea) & set(eb), key=lambda s: (s[0], s[1] or "")):
+        (front_a, rear_a), (front_b, rear_b) = ea[side], eb[side]
+        for la, lb in ((front_a, rear_b), (rear_a, front_b)):
+            comps = sorted({c for (l, c) in ia if l == la}
+                           & {c for (l, c) in ib if l == lb}, key=_component_order)
+            for comp in comps:
+                ca, cb = ia[(la, comp)], ib[(lb, comp)]
+                if ca in df_a.columns and cb in df_b.columns:
+                    out.append((f"{la}_{comp} vs {lb}_{comp}", ca, cb))
+    return out
+
+
+def channel_unit(display: str) -> str:
+    """daN for a force, daN·m for a moment — the units the pipeline writes.
+
+    Read off the component in the channel's own name, never inferred from the
+    magnitude: guessing units from the numbers is what produced a decade error
+    once already.
+    """
+    comp = display.split(" vs ")[0].rsplit("_", 1)[-1]
+    return "daN·m" if comp.startswith("M") else "daN"
+
+
+# --------------------------------------------------------------- weighting
+
+def study_duration_s(df: pd.DataFrame) -> Optional[float]:
+    """Recording length from the frame's own Time column.
+
+    Not row count over a sample rate: a stop-removed or sanitised study has
+    fewer rows than its clock says, and the clock is the honest answer for
+    "how much driving is this percentile built from".
+    """
+    if df is None or "Time" not in df.columns:
+        return None
+    t = pd.to_numeric(df["Time"], errors="coerce").to_numpy(float)
+    t = t[np.isfinite(t)]
+    return float(t[-1] - t[0]) if t.size > 1 else None
+
+
+def distance_weights(df: pd.DataFrame) -> tuple:
+    """``(weights, total_m)`` for a study, or ``(None, None)``.
+
+    Reuses ``histograms._get_speed_weights`` -- the same speed-channel search,
+    dead-channel rejection and unit detection the Histogram and single-study
+    AUC sections already rely on -- so a comparison is distance-weighted by
+    exactly the rule the rest of the app uses. The sample rate comes from the
+    Time column, not from a config default.
+    """
+    from dtt.analysis.histograms import _get_speed_weights
+
+    if df is None or "Time" not in df.columns:
+        return None, None
+    t = pd.to_numeric(df["Time"], errors="coerce").to_numpy(float)
+    dt = np.nanmedian(np.diff(t[: min(t.size, 5000)])) if t.size > 2 else np.nan
+    if not np.isfinite(dt) or dt <= 0:
+        return None, None
+    weights, total_m, _unit = _get_speed_weights(df, 1.0 / dt)
+    if weights is None:
+        return None, None
+    return np.nan_to_num(np.asarray(weights, dtype=float), nan=0.0), total_m
+
+
+# ------------------------------------------------------------------- stats
+
 def auc_comparison_stats(values_a: np.ndarray, values_b: np.ndarray,
                          label_a: str, label_b: str, channel: str,
-                         unit: str = "daN") -> Optional[Dict]:
+                         unit: str = "daN",
+                         weights_a: Optional[np.ndarray] = None,
+                         weights_b: Optional[np.ndarray] = None,
+                         ) -> Optional[Dict]:
     """The footer/export row for one channel, with the labels in the keys.
 
     The reference builds ``f"P95_{lbl2}"``-style keys so a saved summary says
@@ -432,11 +598,12 @@ def auc_comparison_stats(values_a: np.ndarray, values_b: np.ndarray,
     """
     from dtt.analysis.auc import compare_distributions
 
-    cmp = compare_distributions(values_a, values_b)
+    cmp = compare_distributions(values_a, values_b, weights_a, weights_b)
     if cmp is None:
         return None
     return {
         "Channel": channel, "Unit": unit,
+        "Weighting": "distance" if weights_a is not None else "sample count",
         "Label1": label_a, "Label2": label_b,
         f"P5_{label_a}": round(cmp.p5_ref, 2),
         f"P95_{label_a}": round(cmp.p95_ref, 2),
@@ -452,20 +619,63 @@ def auc_comparison_stats(values_a: np.ndarray, values_b: np.ndarray,
 
 
 def auc_footer_text(cmp, label_a: str, label_b: str, unit: str = "daN") -> str:
-    """The stats strip under the two panels, in the reference's wording.
+    """The stats line under the two panels, in the reference's wording.
 
     Dataset 1 is the reference, so it is the one whose P5/P95 define the
-    normal zone and whose P95 the exceedance is counted against.
+    normal zone and whose P95 the exceedance is counted against. Both runs'
+    P5 appear, not only the reference's: the reference script quotes one and
+    the other is then only readable off the legend.
     """
     return (
         f"{label_a} (reference)  →  P5: {cmp.p5_ref:.0f} {unit}   "
         f"P95: {cmp.p95_ref:.0f} {unit}   "
         f"Normal zone covers {cmp.pct_normal_ref:.1f}% of data"
         f"        "
-        f"{label_b}  →  P95: {cmp.p95_cur:.0f} {unit} "
+        f"{label_b}  →  P5: {cmp.p5_cur:.0f} {unit}   "
+        f"P95: {cmp.p95_cur:.0f} {unit} "
         f"({cmp.delta_p95:+.0f})   "
         f"{cmp.pct_exceed_ref_p95:.1f}% of cycles exceed {label_a} P95   "
         f"{cmp.pct_normal_cur:.1f}% within {label_a} normal zone")
+
+
+def auc_coverage_text(cmp, label_a: str, label_b: str,
+                      duration_a: Optional[float] = None,
+                      duration_b: Optional[float] = None,
+                      distance_a_m: Optional[float] = None,
+                      distance_b_m: Optional[float] = None,
+                      weighting: str = "sample count") -> str:
+    """How much data each percentile was computed from, and how it was counted.
+
+    ``AucComparison`` carried the two sample counts all along and nothing
+    displayed them. Two runs of very different length are an ordinary thing
+    to compare, and every figure above is a percentile, which says nothing
+    about how much was measured: a P95 from 8 minutes and one from 90 are not
+    equally load bearing.
+    """
+    def _one(label, n, dur, dist):
+        bits = [f"{n:,} samples"]
+        if dur and dur > 0:
+            bits.append(f"{dur:,.0f} s")
+        if dist and dist > 0:
+            bits.append(f"{dist / 1000.0:,.1f} km")
+        return f"{label}: " + " · ".join(bits)
+
+    text = (f"{_one(label_a, cmp.n_ref, duration_a, distance_a_m)}   |   "
+            f"{_one(label_b, cmp.n_cur, duration_b, distance_b_m)}   |   "
+            f"weighted by {weighting}")
+
+    # Flag a real mismatch rather than leave the reader dividing two
+    # six-figure numbers in their head.
+    basis = ((distance_a_m, distance_b_m, "farther")
+             if distance_a_m and distance_b_m else
+             (duration_a, duration_b, "longer"))
+    x, y, word = basis
+    if x and y and min(x, y) > 0:
+        ratio = max(x, y) / min(x, y)
+        if ratio >= 1.25:
+            which = label_a if x > y else label_b
+            text += f"   —  {which} is {ratio:.1f}x {word}"
+    return text
 
 
 def _legend_labels(label_a: str, label_b: str, cmp) -> List[str]:
@@ -476,29 +686,54 @@ def _legend_labels(label_a: str, label_b: str, cmp) -> List[str]:
             f"{label_b} P95: {cmp.p95_cur:.0f}"]
 
 
+def _paired(values, weights):
+    """Finite values and their weights, masked together."""
+    v = np.asarray(values, dtype=float)
+    if weights is None:
+        return v[np.isfinite(v)], None
+    w = np.asarray(weights, dtype=float)
+    n = min(v.size, w.size)
+    v, w = v[:n], w[:n]
+    ok = np.isfinite(v) & np.isfinite(w) & (w >= 0)
+    return v[ok], w[ok]
+
+
+# --------------------------------------------------------------- the pair
+
 def draw_auc_comparison(ax_kde, ax_hist, values_a: np.ndarray,
                         values_b: np.ndarray, label_a: str, label_b: str,
                         channel: str, unit: str = "daN",
-                        xlim: Optional[tuple] = None):
+                        xlim: Optional[tuple] = None,
+                        range_mode: str = "autoscale",
+                        ax_stats=None,
+                        weights_a: Optional[np.ndarray] = None,
+                        weights_b: Optional[np.ndarray] = None):
     """Draw the two-panel AUC comparison onto a caller's axes.
 
     Takes axes rather than building a figure, so the embedded GUI panel and a
     headless PNG export are the same drawing rather than two that have to be
     kept in step.
 
+    ``weights_a`` / ``weights_b`` (per-sample distance, from
+    :func:`distance_weights`) distance-weight **everything** -- both curves,
+    both histograms, all four percentile rules and the stats strip -- so no
+    element of the plot describes a different distribution from the others.
+
     Returns the :class:`~dtt.analysis.auc.AucComparison`, or ``None`` when
     either dataset is too small to have a distribution.
     """
     from dtt.analysis.auc import auc_grid, compare_distributions
+    from dtt.analysis.plot_style import draw_stats_strip
     from dtt.analysis.histograms import (
         BG, LABEL_FONTSIZE, TEXT_PRI, TITLE_FONTSIZE, _axis_range,
         _get_force_type, _style_ax)
 
-    a = np.asarray(values_a, dtype=float)
-    b = np.asarray(values_b, dtype=float)
-    a, b = a[np.isfinite(a)], b[np.isfinite(b)]
+    a, wa = _paired(values_a, weights_a)
+    b, wb = _paired(values_b, weights_b)
     for ax in (ax_kde, ax_hist):
         _style_ax(ax)
+    if ax_stats is not None:
+        ax_stats.axis("off")
     if a.size < 2 or b.size < 2:
         ax_kde.text(0.5, 0.5, "insufficient data", ha="center", va="center",
                     transform=ax_kde.transAxes, color=TEXT_PRI)
@@ -506,17 +741,17 @@ def draw_auc_comparison(ax_kde, ax_hist, values_a: np.ndarray,
 
     if xlim is None:
         # The Histogram and single-study AUC sections' own range logic, on the
-        # two datasets pooled -- not a fresh percentile rule. Both panels and
-        # both datasets then share one x-range, and the comparison agrees with
-        # the rest of the app about where a channel's axis should start.
-        # `range_mode="autoscale"` because a two-run comparison is about where
-        # the mass sits relative to the other run: the configured sensor range
-        # is far wider than either distribution and crushes both into the
-        # middle, and a rare artefact in one run would otherwise set the axis
-        # for both.
+        # two datasets pooled, so both panels and both datasets share one
+        # x-range and agree with the rest of the app. "autoscale" (P0.5-P99.5)
+        # is the default because a two-run comparison is about where the mass
+        # sits. "full" is the configured sensor range while >= 98% of samples
+        # fit, else the data's own range -- a fixed axis for laying studies
+        # side by side. Neither removes a rail holding more than ~2% of the
+        # samples: on the reference studies FR_Fx is frozen at -451 daN for
+        # 1.6-2.6% of the run, and both modes keep it on screen.
         both = np.concatenate([a, b])
         rng = _axis_range(both, _get_force_type(channel), channel,
-                          range_mode="autoscale")
+                          range_mode=range_mode)
         if rng and rng[1] > rng[0]:
             lo, hi = rng
         else:
@@ -524,8 +759,8 @@ def draw_auc_comparison(ax_kde, ax_hist, values_a: np.ndarray,
     else:
         lo, hi = xlim
 
-    cmp = compare_distributions(a, b)
-    x, kde_a, kde_b = auc_grid(a, b, xlim=(lo, hi))
+    cmp = compare_distributions(a, b, wa, wb)
+    x, kde_a, kde_b = auc_grid(a, b, xlim=(lo, hi), weights_ref=wa, weights_cur=wb)
 
     def _rules(ax):
         """P5 and P95 for both datasets, each in its own single colour.
@@ -548,19 +783,16 @@ def draw_auc_comparison(ax_kde, ax_hist, values_a: np.ndarray,
         return out
 
     def _legend(ax, handles, labels):
-        # Explicit handles, in reading order: the reference dataset and its two
-        # percentiles, then the other. Left to draw order the legend opens with
-        # dataset 2, which reads as though it were the baseline.
-        #
-        # The reference script's own legend is unreadable -- it sets
-        # labelcolor="white" on a #F5F5F5 panel. These are the light-theme
-        # colours the Histogram and single-study AUC sections already use.
+        # Explicit handles in reading order, reference first. The reference
+        # script's own legend is unreadable -- labelcolor="white" on a #F5F5F5
+        # panel -- so these are the light-theme colours the Histogram and
+        # single-study AUC sections already use.
         ax.legend(handles=handles, labels=labels,
                   fontsize=8, facecolor=BG, edgecolor="#CCCCCC",
                   labelcolor=TEXT_PRI, framealpha=0.9, loc="upper right")
 
-    # Left: shaded KDE curves. Dataset 2 is drawn first so dataset 1 -- the
-    # reference -- reads on top of it.
+    # Left: shaded KDE curves. Dataset 2 drawn first so the reference sits on
+    # top of it.
     ax_kde.fill_between(x, kde_a, alpha=0.25, color=AUC_DS1_COLOR)
     ax_kde.fill_between(x, kde_b, alpha=0.25, color=AUC_DS2_COLOR)
     line_b, = ax_kde.plot(x, kde_b, color=AUC_DS2_COLOR, linewidth=2,
@@ -573,53 +805,90 @@ def draw_auc_comparison(ax_kde, ax_hist, values_a: np.ndarray,
     _legend(ax_kde, [line_a, *rules["a"], line_b, *rules["b"]],
             _legend_labels(label_a, label_b, cmp))
 
-    # Right: the same data binned, same x-range, same two colours.
+    # Right: the same data binned, same x-range, same two colours, and the
+    # same weights -- a count histogram under a distance-weighted curve would
+    # be two different distributions on one axis.
     bins = np.linspace(lo, hi, _HIST_BINS_OVERLAY)
-    _, _, bars_b = ax_hist.hist(b, bins=bins, density=True, alpha=0.45,
-                                color=AUC_DS2_COLOR, edgecolor="none",
-                                label=label_b)
-    _, _, bars_a = ax_hist.hist(a, bins=bins, density=True, alpha=0.45,
-                                color=AUC_DS1_COLOR, edgecolor="none",
-                                label=label_a)
+    _, _, bars_b = ax_hist.hist(b, bins=bins, weights=wb, density=True,
+                                alpha=0.45, color=AUC_DS2_COLOR,
+                                edgecolor="none", label=label_b)
+    _, _, bars_a = ax_hist.hist(a, bins=bins, weights=wa, density=True,
+                                alpha=0.45, color=AUC_DS1_COLOR,
+                                edgecolor="none", label=label_a)
     rules = _rules(ax_hist)
     ax_hist.set_title("Density Histogram Overlay", fontsize=TITLE_FONTSIZE,
                       fontweight="bold")
     # A histogram's handle is a BarContainer, whose own label is an internal
-    # "_containerN" -- so the labels are passed explicitly rather than read
-    # back off the handles.
+    # "_containerN" -- so labels are passed explicitly.
     _legend(ax_hist, [bars_a, *rules["a"], bars_b, *rules["b"]],
             _legend_labels(label_a, label_b, cmp))
 
+    ylabel = ("Distance-weighted density" if wa is not None
+              else "Normalised density")
     for ax in (ax_kde, ax_hist):
         ax.set_xlim(lo, hi)
         ax.set_xlabel(f"{channel} ({unit})" if unit else channel,
                       fontsize=LABEL_FONTSIZE, fontweight="bold")
-        ax.set_ylabel("Normalised density", fontsize=LABEL_FONTSIZE,
-                      fontweight="bold")
+        ax.set_ylabel(ylabel, fontsize=LABEL_FONTSIZE, fontweight="bold")
+
+    if ax_stats is not None:
+        # Min/P5/Q1/Median/Mean/Q3/P95/Max per run -- the strip the
+        # single-study AUC and RF Compare already carry, reused. It has its
+        # own axes spanning both panels: a table hung under one axes with a
+        # negative bbox is sized in *axes* fractions, collides with the
+        # x-label whenever the panels are short, and drifts on resize.
+        draw_stats_strip(ax_stats, [(label_a, a), (label_b, b)],
+                         colors=[AUC_DS1_COLOR, AUC_DS2_COLOR],
+                         theme="light", fontsize=8, bbox=[0.0, 0.0, 1.0, 1.0],
+                         weights=[wa, wb] if wa is not None else None)
     return cmp
+
+
+def auc_figure_layout(fig):
+    """``(ax_kde, ax_hist, ax_stats)`` on ``fig``: two panels over a strip row.
+
+    One layout for both the embedded canvas and the PNG export, so the two
+    cannot drift apart. ``height_ratios`` keeps the strip a caption rather
+    than a third panel.
+    """
+    gs = fig.add_gridspec(2, 2, height_ratios=[4.2, 1.0], hspace=0.45,
+                          wspace=0.16, left=0.06, right=0.98,
+                          top=0.87, bottom=0.05)
+    return (fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1]),
+            fig.add_subplot(gs[1, :]))
 
 
 def generate_auc_comparison(values_a: np.ndarray, values_b: np.ndarray,
                             label_a: str, label_b: str, channel: str,
-                            out_path: Path, unit: str = "daN") -> Optional[Path]:
-    """The same two panels as a PNG, for a report or a saved comparison."""
+                            out_path: Path, unit: str = "daN",
+                            range_mode: str = "autoscale",
+                            weights_a: Optional[np.ndarray] = None,
+                            weights_b: Optional[np.ndarray] = None,
+                            footer_extra: str = "") -> Optional[Path]:
+    """The same two panels and strip as a PNG, for a report or a batch export."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from dtt.analysis.histograms import BG, SUPTITLE_FONTSIZE, TEXT_PRI, TEXT_SEC
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), facecolor=BG)
-    cmp = draw_auc_comparison(axes[0], axes[1], values_a, values_b,
-                              label_a, label_b, channel, unit)
+    fig = plt.figure(figsize=(14, 7.0), facecolor=BG)
+    ax_kde, ax_hist, ax_stats = auc_figure_layout(fig)
+    # Leave room under the strip for the two footer lines.
+    fig.subplots_adjust(bottom=0.13)
+    cmp = draw_auc_comparison(ax_kde, ax_hist, values_a, values_b,
+                              label_a, label_b, channel, unit,
+                              range_mode=range_mode, ax_stats=ax_stats,
+                              weights_a=weights_a, weights_b=weights_b)
     fig.suptitle(f"AUC — {channel}  ({label_a}  vs  {label_b}  reference)",
                  color=TEXT_PRI, fontsize=SUPTITLE_FONTSIZE, fontweight="bold")
     if cmp is not None:
-        fig.text(0.5, 0.01, auc_footer_text(cmp, label_a, label_b, unit),
-                 ha="center", va="bottom", fontsize=8, color=TEXT_SEC,
-                 fontfamily="monospace",
+        footer = auc_footer_text(cmp, label_a, label_b, unit)
+        if footer_extra:
+            footer += "\n" + footer_extra
+        fig.text(0.5, 0.012, footer, ha="center", va="bottom", fontsize=8,
+                 color=TEXT_SEC, fontfamily="monospace",
                  bbox=dict(boxstyle="round,pad=0.5", facecolor="#F0F0F0",
                            edgecolor="#CCCCCC", alpha=0.95))
-    fig.tight_layout(rect=[0, 0.08, 1, 0.94])
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=FIGURE_DPI, bbox_inches="tight", facecolor=BG)
@@ -628,22 +897,160 @@ def generate_auc_comparison(values_a: np.ndarray, values_b: np.ndarray,
     return out_path
 
 
-def auc_channels(rc_a: RunChannels, rc_b: RunChannels,
-                 df_a: pd.DataFrame, df_b: pd.DataFrame) -> List[tuple]:
-    """``[(display label, column in A, column in B)]`` for every channel both
-    studies recorded -- forces **and** moments, in ``RunChannels`` order.
+# ----------------------------------------------------- every channel at once
 
-    No fixed twelve-channel list: a two-WFT recording has six, a three-axle
-    truck has more, and the reference script's hardcoded FL/FR/RL/RR would
-    offer entries that can never load.
+@dataclass
+class AucSummaryRow:
+    """One channel's comparison, for the all-channels view and batch export."""
+    display: str
+    unit: str
+    cmp: object
+
+
+def auc_summary(channels: List[tuple], df_a: pd.DataFrame, df_b: pd.DataFrame,
+                weights_a: Optional[np.ndarray] = None,
+                weights_b: Optional[np.ndarray] = None) -> List[AucSummaryRow]:
+    """Run :func:`compare_distributions` for every channel in ``channels``.
+
+    Percentiles only, no KDE -- this is what the all-channels chart needs, and
+    it is cheap enough (a sort per channel) to run on a label change without
+    anyone noticing.
     """
-    from dtt.channels import COMPONENTS
+    from dtt.analysis.auc import compare_distributions
 
-    out: List[tuple] = []
-    for label in _common_labels(rc_a, rc_b):
-        for comp in COMPONENTS:
-            ch_a = rc_a.channel_for(label, comp)
-            ch_b = rc_b.channel_for(label, comp)
-            if ch_a and ch_b and ch_a in df_a.columns and ch_b in df_b.columns:
-                out.append((f"{label}_{comp}", ch_a, ch_b))
-    return out
+    rows: List[AucSummaryRow] = []
+    for display, ca, cb in channels:
+        va = pd.to_numeric(df_a[ca], errors="coerce").to_numpy(float)
+        vb = pd.to_numeric(df_b[cb], errors="coerce").to_numpy(float)
+        a, wa = _paired(va, weights_a)
+        b, wb = _paired(vb, weights_b)
+        cmp = compare_distributions(a, b, wa, wb)
+        if cmp is not None:
+            rows.append(AucSummaryRow(display, channel_unit(display), cmp))
+    return rows
+
+
+# The share of dataset 2 beyond dataset 1's P95 when the two distributions are
+# identical -- 5% by the definition of a 95th percentile. It is the no-change
+# line every bar is read against, which is what makes this metric comparable
+# across channels whose units and magnitudes are not.
+_EXCEED_BASELINE = 5.0
+
+
+def _fmt_delta(delta: float, scale: float) -> str:
+    """A ΔP95 with as many decimals as the channel's size warrants.
+
+    Integers throughout printed "+0 daN·m" for every moment on the reference
+    studies, which hides a real shift behind rounding on a channel whose P95
+    is tens rather than hundreds. Decimals follow the magnitude of the
+    reference P95 instead.
+    """
+    mag = abs(scale) if np.isfinite(scale) else 0.0
+    places = 0 if mag >= 100 else 1 if mag >= 10 else 2
+    return f"{delta:+.{places}f}"
+
+
+def draw_auc_summary(ax, rows: List[AucSummaryRow], label_a: str,
+                     label_b: str) -> None:
+    """Every channel on one chart: how much of dataset 2 sits beyond dataset
+    1's P95.
+
+    Not ΔP95. A raw ΔP95 in daN puts Fz (~800) and Fy (~20) on one axis, and
+    moments in daN·m on the same axis again; the chart would be read by
+    magnitude and say nothing. Exceedance share is unitless and has a built-in
+    zero: 5% means the top of the distribution did not move, more means
+    dataset 2 reaches loads dataset 1 rarely did. ΔP95 is written at the end
+    of each bar in the channel's own unit, so nothing is lost.
+
+    Two colours, same scheme as the panels: the bars describe dataset 2, so
+    they are its red; the baseline is dataset 1's P95, so it is its green.
+    """
+    from dtt.analysis.histograms import (
+        LABEL_FONTSIZE, TEXT_PRI, TEXT_SEC, TICK_FONTSIZE, _style_ax)
+
+    _style_ax(ax)
+    if not rows:
+        ax.text(0.5, 0.5, "no channels in common", ha="center", va="center",
+                transform=ax.transAxes, color=TEXT_PRI)
+        return
+    names = [r.display for r in rows]
+    vals = [r.cmp.pct_exceed_ref_p95 for r in rows]
+    y = np.arange(len(rows))
+    ax.barh(y, vals, color=AUC_DS2_COLOR, alpha=0.75, height=0.62)
+    ax.axvline(_EXCEED_BASELINE, color=AUC_DS1_COLOR, linewidth=1.8,
+               linestyle="--", label=f"no change ({_EXCEED_BASELINE:.0f}%)")
+    ax.set_yticks(y)
+    ax.set_yticklabels(names, fontsize=TICK_FONTSIZE)
+    ax.invert_yaxis()
+    right = max(max(vals), _EXCEED_BASELINE) * 1.30 + 1.0
+    ax.set_xlim(0, right)
+    for yi, r, v in zip(y, rows, vals):
+        ax.text(v + right * 0.01, yi,
+                f"ΔP95 {_fmt_delta(r.cmp.delta_p95, r.cmp.p95_ref)} {r.unit}",
+                va="center", fontsize=8, color=TEXT_SEC)
+    ax.set_xlabel(f"% of {label_b} beyond {label_a} P95",
+                  fontsize=LABEL_FONTSIZE, fontweight="bold")
+    ax.set_title(f"All channels — {label_b} against {label_a}",
+                 fontsize=LABEL_FONTSIZE, fontweight="bold", color=TEXT_PRI)
+    ax.legend(fontsize=8, loc="lower right", facecolor="#FFFFFF",
+              edgecolor="#CCCCCC", labelcolor=TEXT_PRI)
+
+
+def export_auc_batch(channels: List[tuple], df_a: pd.DataFrame,
+                     df_b: pd.DataFrame, label_a: str, label_b: str,
+                     out_dir: Path, range_mode: str = "autoscale",
+                     weights_a: Optional[np.ndarray] = None,
+                     weights_b: Optional[np.ndarray] = None,
+                     progress=None) -> tuple:
+    """A PNG per channel plus one summary CSV and the all-channels chart.
+
+    The reference generates every channel in one go; one-at-a-time "Save
+    PNG" does not scale to twelve wheels times six components. ``progress``,
+    if given, is called as ``progress(i, n, display)`` so a GUI can keep its
+    window responsive.
+
+    Returns ``(pngs, csv_path, summary_png)``.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from dtt.analysis.histograms import BG
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    safe = lambda s: "".join(c if c.isalnum() or c in "-_." else "_"   # noqa: E731
+                             for c in s)
+    weighting = "distance" if weights_a is not None else "sample count"
+    pngs: List[Path] = []
+    rows: List[Dict] = []
+    for i, (display, ca, cb) in enumerate(channels):
+        if progress is not None:
+            progress(i, len(channels), display)
+        va = pd.to_numeric(df_a[ca], errors="coerce").to_numpy(float)
+        vb = pd.to_numeric(df_b[cb], errors="coerce").to_numpy(float)
+        unit = channel_unit(display)
+        png = out_dir / safe(f"auc_{display}_{label_a}_vs_{label_b}.png")
+        generate_auc_comparison(va, vb, label_a, label_b, display, png, unit,
+                                range_mode=range_mode, weights_a=weights_a,
+                                weights_b=weights_b,
+                                footer_extra=f"weighted by {weighting}")
+        pngs.append(png)
+        row = auc_comparison_stats(va, vb, label_a, label_b, display, unit,
+                                   weights_a, weights_b)
+        if row:
+            rows.append(row)
+
+    csv_path = out_dir / safe(f"auc_summary_{label_a}_vs_{label_b}.csv")
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+
+    summary = auc_summary(channels, df_a, df_b, weights_a, weights_b)
+    fig, ax = plt.subplots(figsize=(11, 1.2 + 0.42 * max(1, len(summary))),
+                           facecolor=BG)
+    draw_auc_summary(ax, summary, label_a, label_b)
+    fig.tight_layout()
+    summary_png = out_dir / safe(f"auc_all_channels_{label_a}_vs_{label_b}.png")
+    fig.savefig(summary_png, dpi=FIGURE_DPI, bbox_inches="tight", facecolor=BG)
+    plt.close(fig)
+    if progress is not None:
+        progress(len(channels), len(channels), "done")
+    return pngs, csv_path, summary_png

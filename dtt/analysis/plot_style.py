@@ -296,21 +296,42 @@ def draw_comparison_kde(ax, values_a: np.ndarray, values_b: np.ndarray,
     return {"p5_a": p5a, "p95_a": p95a, "p5_b": p5b, "p95_b": p95b}
 
 
-def stats_strip_rows(series: Sequence[Tuple[str, np.ndarray]]) -> Tuple[List[str], List[List[str]]]:
+def stats_strip_rows(series: Sequence[Tuple[str, np.ndarray]],
+                     weights: Optional[Sequence[Optional[np.ndarray]]] = None,
+                     ) -> Tuple[List[str], List[List[str]]]:
     """``(header, rows)`` for the Min/P5/Q1/Median/Mean/Q3/P95/Max strip, one
     row per ``(label, values)`` pair. Matplotlib-free so it is independently
     testable; :func:`draw_stats_strip` renders it under a plot.
+
+    ``weights`` (one array per series, or None) makes the percentiles and mean
+    distance-weighted, so the strip agrees with a weighted curve drawn above
+    it. Min and Max are the same either way -- a weight changes how much a
+    sample counts, not whether it happened. Omitted, the output is unchanged.
     """
+    from dtt.analysis.auc import weighted_percentile
+
     header = ["Run", *_STATS_COLS]
     rows: List[List[str]] = []
-    for label, vals in series:
+    for i, (label, vals) in enumerate(series):
+        w = weights[i] if weights is not None and i < len(weights) else None
         v = np.asarray(vals, dtype=float)
-        v = v[np.isfinite(v)]
+        if w is not None:
+            w = np.asarray(w, dtype=float)[:v.size]
+            v = v[:w.size]
+            ok = np.isfinite(v) & np.isfinite(w) & (w > 0)
+            v, w = v[ok], w[ok]
+        else:
+            v = v[np.isfinite(v)]
         if v.size == 0:
             rows.append([label] + ["—"] * len(_STATS_COLS))
             continue
-        stats = [v.min(), np.percentile(v, 5), np.percentile(v, 25), np.median(v),
-                 v.mean(), np.percentile(v, 75), np.percentile(v, 95), v.max()]
+        if w is None:
+            stats = [v.min(), np.percentile(v, 5), np.percentile(v, 25), np.median(v),
+                     v.mean(), np.percentile(v, 75), np.percentile(v, 95), v.max()]
+        else:
+            q = lambda p: weighted_percentile(v, w, p)          # noqa: E731
+            stats = [v.min(), q(5), q(25), q(50), float(np.average(v, weights=w)),
+                     q(75), q(95), v.max()]
         rows.append([label] + [f"{s:.1f}" for s in stats])
     return header, rows
 
@@ -335,7 +356,9 @@ _STATS_STRIP_THEMES = {
 def draw_stats_strip(ax, series: Sequence[Tuple[str, np.ndarray]],
                      colors: Optional[Sequence[str]] = None,
                      theme: str = "dark", fontsize: float = 7,
-                     bbox: Optional[List[float]] = None) -> None:
+                     bbox: Optional[List[float]] = None,
+                     weights: Optional[Sequence[Optional[np.ndarray]]] = None,
+                     ) -> None:
     """Render the Min/P5/Q1/Median/Mean/Q3/P95/Max strip as a small table
     directly under ``ax`` — the "more informative" element the reference
     EV-vs-IC slides carry below their comparison plots, standardised here so
@@ -345,7 +368,7 @@ def draw_stats_strip(ax, series: Sequence[Tuple[str, np.ndarray]],
     navy chrome; ``"light"`` matches the white-background force-histogram/AUC
     style instead of clashing with it.
     """
-    header, rows = stats_strip_rows(series)
+    header, rows = stats_strip_rows(series, weights=weights)
     if not rows:
         return
     th = _STATS_STRIP_THEMES[theme]

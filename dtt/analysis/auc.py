@@ -120,35 +120,110 @@ def kde_curve(data: np.ndarray, x_grid: np.ndarray,
     return np.interp(x_grid, centers, smoothed) * fold
 
 
-def compare_distributions(reference: np.ndarray, current: np.ndarray
+def weighted_percentile(values: np.ndarray, weights: np.ndarray,
+                        q: float) -> float:
+    """The ``q``-th percentile of ``values`` with each sample counted by weight.
+
+    Used for distance weighting: a sample recorded while the vehicle covered
+    two metres counts twice as much as one recorded over one metre, so a run
+    that idled for ten minutes does not have its load distribution pulled
+    toward the idle load. ``np.percentile`` has no weights argument (its
+    ``method`` options change the interpolation, not the sample weight).
+
+    Midpoint-cumulative definition: each sample's position on the 0-100 axis
+    is the centre of its own weight, so equal weights reproduce
+    ``np.percentile``'s linear interpolation to within one sample's width.
+    """
+    v = np.asarray(values, dtype=float)
+    w = np.asarray(weights, dtype=float)
+    ok = np.isfinite(v) & np.isfinite(w) & (w > 0)
+    v, w = v[ok], w[ok]
+    if v.size == 0:
+        return float("nan")
+    order = np.argsort(v, kind="stable")
+    v, w = v[order], w[order]
+    cw = np.cumsum(w)
+    total = cw[-1]
+    pos = 100.0 * (cw - 0.5 * w) / total
+    return float(np.interp(q, pos, v))
+
+
+def _share(mask: np.ndarray, weights: Optional[np.ndarray]) -> float:
+    """Percentage of the data inside ``mask`` -- by count, or by weight."""
+    if weights is None:
+        return float(np.mean(mask) * 100.0)
+    total = float(np.sum(weights))
+    return float(np.sum(weights[mask]) / total * 100.0) if total > 0 else float("nan")
+
+
+def _clean_pair(values, weights):
+    """Finite values, and their weights masked the same way."""
+    v = np.asarray(values, dtype=float)
+    if weights is None:
+        return v[np.isfinite(v)], None
+    w = np.asarray(weights, dtype=float)
+    n = min(v.size, w.size)
+    v, w = v[:n], w[:n]
+    ok = np.isfinite(v) & np.isfinite(w) & (w >= 0)
+    return v[ok], w[ok]
+
+
+def compare_distributions(reference: np.ndarray, current: np.ndarray,
+                          weights_ref: Optional[np.ndarray] = None,
+                          weights_cur: Optional[np.ndarray] = None,
                           ) -> Optional[AucComparison]:
-    """Overlap statistics of ``current`` against ``reference`` as the baseline."""
-    ref = np.asarray(reference, dtype=float)
-    cur = np.asarray(current, dtype=float)
-    ref = ref[np.isfinite(ref)]
-    cur = cur[np.isfinite(cur)]
+    """Overlap statistics of ``current`` against ``reference`` as the baseline.
+
+    With no weights this is exactly what it always was: plain percentiles and
+    plain proportions, byte-for-byte. Pass per-sample weights (distance, from
+    ``histograms._get_speed_weights``) for both runs and every figure becomes
+    distance-weighted -- percentiles *and* the exceedance/band shares -- so the
+    numbers describe the same distribution the weighted KDE draws. Weighting
+    one side and not the other would compare two different questions, so it
+    is refused.
+    """
+    if (weights_ref is None) != (weights_cur is None):
+        raise ValueError("weight both runs or neither -- mixing a distance-"
+                         "weighted and a sample-count distribution compares "
+                         "two different things")
+    ref, w_ref = _clean_pair(reference, weights_ref)
+    cur, w_cur = _clean_pair(current, weights_cur)
     if ref.size < 2 or cur.size < 2:
         return None
 
-    p5_ref, p95_ref = (float(np.percentile(ref, 5)), float(np.percentile(ref, 95)))
+    if w_ref is None:
+        p5_ref, p95_ref = (float(np.percentile(ref, 5)), float(np.percentile(ref, 95)))
+        p5_cur, p95_cur = (float(np.percentile(cur, 5)), float(np.percentile(cur, 95)))
+    else:
+        p5_ref = weighted_percentile(ref, w_ref, 5)
+        p95_ref = weighted_percentile(ref, w_ref, 95)
+        p5_cur = weighted_percentile(cur, w_cur, 5)
+        p95_cur = weighted_percentile(cur, w_cur, 95)
+
     return AucComparison(
         p5_ref=p5_ref, p95_ref=p95_ref,
-        p5_cur=float(np.percentile(cur, 5)),
-        p95_cur=float(np.percentile(cur, 95)),
-        pct_exceed_ref_p95=float(np.mean(cur >= p95_ref) * 100.0),
-        pct_normal_cur=float(np.mean((cur >= p5_ref) & (cur <= p95_ref)) * 100.0),
-        pct_normal_ref=float(np.mean((ref >= p5_ref) & (ref <= p95_ref)) * 100.0),
+        p5_cur=p5_cur, p95_cur=p95_cur,
+        pct_exceed_ref_p95=_share(cur >= p95_ref, w_cur),
+        pct_normal_cur=_share((cur >= p5_ref) & (cur <= p95_ref), w_cur),
+        pct_normal_ref=_share((ref >= p5_ref) & (ref <= p95_ref), w_ref),
         n_ref=int(ref.size), n_cur=int(cur.size),
     )
 
 
 def auc_grid(reference: np.ndarray, current: np.ndarray, n: int = 500,
-             xlim: Optional[Tuple[float, float]] = None
+             xlim: Optional[Tuple[float, float]] = None,
+             weights_ref: Optional[np.ndarray] = None,
+             weights_cur: Optional[np.ndarray] = None,
              ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """``(x, kde_reference, kde_current)`` ready to plot."""
-    ref = np.asarray(reference, dtype=float)
-    cur = np.asarray(current, dtype=float)
-    both = np.concatenate([ref[np.isfinite(ref)], cur[np.isfinite(cur)]])
+    """``(x, kde_reference, kde_current)`` ready to plot.
+
+    Weights, when given, go straight to :func:`kde_curve`, which already
+    supports them -- the curve then integrates to 1 against distance rather
+    than against sample count.
+    """
+    ref, w_ref = _clean_pair(reference, weights_ref)
+    cur, w_cur = _clean_pair(current, weights_cur)
+    both = np.concatenate([ref, cur])
     if both.size < 2:
         empty = np.zeros(n)
         return np.linspace(0, 1, n), empty, empty
@@ -160,4 +235,4 @@ def auc_grid(reference: np.ndarray, current: np.ndarray, n: int = 500,
     if not (hi > lo):
         lo, hi = float(both.min()), float(both.max()) or 1.0
     x = np.linspace(lo, hi, n)
-    return x, kde_curve(ref, x), kde_curve(cur, x)
+    return x, kde_curve(ref, x, weights=w_ref), kde_curve(cur, x, weights=w_cur)
