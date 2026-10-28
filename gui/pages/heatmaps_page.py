@@ -1,6 +1,12 @@
 """Screen 7 — Heatmaps: correlation maps (Fx×Fy, Fz×Fy, Fz×Fx), with a
 user-configurable bin range (min/max/step per component), mirroring the
-reference WFT analyzer's Force Heatmaps panel."""
+reference WFT analyzer's Force Heatmaps panel.
+
+The boxes start at the bins this study's heatmaps use -- the standard
+``HEATMAP_BIN_RANGES_DAN``, the vehicle preset's, or a range set here before
+(resolved by ``dtt.analysis.heatmaps``, the same code the pipeline and report
+use). Generating saves the range for the study, so its next pipeline run and
+report use it too; "Reset to standard" removes it."""
 
 from __future__ import annotations
 
@@ -15,8 +21,11 @@ from gui.pages.base_page import BasePage
 from gui.widgets.common import SectionTitle, Card, ScrollPage, FigureGrid
 from gui.widgets.image_viewer import ImageViewerDialog
 from gui.models.repository import WHEELS
-from dtt.config import FORCE_RANGES_DAN, DEFAULT_SAMPLING_RATE
-from dtt.analysis.heatmaps import generate_correlation_heatmaps
+from dtt.config import DEFAULT_SAMPLING_RATE
+from dtt.analysis.heatmaps import (
+    clear_user_bin_ranges, generate_correlation_heatmaps, heatmap_bin_ranges,
+    load_user_bin_ranges, save_user_bin_ranges,
+)
 
 # (display title, figure base name)
 _CORRELATION = [
@@ -25,12 +34,15 @@ _CORRELATION = [
     ("Fz × Fx", "fz_fx_all"),
 ]
 
-# Default Min / Max / Step (daN) for each component's bin-range spinboxes.
-_DEFAULT_RANGE = {
-    "Fx": (FORCE_RANGES_DAN["Fx"][0], FORCE_RANGES_DAN["Fx"][1], 100.0),
-    "Fy": (FORCE_RANGES_DAN["Fy"][0], FORCE_RANGES_DAN["Fy"][1], 100.0),
-    "Fz": (FORCE_RANGES_DAN["Fz"][0], FORCE_RANGES_DAN["Fz"][1], 100.0),
-}
+
+def _study_default_ranges(study) -> dict:
+    """The bins the pipeline gives this study without a GUI choice: the
+    auto-matched vehicle preset's, which for a PV are the standard ones."""
+    try:
+        from dtt.vehicles import match_preset
+        return heatmap_bin_ranges(match_preset(study.run_channels().channel_set).tyre)
+    except Exception:                                             # noqa: BLE001
+        return heatmap_bin_ranges()
 
 
 class HeatmapsPage(BasePage):
@@ -57,11 +69,22 @@ class HeatmapsPage(BasePage):
 
     def refresh(self) -> None:
         self.generate_btn.setEnabled(self.study is not None)
+        self.reset_btn.setEnabled(self.study is not None)
         if not self.study:
             self.corr_grid.set_figures([])
             return
+        user = load_user_bin_ranges(self.study.path)
+        self._set_bin_ranges(user or _study_default_ranges(self.study))
+        self.range_source.setText(
+            "Set for this study — its next pipeline run and report use these bins."
+            if user else "Default bins for this study.")
         self.corr_grid.set_figures(
             [(title, self.study.heatmap(name)) for title, name in _CORRELATION])
+
+    def _set_bin_ranges(self, ranges: dict) -> None:
+        for comp, values in ranges.items():
+            for key, value in zip(("min", "max", "step"), values):
+                self._range_boxes[comp][key].setValue(value)
 
     def _open(self, path) -> None:
         ImageViewerDialog.show_for(path, self)
@@ -100,12 +123,24 @@ class HeatmapsPage(BasePage):
             generate_correlation_heatmaps(
                 df, self.study.figures_dir, rc, wheels, wheel_colors,
                 sampling_rate, bin_ranges=bin_ranges)
+            save_user_bin_ranges(self.study.path, bin_ranges)
         except Exception as ex:
             QMessageBox.critical(self, "Generate Force Heatmaps", f"Failed: {ex}")
             return
         finally:
             QApplication.restoreOverrideCursor()
 
+        self.refresh()
+
+    def _reset(self) -> None:
+        """Forget this study's own range; the next pipeline run (and report)
+        goes back to the default bins, and so do the heatmaps shown here."""
+        if not self.study:
+            return
+        clear_user_bin_ranges(self.study.path)
+        self._set_bin_ranges(_study_default_ranges(self.study))
+        self._generate()
+        clear_user_bin_ranges(self.study.path)     # _generate saved the defaults
         self.refresh()
 
 
@@ -116,8 +151,9 @@ def _range_card(page: HeatmapsPage) -> Card:
     form = QFormLayout()
     form.setSpacing(8)
     page._range_boxes = {}
+    defaults = heatmap_bin_ranges()
     for comp in ("Fx", "Fy", "Fz"):
-        mn_default, mx_default, step_default = _DEFAULT_RANGE[comp]
+        mn_default, mx_default, step_default = defaults[comp]
         row = QHBoxLayout()
         boxes = {}
         for key, default in (("min", mn_default), ("max", mx_default), ("step", step_default)):
@@ -138,7 +174,19 @@ def _range_card(page: HeatmapsPage) -> Card:
     page.generate_btn.setObjectName("Primary")
     page.generate_btn.clicked.connect(page._generate)
     page.generate_btn.setEnabled(False)
-    card.layout().addWidget(page.generate_btn)
+    page.reset_btn = QPushButton("Reset to standard")
+    page.reset_btn.setObjectName("Secondary")
+    page.reset_btn.setToolTip("Forget this study's own bin range and redraw with the default bins.")
+    page.reset_btn.clicked.connect(page._reset)
+    page.reset_btn.setEnabled(False)
+    buttons = QHBoxLayout()
+    buttons.addWidget(page.generate_btn)
+    buttons.addWidget(page.reset_btn)
+    buttons.addStretch(1)
+    card.layout().addLayout(buttons)
+    page.range_source = QLabel("")
+    page.range_source.setStyleSheet("font-size:11px;")
+    card.layout().addWidget(page.range_source)
     return card
 
 

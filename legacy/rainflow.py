@@ -1,3 +1,9 @@
+"""DISABLED 2026-10-28 -- the rainflow stage, formerly dtt/analysis/rainflow.py.
+
+Nothing in the app imports this. Its constants and the Miner exponent
+(formerly ``RunConfig.miner_exponent``) now live here; see legacy/README.md.
+"""
+
 import csv
 import logging
 from pathlib import Path
@@ -14,13 +20,19 @@ from dtt.config import (
     WHEEL_COLORS,
     CHAN_COLORS,
     PLOT_COLORS,
-    RAINFLOW_BINS,
-    RAINFLOW_MAXPTS,
-    RF_STEPS,
-    RF_COLORS,
     FIGURE_DPI,
     RunConfig,
 )
+
+RAINFLOW_BINS:   int   = 16
+RAINFLOW_MINER:  float = 8.0
+RAINFLOW_MAXPTS: int   = 50000
+
+RF_STEPS  = [0, 1, 5, 10, 50, 100, 500, 1000, 5000, 10000, 50000]
+RF_COLORS = [
+    "#000080", "#0000FF", "#0080FF", "#00FFFF", "#00FF80",
+    "#00FF00", "#80FF00", "#FFFF00", "#FF8000", "#FF0000", "#800000",
+]
 from dtt.analysis.plot_style import draw_histogram
 from dtt.channel_names import display_name
 # The range-distribution row (ax2) uses the Histograms page's light theme;
@@ -130,9 +142,10 @@ def _save_cycles_csv(cycles: list, ch: str, out_dir: Path) -> None:
             ])
 
 
-def generate_rainflow(df: pd.DataFrame, config: RunConfig) -> None:
+def generate_rainflow(df: pd.DataFrame, config: RunConfig,
+                      miner_exponent: float = RAINFLOW_MINER) -> None:
     out    = config.figures_dir
-    m      = config.miner_exponent
+    m      = miner_exponent
     rc     = config.run_channels
     wheel_groups = rc.wheel_groups if rc is not None else WHEEL_GROUPS
     wheel_colors = rc.wheel_colors if rc is not None else WHEEL_COLORS

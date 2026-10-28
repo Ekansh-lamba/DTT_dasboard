@@ -76,7 +76,7 @@ class NewStudyPage(BasePage):
         self.mode_combo.setToolTip(
             "Full run: today's normal pipeline.\n"
             "Preprocess only: ingest + condition the signal, save processed_data.csv / "
-            "raw_data.csv, then stop -- no histograms/heatmaps/rainflow/report.\n"
+            "raw_data.csv, then stop -- no histograms/heatmaps/report.\n"
             "Analysis only: skip preprocessing entirely and re-run just the analysis "
             "stages on an existing study's processed_data.csv, in place. Checks that "
             "study's saved processing provenance and warns (never silently) if it "
@@ -423,12 +423,6 @@ class NewStudyPage(BasePage):
         self.order_spin.setValue(4)
         fform.addRow("Filter order", self.order_spin)
 
-        self.miner_spin = QDoubleSpinBox()
-        self.miner_spin.setRange(1.0, 20.0)
-        self.miner_spin.setSingleStep(0.5)
-        self.miner_spin.setValue(8.0)
-        fform.addRow("Miner's exponent", self.miner_spin)
-
         self.range_mode_combo = QComboBox()
         self.range_mode_combo.addItem("Full range (configured span)", "full")
         self.range_mode_combo.addItem("Autoscale to data (P0.5-P99.5)", "autoscale")
@@ -503,7 +497,7 @@ class NewStudyPage(BasePage):
         self.module_checks = {}
         for i, m in enumerate([
                 "Statistics", "Histograms", "Heatmaps",
-                "Boxplots", "Rainflow", "PowerPoint Report"]):
+                "Boxplots", "PowerPoint Report"]):
             cb = QCheckBox(m)
             cb.setChecked(True)
             cb.setEnabled(False)
@@ -511,7 +505,7 @@ class NewStudyPage(BasePage):
             self.module_checks[m] = cb
             mod_grid.addWidget(cb, i // 2, i % 2)
         right.layout().addLayout(mod_grid)
-        note = QLabel("Modules reflect the backend's fixed 9-stage pipeline.")
+        note = QLabel("Modules reflect the backend's fixed 8-stage pipeline.")
         note.setStyleSheet(f"color:{theme.TEXT_FAINT}; font-size:11px;")
         right.layout().addWidget(note)
         columns.addWidget(right, 1)
@@ -571,8 +565,6 @@ class NewStudyPage(BasePage):
             self.stops_check.setEnabled(True)
             self.stop_min_spin.setEnabled(self.stops_check.isChecked())
             self.stop_speed_spin.setEnabled(self.stops_check.isChecked())
-        # Miner's exponent still matters in analysis-only mode (rainflow runs).
-        self.miner_spin.setEnabled(True)
         self.study_edit.setEnabled(not is_analysis)
         # Preprocess-only writes no report, so the report fields do nothing there.
         makes_report = mode != "preprocess"
@@ -869,7 +861,6 @@ class NewStudyPage(BasePage):
             study=self.study_edit.text().strip(),
             cutoff=self.cutoff_spin.value() if self.cutoff_spin.isEnabled() else None,
             order=self.order_spin.value() if self.order_spin.isEnabled() else None,
-            miner=self.miner_spin.value(),
             no_filter=not self.filter_check.isChecked(),
             no_famos=not self.famos_check.isChecked(),
             deglitch=self.deglitch_check.isChecked(),

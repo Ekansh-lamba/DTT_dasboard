@@ -23,7 +23,7 @@ hiddenimports = (
     # median_filter); scipy submodules load lazily, so name it explicitly.
     # openpyxl is selected by name (pd.ExcelWriter(engine="openpyxl")) for the
     # comparison workbook export, so static analysis cannot see the import.
-    + ["scipy.signal", "scipy.ndimage", "scipy.special", "rainflow", "pptx",
+    + ["scipy.signal", "scipy.ndimage", "scipy.special", "pptx",
        "openpyxl", "matplotlib.backends.backend_pdf",
        "PySide6.QtSvg", "PySide6.QtPrintSupport"]
 )

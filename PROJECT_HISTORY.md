@@ -31,8 +31,9 @@ It ingests Wheel Force Transducer (WFT) recordings — the forces and moments
 at each wheel, hundreds of samples per second, captured over real-world
 durability routes — reproduces the exact signal conditioning a licensed imc
 **FAMOS** installation would apply, and turns the result into statistics,
-histograms, heatmaps, rainflow fatigue counts, load-severity numbers, and a
-PowerPoint report, through a PySide6 desktop GUI or a CLI.
+histograms, heatmaps, box plots, load-severity numbers, and a PowerPoint
+report, through a PySide6 desktop GUI or a CLI. (Rainflow fatigue counting
+and a Welch PSD existed until Round 8 and are disabled for now, §9E.)
 
 The one architectural fact that explains almost every decision in this
 document: **the platform's entire value proposition is that its numbers
@@ -44,8 +45,10 @@ implementations turned out to be measurably wrong against the real thing.
 
 ### Codebase shape
 - `dtt/` — the pipeline: ingestion, validation, sanitization, signal
-  processing, statistics, histograms, heatmaps, boxplots, rainflow,
-  severity, reporting.
+  processing, statistics, histograms, heatmaps, boxplots, severity,
+  reporting.
+- `legacy/` — the disabled rainflow, Welch PSD and RF Compare code (§9E);
+  nothing in the app imports it.
 - `famos/` — the canonical FAMOS operator library (`smo`, `FiltLP`, `red`,
   and a chain/translation layer), added mid-project to end three drifting
   copies of the same math (see §4.9).
@@ -81,6 +84,7 @@ implementations turned out to be measurably wrong against the real thing.
 | 2026-09 | **Round 5**: histogram/AUC readability (soft-fill light restyle, x-axis autoscale), rainflow-page histograms restyled, GUI surfacing of terminal-only features (§9B) | Claude + user |
 | 2026-09 | **Round 6**: new-study UX (raw default, multi-session add, last-used dir), boxplot matched to analyzer + `BOX_YLIMS` rescaled, flat-channel diagnosis — no live bug (§9C) | Claude + user |
 | 2026-10-27 | **Round 7**: PPTX result slides rebuilt to the project-charter deck format — PV / CV force-distribution pages, combination heatmap, dataset-B comparison from config/CLI/GUI (§9D) | Claude + user |
+| 2026-10-28 | **Round 8**: Rainflow, Welch PSD and RF Compare disabled (code kept in `legacy/`); report heatmaps on the standard daN bins from one source; severity slide and "Fatigue & PSD" section dropped from the report; `.exe` rebuilt (§9E) | Claude + user |
 
 ---
 
@@ -897,6 +901,96 @@ analysis mode re-reads `processed_data.csv`, which is written at limited float
 precision. Pre-existing, not from this round, and far below any reported
 precision — but it means "re-run in analysis mode" is not byte-reproducible.
 
+## 9E. Round 8 — Rainflow and PSD disabled, standard report heatmaps (2026-10-28)
+
+The brief asked for five things: remove the Rainflow and PSD analyses "for
+now", make the report's heatmaps use the GUI's standard bin ranges, and drop
+the G-severity slide and the whole "Fatigue & PSD" section from the report --
+with no other number changing.
+
+### 9E.1 Removed from the app
+- **Rainflow** — the sidebar page (matrices, cycle table, "Export all cycle
+  CSVs"), the `[9/9]` pipeline stage, its outputs (`rainflow_*.png`,
+  `rainflow_cycles_*.csv`), `RunConfig.miner_exponent`, `--miner`, the New
+  Study "Miner's exponent" spinbox and "Rainflow" module tick, the Processing
+  tracker's Rainflow stage, the `rainflow` package from the requirements,
+  the exe's hidden imports and the GUI self-check.
+- **Welch PSD** — the sidebar page, the `[9b/9]` stage and its `psd_*.png`.
+  `dtt/spectral.py` keeps `amplitude_spectrum_db`, `log_downsample` and
+  `estimate_lag` (the Signals page's FFT and time-sync); only `welch_psd` left.
+- **RF Compare** — backend-only (no CLI flag or GUI ever reached it); its
+  block in `study_compare.py` is gone. The rest of the two-run comparison
+  (RMS / DLC / G-severity deltas, AUC overlays, Compare studies page) is
+  unchanged.
+- The pipeline is now eight stages, logged `[1/8]`..`[8/8]`; the GUI stage
+  regexes and the New Study note follow.
+- Report: the "Load Severity – Gx / Gy / Gxy / DLC" slide, the "Fatigue &
+  PSD" divider and its rainflow and PSD slides. The "Module 1" divider's
+  subtitle no longer mentions severity. There is no agenda/TOC slide; slide
+  numbers are assigned as slides are added, so they stay continuous
+  (now tested). 28 → 22 slides on the reference recording.
+
+### 9E.2 Unwired but kept
+- `legacy/rainflow.py`, `legacy/psd.py` (with `welch_psd`) and
+  `legacy/rf_compare.py`, made self-contained (the rainflow constants and
+  Miner exponent moved in with them), plus a one-line README. The folder is
+  outside `dtt/`, so `collect_submodules("dtt")` does not bundle it into the
+  exe, and a test fails if anything in `dtt/`, `gui/` or `famos/` imports it.
+- G-severity and DLC are still computed every run (`[5b/8]`, the log,
+  `severity_summary.json`, `severity_table.png`) and still feed the two-run
+  comparison. They were never on a single-study GUI page, and still are not.
+- `plot_style.py` untouched (the soft/banded histogram paths are shared).
+- Stop removal's seam handling was validated against a rainflow damage
+  ratio (§5.4); no test re-runs that check, so nothing needed keeping for it.
+
+### 9E.3 Heatmap bins: one source
+`config.HEATMAP_BIN_RANGES_DAN` — Fx −300..300/100, Fy −300..300/100,
+Fz 100..1000/100 daN — is now the only place the numbers live. The GUI's
+"Bin range (daN)" boxes, the pipeline's correlation heatmaps and hexbins, and
+the report's Fx & Fy combination heatmap all resolve their bins through
+`heatmaps.resolve_bin_ranges(config)`:
+1. a range the user generated for this study on the Heatmaps page, saved as
+   `heatmap_bins.json` in the study folder ("Reset to standard" deletes it);
+2. else the vehicle preset's own bins (`TyreParams.heatmap_bins_dan`);
+3. else the standard.
+
+What it replaced: the GUI defaulted to `FORCE_RANGES_DAN` + step 100, while the
+pipeline used `_comp_bins(config.tyre)` — and because the pipeline always sets
+`config.tyre`, the *tyre* ranges were the real default: a PV got Fz 0..1000 in
+166.7 daN bins, not the GUI's 100..1000/100. The result-slide combination
+heatmap used yet another range (±4000 N / 1000 N, §9D; CV ±10000 N / 2500 N).
+Now the PV preset declares no override and gets the standard. Every other
+preset declares its tyre ranges in six equal bins — exactly the bins it drew
+before — so truck/bus/trailer heatmaps are unchanged and the per-vehicle
+override still works, now explicitly. The combination heatmap and the hexbins
+are in daN (hexbin ±3000 N → ±300 daN is the same physical span). Axis ticks
+sit on the bin edges.
+
+**Out-of-range samples are dropped, not clipped** — unchanged behaviour of
+`np.histogram2d`: a sample outside the edges is not counted, and each cell's
+percentage is a share of the *in-range* samples (or distance). On the
+reference recording the standard bins leave out 0.02–3.2 % of samples per
+panel (most from Fx beyond ±300 daN); the cells add to 100 % of what is
+shown, not of the whole drive.
+
+### 9E.4 Validation
+- Same raw recording, before (a snapshot of the pre-change tree) and after:
+  `stats_summary.json`, `severity_summary.json`, `validation_report.json`,
+  provenance, `processed_data.csv`, `raw_data.csv` and both FAMOS-layout CSVs
+  identical; 49 figures byte-identical (histograms, AUC, box plots, PV
+  distribution plots, and `heatmap_fx_fy_all.png`, whose bins did not move).
+  Only the Fz heatmaps, the hexbins and the combination heatmap differ.
+  The same study run through the GUI's own `PipelineWorker` matched the CLI run.
+- GUI: every sidebar page visited for the new study, the pre-change study and
+  three real old studies holding rainflow/PSD files — no exception, no error
+  dialog; History lists all 30 studies. A custom range set on the Heatmaps
+  page was used by the next analysis-mode run and by its report.
+- Old configs: `RunConfig.from_dict` drops unknown keys (`miner_exponent`, …)
+  with one warning; old `run_provenance.json` files load unchanged.
+- Report rendered through PowerPoint COM (still no LibreOffice/pdftoppm on
+  the dev machine) and every slide looked at.
+- `.exe` rebuilt (onedir) and a study run through it.
+
 ## 10. Open items / known gaps
 
 - **Raw reader 58-sample offset** (§4.6, Check 3) — still unfixed. A real,
@@ -949,10 +1043,19 @@ precision — but it means "re-run in analysis mode" is not byte-reproducible.
   artifacts, not code defects. Worth a deliberate cleanup pass: re-run the
   studies that matter on the current build, and clearly mark/quarantine the old
   ones so they aren't opened and mistaken for current output.
-- **Two-run comparison / RF Compare have no GUI** (the PPTX result slides'
-  dataset-B comparison does, §9D) — the backend exists and works
-  (§9A.1) but is reachable only via CLI/Python; the GUI was deferred pending a
-  two-study picker design that pairs with the larger GUI restructure (§9B.3).
+- **Rainflow / PSD / RF Compare are disabled, not deleted** (§9E) — to bring
+  one back, move it out of `legacy/`, re-add the stage, flag and page, and
+  `rainflow>=3.1.0` to the requirements and the exe's hidden imports. An old
+  script that still passes `--miner` now fails at argument parsing.
+- **Single-study G-severity/DLC has no GUI view** — since the report slide went
+  (§9E), a study's own Gx/Gy/Gxy/DLC are only in `severity_summary.json`,
+  `severity_table.png` and the log; Compare studies shows them as deltas.
+- **Correlation-heatmap suptitle overlaps the right panel's title and top
+  tick** — pre-existing figure layout (`_pair_heatmap`), visible on the
+  report's heatmap slides; not touched in Round 8.
+- **The Processing tracker counts "Report Generation" twice** — both
+  `[Report]` log lines (result figures, PowerPoint) match its marker since
+  Round 7; cosmetic.
 - **Histogram/AUC split + readability scaling (items 4 & 7)** — briefed but not
   yet implemented as of this update: split histograms and AUC into two sections
   and fix axis/label readability on both.
@@ -962,9 +1065,9 @@ precision — but it means "re-run in analysis mode" is not byte-reproducible.
 - **Result-slide assumptions to confirm** (§9D) — moment axis is labelled
   daN·m (the codebase's unit) while the reference deck says Nm; Acc/Brake and
   Left/Right-turn tags follow the reference (−Fx = acceleration, +Fy = left
-  turn), since no sign convention is defined in code; the CV heatmap default
-  (±10000 N, 2500 N bins) is a guess, the deck only shows PV; a CV row plots one
-  wheel per axle (the left/outer one).
+  turn), since no sign convention is defined in code; a CV row plots one
+  wheel per axle (the left/outer one). (The CV combination-heatmap guess of
+  ±10000 N / 2500 N is gone: it now uses the vehicle preset's bins, §9E.3.)
 - **Vehicle-specific boxplot limits** — `BOX_YLIMS` is now one global set per
   force type (§9C.2). `heatmaps.py::_comp_bins` already supports per-vehicle range
   overrides; boxplots don't. Only matters if vehicles with very different load

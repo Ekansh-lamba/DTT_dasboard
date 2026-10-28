@@ -58,11 +58,16 @@ BOX_YLIMS: Dict[str, Tuple[float, float]] = {
     "Fz": (300.0,  1100.0),
 }
 
-FZ_HEATMAP_BINS_DAN = [200.0, 400.0, 600.0, 800.0, 1000.0, 1200.0]
-FXY_HEATMAP_BIN_STEP_DAN = 100.0
-FXY_HEATMAP_RANGE_DAN     = 300.0
+# Standard force-heatmap bins, (min, max, step) in daN. The one source for the
+# GUI's "Bin range (daN)" defaults and every heatmap the pipeline and report
+# draw; a vehicle preset may override it (TyreParams.heatmap_bins_dan) and a
+# user's GUI choice for a study overrides both (heatmaps.HEATMAP_BINS_FILE).
+HEATMAP_BIN_RANGES_DAN: Dict[str, Tuple[float, float, float]] = {
+    "Fx": (-300.0, 300.0, 100.0),
+    "Fy": (-300.0, 300.0, 100.0),
+    "Fz": (100.0, 1000.0, 100.0),
+}
 
-HEXBIN_EXTENT_N  = [-3000, 3000, -3000, 3000]
 HEXBIN_GRIDSIZE  = 80
 
 PERCENTILES: List[int] = [80, 90, 95]
@@ -76,11 +81,6 @@ REPORT_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
     "cv": {"Fx": (-1000.0, 1000.0), "Fy": (-1000.0, 1000.0), "Fz": (5000.0, 12000.0),
            "My": (-9000.0, 7000.0)},
 }
-# Fx & Fy combination heatmap: (half-range, bin width) in N, both axes.
-REPORT_COMBO_HEATMAP_N: Dict[str, Tuple[float, float]] = {
-    "pv": (4000.0, 1000.0),
-    "cv": (10000.0, 2500.0),
-}
 
 PLOT_COLORS = {
     "bg":       "#0D1B2A",
@@ -93,16 +93,6 @@ PLOT_COLORS = {
     "text_sec": "#90E0EF",
     "btn_bg":   "#00B4D8",
 }
-
-RAINFLOW_BINS:   int   = 16
-RAINFLOW_MINER:  float = 8.0
-RAINFLOW_MAXPTS: int   = 50000
-
-RF_STEPS  = [0, 1, 5, 10, 50, 100, 500, 1000, 5000, 10000, 50000]
-RF_COLORS = [
-    "#000080", "#0000FF", "#0080FF", "#00FFFF", "#00FF80",
-    "#00FF00", "#80FF00", "#FFFF00", "#FF8000", "#FF0000", "#800000",
-]
 
 HIST_BINS: int = 60
 
@@ -181,12 +171,11 @@ class RunConfig:
     transient_despike_window_s:      float = 1.0
     transient_despike_noise_floor_mult: float = 10.0
     transient_despike_max_spike_frac:   float = 0.4
-    remove_stops:            bool  = False  # cut stationary stretches for every analysis stage (stats/severity/histograms/heatmaps/boxplots/rainflow); processed_data.csv/raw_data.csv stay the full recording
+    remove_stops:            bool  = False  # cut stationary stretches for every analysis stage (stats/severity/histograms/heatmaps/boxplots); processed_data.csv/raw_data.csv stay the full recording
     stop_speed_kph:           float = 1.5   # below this reads as "stopped", not literal zero
     stop_min_s:                float = 3.0   # shorter than this is traffic, not a stop worth cutting
     stop_seam_search_s:        float = 1.0   # nudge each cut boundary up to this many seconds to a quiet moment
     stop_seam_blend_s:         float = 0.2   # short linear blend across whatever step survives the nudge
-    miner_exponent: float = RAINFLOW_MINER
     histogram_range_mode: str = "full"  # "full" (configured FORCE_RANGES_DAN span, today's default) | "autoscale" (P0.5-P99.5 of the actual data)
     export_famos_validation_csv: bool = False  # TEMPORARY: one wide post-recipe CSV for manual FAMOS cross-check; off by default, not part of the normal study output
     workflow_mode:  str   = "both"     # "preprocess" | "analysis" | "both" (default, today's full pipeline)
@@ -205,6 +194,21 @@ class RunConfig:
     output_dir:     Path  = field(default_factory=lambda: OUTPUTS_DIR)
     run_channels:   object = None      # ChannelSet-derived config, built at run time
     tyre:           object = None      # resolved TyreParams for the vehicle type
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RunConfig":
+        """A RunConfig from saved settings. Keys this version no longer has
+        (``miner_exponent`` and the other rainflow/PSD settings disabled on
+        2026-10-28, or anything else) are dropped with one warning, so an old
+        saved config still loads."""
+        import dataclasses
+        import logging
+        known = {f.name for f in dataclasses.fields(cls) if f.init}
+        unknown = sorted(k for k in data if k not in known)
+        if unknown:
+            logging.getLogger(__name__).warning(
+                "Ignoring settings this version no longer uses: %s", ", ".join(unknown))
+        return cls(**{k: v for k, v in data.items() if k in known})
 
     def __post_init__(self) -> None:
         import datetime

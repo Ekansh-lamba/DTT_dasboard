@@ -7,7 +7,7 @@ the project documents::
     python -m dtt.pipeline --csv <path> --vehicle <name> --study <name> ...
 
 run from the project root, captures the merged stdout/stderr stream line by
-line, and translates the pipeline's ``[n/9]  Stage`` log markers into
+line, and translates the pipeline's ``[n/8]  Stage`` log markers into
 structured Qt signals the Processing screen consumes.
 """
 
@@ -38,7 +38,6 @@ class RunRequest:
     study: str = ""
     cutoff: Optional[float] = None
     order: Optional[int] = None
-    miner: Optional[float] = None
     no_filter: bool = False
     no_famos: bool = False        # fall back to the legacy Butterworth LPF
     deglitch: bool = False        # rolling-median removal of DAQ artifact spikes
@@ -96,8 +95,6 @@ class RunRequest:
             cmd += ["--cutoff", str(self.cutoff)]
         if self.order is not None:
             cmd += ["--order", str(self.order)]
-        if self.miner is not None:
-            cmd += ["--miner", str(self.miner)]
         if self.no_filter:
             cmd += ["--no-filter"]
         if self.no_famos:
@@ -150,7 +147,7 @@ class RunRequest:
 
 
 # Ordered stage list shown in the Processing screen. The regex maps a log line
-# to the stage index. The backend logs e.g. "[1/9]  Data Ingestion".
+# to the stage index. The backend logs e.g. "[1/8]  Data Ingestion".
 STAGES: List[str] = [
     "Data Ingestion",
     "Validation",
@@ -160,21 +157,19 @@ STAGES: List[str] = [
     "Histograms",
     "Heatmaps",
     "Boxplots",
-    "Rainflow",
     "Report Generation",
 ]
 
 # Backend log phrase  ->  GUI stage name
 _STAGE_MARKERS = [
-    (re.compile(r"\[1/9\].*Ingest", re.I),        "Data Ingestion"),
-    (re.compile(r"\[2/9\].*Valid", re.I),         "Validation"),
-    (re.compile(r"\[3/9\].*Sanitiz", re.I),       "Sanitization"),
-    (re.compile(r"\[4/9\].*(Signal|Filter|Butter)", re.I), "Filtering"),
-    (re.compile(r"\[5/9\].*Statist", re.I),       "Statistics"),
-    (re.compile(r"\[6/9\].*Histogram", re.I),     "Histograms"),
-    (re.compile(r"\[7/9\].*Heatmap", re.I),       "Heatmaps"),
-    (re.compile(r"\[8/9\].*Boxplot", re.I),       "Boxplots"),
-    (re.compile(r"\[9/9\].*Rainflow", re.I),      "Rainflow"),
+    (re.compile(r"\[1/8\].*Ingest", re.I),        "Data Ingestion"),
+    (re.compile(r"\[2/8\].*Valid", re.I),         "Validation"),
+    (re.compile(r"\[3/8\].*Sanitiz", re.I),       "Sanitization"),
+    (re.compile(r"\[4/8\].*(Signal|Filter|Butter)", re.I), "Filtering"),
+    (re.compile(r"\[5/8\].*Statist", re.I),       "Statistics"),
+    (re.compile(r"\[6/8\].*Histogram", re.I),     "Histograms"),
+    (re.compile(r"\[7/8\].*Heatmap", re.I),       "Heatmaps"),
+    (re.compile(r"\[8/8\].*Boxplot", re.I),       "Boxplots"),
     (re.compile(r"\[Report\]", re.I),             "Report Generation"),
 ]
 

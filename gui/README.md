@@ -47,19 +47,18 @@ gui/
     ├── histograms_page.py  #   6. Histograms (wheel/signal selectors)
     ├── heatmaps_page.py    #   7. Heatmaps (+ hexbin, fullscreen)
     ├── boxplots_page.py    #   8. Boxplots
-    ├── rainflow_page.py    #   9. Rainflow (+ cycle CSV export)
-    ├── reports_page.py     #  10. Reports (open / export / regenerate)
-    └── history_page.py     #  11. Study History
+    ├── reports_page.py     #   9. Reports (open / export / regenerate)
+    └── history_page.py     #  10. Study History
 ```
 
 ### How data flows
 
 - **Reading outputs** — every screen receives the active `Study` via
   `load_study()`. `Study` exposes typed accessors (`stats()`, `validation()`,
-  `histogram(wheel, signal, kind)`, `rainflow_cycle_csvs()`, …) so a change to
+  `histogram(wheel, signal, kind)`, `heatmap(name)`, …) so a change to
   the backend's file layout is a one-file edit in `repository.py`.
 - **Monitoring progress** — `PipelineWorker` runs the subprocess and matches
-  each `[n/9]  Stage` log line to a GUI stage, emitting `stage_started`,
+  each `[n/8]  Stage` log line to a GUI stage, emitting `stage_started`,
   `stage_finished(name, seconds)` and `progress(done, total)`. The Processing
   screen renders these as a live checklist with per-stage timings.
 - **Threading** — the subprocess is owned by a `QThread`; all signals cross to

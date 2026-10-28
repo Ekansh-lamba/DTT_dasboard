@@ -48,7 +48,7 @@ Write-Host "Checking dependencies..." -ForegroundColor Cyan
 $checkPy = @'
 import importlib.util, sys
 need = ["PySide6", "numpy", "scipy", "pandas", "matplotlib",
-        "rainflow", "pptx", "openpyxl"]
+        "pptx", "openpyxl"]
 missing = [m for m in need if importlib.util.find_spec(m) is None]
 if missing:
     print("Missing packages: " + ", ".join(missing))

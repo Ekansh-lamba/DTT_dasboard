@@ -862,11 +862,7 @@ def build_report(
     _combination_slide(deck, result_spec, config)
 
     # ---- module 1
-    deck.divider("Module 1", "Tyre load severity & distributions")
-
-    slide = deck.content("Load Severity  –  Gx / Gy / Gxy / DLC",
-                         "G-severity and dynamic load coefficient per wheel")
-    _insert_image_or_message(slide, figs / "severity_table.png", L, T, IMG_W, IMG_H)
+    deck.divider("Module 1", "Tyre load distributions & heatmaps")
 
     half_h = (int(IMG_H) - int(Inches(0.1))) // 2
     for wheel in wheels:
@@ -895,18 +891,6 @@ def build_report(
                          "Sample density, log scale")
     for (lf, tf, gw, gh), wheel in zip(_grid_positions(len(wheels), L, T, IMG_W, IMG_H), wheels):
         _insert_image_or_message(slide, figs / f"heatmap_hexbin_{wheel}.png", lf, tf, gw, gh)
-
-    # ---- fatigue & frequency
-    deck.divider("Fatigue & PSD", "Rainflow counting · Welch PSD")
-
-    for wheel in wheels:
-        slide = deck.content(f"Rainflow  –  {wheel}  (From-To Matrix + Range Distribution)",
-                             "Siemens-style from-to matrix and cycle range distribution")
-        _insert_image_or_message(slide, figs / f"rainflow_{wheel}.png", L, T, IMG_W, IMG_H)
-
-    for wheel in wheels:
-        slide = deck.content(f"Welch PSD  –  {wheel}", "Power spectral density per channel")
-        _insert_image_or_message(slide, figs / f"psd_{wheel}.png", L, T, IMG_W, IMG_H)
 
     # ---- conclusions
     slide = deck.content("Engineering Conclusions", f"{config.vehicle_name}  ·  {now_str}")

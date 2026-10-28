@@ -14,7 +14,6 @@ from dtt.analysis.histograms import generate_histograms
 from dtt.analysis.auc_plots import generate_auc
 from dtt.analysis.heatmaps import generate_heatmaps
 from dtt.analysis.boxplots import generate_boxplots
-from dtt.analysis.rainflow import generate_rainflow
 from dtt.reporting.report_builder import build_report
 
 logger = logging.getLogger("pipeline")
@@ -242,7 +241,6 @@ def run(
     filter_order: int    = None,
     filter_cutoff: float = None,
     apply_filter_flag: bool = True,
-    miner_exponent: float   = None,
     output_dir: Path        = None,
     raw_folder: Path        = None,
     raw_files:  list        = None,
@@ -311,7 +309,6 @@ def run(
     if sampling_rate  is not None: kwargs["sampling_rate"]  = sampling_rate
     if filter_order   is not None: kwargs["filter_order"]   = filter_order
     if filter_cutoff  is not None: kwargs["filter_cutoff"]  = filter_cutoff
-    if miner_exponent is not None: kwargs["miner_exponent"] = miner_exponent
     if output_dir     is not None: kwargs["output_dir"]     = Path(output_dir)
     kwargs["apply_filter"] = apply_filter_flag
     kwargs["famos_mode"]   = famos_mode
@@ -369,7 +366,7 @@ def run(
         # No ingestion, no FAMOS recipe, no sanitization/filtering -- this
         # mode's entire point is to trust the existing processed_data.csv
         # and re-run only the analysis stages on it, in place.
-        logger.info("[1-4/9]  Skipped (workflow_mode=analysis) -- reading "
+        logger.info("[1-4/8]  Skipped (workflow_mode=analysis) -- reading "
                     "the existing processed_data.csv instead of re-preprocessing")
         processed_csv = config.run_output_dir / "processed_data.csv"
         if not processed_csv.exists():
@@ -423,10 +420,10 @@ def run(
                 metadata[_k] = stored_prov[_k]
         _draw_session_join(df, metadata, config)
 
-        logger.info("[2/9]  Channel Validation  (re-checked against the existing processed data)")
+        logger.info("[2/8]  Channel Validation  (re-checked against the existing processed data)")
         validation_report = validate(df, metadata, config)
     else:
-        logger.info("[1/9]  Data Ingestion")
+        logger.info("[1/8]  Data Ingestion")
         if getattr(config, "raw_folders", None):
             from dtt.ingestion.loader import load_raw_sessions
             df, metadata = load_raw_sessions(config.raw_folders, config)
@@ -490,13 +487,13 @@ def run(
         if not getattr(config, "remove_stops", False):
             _warn_if_stationary(df, config)
 
-        logger.info("[2/9]  Channel Validation")
+        logger.info("[2/8]  Channel Validation")
         validation_report = validate(df, metadata, config)
 
-        logger.info("[3/9]  Data Sanitization")
+        logger.info("[3/8]  Data Sanitization")
         df, san_report = sanitize(df, config)
 
-        logger.info("[4/9]  Signal Processing (%s)",
+        logger.info("[4/8]  Signal Processing (%s)",
                     "imc/FAMOS recipe" if config.famos_mode else "Butterworth LPF")
         if raw_frame is None and not config.famos_applied:
             # A CSV study is still unconditioned here — stage 4 is what conditions
@@ -551,9 +548,9 @@ def run(
     # feature reversible (nothing upstream of this point depends on it) and
     # keeps a stop-containing study's "study data" file showing everything
     # that was actually measured, while statistics/severity/histograms/
-    # heatmaps/boxplots/rainflow all see the moving-only view: a parked
-    # vehicle still carries a static Fx/Fz that distorts more than just
-    # rainflow -- on the reference recording it inflated FR Gx from 0.045 to
+    # heatmaps/boxplots all see the moving-only view: a parked
+    # vehicle still carries a static Fx/Fz that distorts every statistic
+    # -- on the reference recording it inflated FR Gx from 0.045 to
     # 0.116 (G-severity is an RMS, dominated by those few large standstill
     # ratios) and would skew every histogram's near-zero bin too.
     analysis_df = df
@@ -576,10 +573,10 @@ def run(
         else:
             logger.info("Stop removal enabled but found nothing to cut")
 
-    logger.info("[5/9]  Statistical Analysis")
+    logger.info("[5/8]  Statistical Analysis")
     stats = compute_statistics(analysis_df, config)
 
-    logger.info("[5b/9] Load Severity  (Gx, Gy, Gxy, DLC)")
+    logger.info("[5b/8] Load Severity  (Gx, Gy, Gxy, DLC)")
     try:
         from dtt.analysis.severity import compute_severity, generate_severity_figure
         severity = compute_severity(analysis_df, config)
@@ -587,7 +584,7 @@ def run(
     except Exception as exc:
         logger.error("Severity analysis failed: %s", exc, exc_info=True)
 
-    logger.info("[6/9]  Histogram Generation")
+    logger.info("[6/8]  Histogram Generation")
     try:
         generate_histograms(analysis_df, config,
                             range_mode=getattr(config, "histogram_range_mode", "full"))
@@ -602,30 +599,17 @@ def run(
     except Exception as exc:
         logger.error("AUC generation failed: %s", exc, exc_info=True)
 
-    logger.info("[7/9]  Heatmap Generation")
+    logger.info("[7/8]  Heatmap Generation")
     try:
         generate_heatmaps(analysis_df, config)
     except Exception as exc:
         logger.error("Heatmap generation failed: %s", exc, exc_info=True)
 
-    logger.info("[8/9]  Boxplot Generation")
+    logger.info("[8/8]  Boxplot Generation")
     try:
         generate_boxplots(analysis_df, config)
     except Exception as exc:
         logger.error("Boxplot generation failed: %s", exc, exc_info=True)
-
-    logger.info("[9/9]  Rainflow Analysis")
-    try:
-        generate_rainflow(analysis_df, config)
-    except Exception as exc:
-        logger.error("Rainflow generation failed: %s", exc, exc_info=True)
-
-    logger.info("[9b/9] Welch PSD")
-    try:
-        from dtt.analysis.psd import generate_psd
-        generate_psd(analysis_df, config)
-    except Exception as exc:
-        logger.error("PSD generation failed: %s", exc, exc_info=True)
 
     logger.info("[Report]  Result-slide figures")
     result_spec = None
@@ -699,7 +683,6 @@ def _cli() -> None:
                         help="Noise-floor multiple the deviation must also clear (default 10)")
     parser.add_argument("--transient-despike-max-spike-frac", type=float,
                         help="Cap on flagged run length as a fraction of the window (default 0.4)")
-    parser.add_argument("--miner",    type=float,           help="Miner's rule exponent (default 8)")
     parser.add_argument("--outdir",                         help="Override output directory")
     parser.add_argument("--histogram-range-mode", choices=("full", "autoscale"), default=None,
                         help='Force-histogram x-axis: "full" (default) uses the configured '
@@ -765,7 +748,6 @@ def _cli() -> None:
         transient_despike_noise_floor_mult  = args.transient_despike_noise_floor_mult,
         transient_despike_max_spike_frac    = args.transient_despike_max_spike_frac,
         histogram_range_mode = args.histogram_range_mode,
-        miner_exponent   = args.miner,
         output_dir       = args.outdir,
         export_famos_validation_csv = args.export_famos_validation_csv,
         workflow_mode    = args.mode,

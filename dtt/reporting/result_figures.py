@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from dtt.config import REPORT_COMBO_HEATMAP_N, REPORT_RANGES, RunConfig
+from dtt.config import REPORT_RANGES, RunConfig
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,6 @@ class ReportSpec:
     drive_b: str
     cv_rows: List[CvRow] = field(default_factory=list)
     combo_slots: List[str] = field(default_factory=list)
-    combo_n: Tuple[float, float] = (4000.0, 1000.0)
 
     @property
     def compared(self) -> bool:
@@ -147,7 +146,6 @@ def resolve_spec(config: RunConfig) -> ReportSpec:
         drive_b=config.report_drive_axle_b,
         cv_rows=_cv_rows(rc, preset) if fmt == "cv" else [],
         combo_slots=list(PV_WHEELS) if fmt == "pv" else labels,
-        combo_n=REPORT_COMBO_HEATMAP_N[fmt],
     )
 
 
@@ -322,14 +320,16 @@ def _cv_figures(config, spec, df_a, ia, df_b, rc_b, ib) -> int:
 
 
 def _combo_figures(config, spec, df_a, rc_a, df_b, rc_b) -> int:
-    from dtt.analysis.heatmaps import (fx_fy_combination_colorbar,
+    from dtt.analysis.heatmaps import (bins_from_ranges, fx_fy_combination_colorbar,
                                        fx_fy_combination_figure,
-                                       fx_fy_combination_panel)
-    half, step = spec.combo_n
+                                       fx_fy_combination_panel, resolve_bin_ranges)
+    # The same bins as every other force heatmap of this study, in daN.
+    bins = bins_from_ranges(resolve_bin_ranges(config)[0])
+    fy_edges, fx_edges = bins["Fy"], bins["Fx"]
     sides = [("a", df_a, rc_a, True)]
     if df_b is not None:
         sides.append(("b", df_b, rc_b, False))
-    panels = {key: {w: fx_fy_combination_panel(df, rc, w, half, step)
+    panels = {key: {w: fx_fy_combination_panel(df, rc, w, fy_edges, fx_edges)
                     for w in spec.combo_slots}
               for key, df, rc, _ in sides}
     peaks = [float(p[0].max()) for side in panels.values() for p in side.values()
@@ -340,7 +340,7 @@ def _combo_figures(config, spec, df_a, rc_a, df_b, rc_b) -> int:
     for key, _, _, tags in sides:
         path = figure_path(config, f"combo_{key}")
         path.parent.mkdir(parents=True, exist_ok=True)
-        fx_fy_combination_figure(panels[key], spec.combo_slots, path, half, step, vmax,
+        fx_fy_combination_figure(panels[key], spec.combo_slots, path, fy_edges, fx_edges, vmax,
                                  COMBO_IN, tags=tags, dpi=DPI)
     fx_fy_combination_colorbar(figure_path(config, "combo_cbar"), vmax, COMBO_CBAR_IN, dpi=DPI)
     return len(sides)

@@ -1,0 +1,1 @@
+Rainflow, Welch PSD and RF Compare were disabled on 2026-10-28 (PROJECT_HISTORY.md §9E) and can be re-enabled from these files; nothing in the app imports this folder (re-enabling rainflow also needs `pip install rainflow>=3.1.0`, dropped from dtt/requirements.txt).

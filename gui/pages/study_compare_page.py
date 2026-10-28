@@ -10,7 +10,7 @@ version. Sharing one widget tree between the two would mean one page holding
 two input layers, two workers and two result types.
 
 The backend has existed since Round 4 (``dtt/analysis/study_compare.py``: RMS,
-DLC and G-severity deltas, provenance guard, RF Compare) and was reachable
+DLC and G-severity deltas, provenance guard) and was reachable
 only from Python. This is the surface for it, plus the two-dataset AUC view.
 
 Both datasets are **named**, and the names go everywhere: legends, percentile

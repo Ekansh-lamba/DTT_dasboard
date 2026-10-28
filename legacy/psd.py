@@ -1,4 +1,8 @@
-"""Welch power spectral density, per wheel — a distinct view from the FAMOS-style
+"""DISABLED 2026-10-28 -- the Welch PSD stage, formerly dtt/analysis/psd.py,
+with ``welch_psd`` from dtt/spectral.py. Nothing in the app imports this; see
+legacy/README.md.
+
+Welch power spectral density, per wheel — a distinct view from the FAMOS-style
 single-FFT dB spectrum in ``dtt/spectral.py``.
 
 Segment-averaged, so it trades exact spectral lines for a smooth, statistically
@@ -8,6 +12,7 @@ like) is not.
 """
 
 import logging
+from typing import Optional, Tuple
 
 import matplotlib
 matplotlib.use("Agg")
@@ -23,8 +28,32 @@ from dtt.config import (
     FIGURE_DPI,
     RunConfig,
 )
-from dtt.spectral import welch_psd
 from dtt.channel_names import display_name
+
+
+def welch_psd(x: np.ndarray, fs: float,
+              nperseg: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
+    """Welch power spectral density: ``(frequencies_hz, psd)``.
+
+    ``nperseg`` defaults to a batch-pipeline-appropriate segment length
+    derived from ``fs`` (``min(n, max(256, fs*4))``) — a longer segment than
+    a live-GUI tool would use, trading update latency (irrelevant here, this
+    runs once per study) for a smoother, more resolved PSD estimate. This is
+    an explicit accuracy choice, not a default inherited from anywhere else.
+
+    NaNs are dropped first. Returns a flat near-zero spectrum for input too
+    short to window meaningfully.
+    """
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size < 8 or fs <= 0:
+        return np.array([0.0]), np.array([0.0])
+    from scipy.signal import welch
+    if nperseg is None:
+        nperseg = int(min(x.size, max(256, fs * 4)))
+    nperseg = max(8, min(nperseg, x.size))
+    freq, psd = welch(x, fs=fs, nperseg=nperseg)
+    return freq, psd
 
 logger = logging.getLogger(__name__)
 

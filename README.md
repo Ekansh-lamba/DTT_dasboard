@@ -31,7 +31,7 @@ Studies you create are saved under **`Documents\..\DTT-Platform\outputs`** (a
 ## Run from source
 
 ```bash
-pip install -r dtt/requirements.txt      # backend: pandas, numpy, scipy, matplotlib, rainflow, python-pptx
+pip install -r dtt/requirements.txt      # backend: pandas, numpy, scipy, matplotlib, python-pptx
 pip install -r gui/requirements.txt      # GUI: PySide6
 python -m gui.main
 ```
@@ -62,7 +62,7 @@ type + tyre parameters (load ranges, thresholds) are auto-matched or user-select
   Butterworth filtering, and resampling with a live before/after preview.
 - **Signals** — FAMOS-style time-domain overlay, **FFT amplitude spectrum**
   (dB vs log-Hz), and cross-correlation **time-synchronisation**.
-- **Validation / Statistics / Histograms / Heatmaps / Boxplots / Rainflow** —
+- **Validation / Statistics / Histograms / Heatmaps / Boxplots** —
   the analysis outputs (searchable tables, zoomable figures).
 - **Reports / History** — open/export/regenerate PowerPoint reports; manage
   (and delete) past studies.

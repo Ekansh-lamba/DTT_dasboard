@@ -14,7 +14,7 @@ axle/position count, or the user picks one in the GUI.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from dtt.channels import Position, ChannelSet
 
@@ -29,6 +29,9 @@ class TyreParams:
     outlier_pctile: Tuple[float, float] = (1.0, 99.0)   # aim 6
     filter_cutoff_hz: float = 10.0
     filter_order: int = 4
+    # Force-heatmap bins for this vehicle, {comp: (min, max, step)} in daN,
+    # overriding config.HEATMAP_BIN_RANGES_DAN; None uses the standard bins.
+    heatmap_bins_dan: Optional[Dict[str, Tuple[float, float, float]]] = None
 
     def range_for(self, component: str) -> Tuple[float, float]:
         return {"Fx": self.fx_range_dan, "Fy": self.fy_range_dan,
@@ -70,6 +73,17 @@ class VehicleType:
         return [p.channel(c) for p in self.positions() for c in ("Fx", "Fy", "Fz")]
 
 
+def _own_heatmap_bins(tyre: TyreParams) -> TyreParams:
+    """Heatmaps over the tyre's own load ranges in six equal bins per axis --
+    what every preset drew before the standard (PV) bins existed. The PV
+    preset does not use this: its heatmaps take the standard bins."""
+    tyre.heatmap_bins_dan = {
+        comp: (float(lo), float(hi), (float(hi) - float(lo)) / 6.0)
+        for comp, (lo, hi) in (("Fx", tyre.fx_range_dan), ("Fy", tyre.fy_range_dan),
+                               ("Fz", tyre.fz_range_dan))}
+    return tyre
+
+
 # Standard preset library
 def _pv() -> VehicleType:
     return VehicleType("Passenger Vehicle (4x2)", "PV",
@@ -79,33 +93,33 @@ def _pv() -> VehicleType:
 def _lcv() -> VehicleType:
     return VehicleType("Light Commercial (4x2)", "LCV",
                        [Axle(1, "steer"), Axle(2, "drive")],
-                       TyreParams("LCV", (0, 1800), (-600, 600), (-600, 600), 10))
+                       _own_heatmap_bins(TyreParams("LCV", (0, 1800), (-600, 600), (-600, 600), 10)))
 
 def _mcv_6x2() -> VehicleType:
     return VehicleType("Medium Truck (6x2)", "MCV",
                        [Axle(1, "steer"), Axle(2, "drive"), Axle(3, "load")],
-                       TyreParams("MCV", (0, 3000), (-1000, 1000), (-1000, 1000), 20))
+                       _own_heatmap_bins(TyreParams("MCV", (0, 3000), (-1000, 1000), (-1000, 1000), 20)))
 
 def _hcv_6x4() -> VehicleType:
     return VehicleType("Heavy Truck (6x4 tandem)", "HCV",
                        [Axle(1, "steer"), Axle(2, "drive", dual=True), Axle(3, "drive", dual=True)],
-                       TyreParams("315/80 R22.5", (0, 4000), (-1500, 1500), (-1500, 1500), 50))
+                       _own_heatmap_bins(TyreParams("315/80 R22.5", (0, 4000), (-1500, 1500), (-1500, 1500), 50)))
 
 def _hcv_8x4() -> VehicleType:
     return VehicleType("Heavy Truck (8x4)", "HCV",
                        [Axle(1, "steer"), Axle(2, "steer"),
                         Axle(3, "drive", dual=True), Axle(4, "drive", dual=True)],
-                       TyreParams("315/80 R22.5", (0, 4500), (-1600, 1600), (-1600, 1600), 50))
+                       _own_heatmap_bins(TyreParams("315/80 R22.5", (0, 4500), (-1600, 1600), (-1600, 1600), 50)))
 
 def _bus() -> VehicleType:
     return VehicleType("Bus (6x2)", "BUS",
                        [Axle(1, "steer"), Axle(2, "drive", dual=True), Axle(3, "load")],
-                       TyreParams("bus radial", (0, 3500), (-1200, 1200), (-1200, 1200), 30))
+                       _own_heatmap_bins(TyreParams("bus radial", (0, 3500), (-1200, 1200), (-1200, 1200), 30)))
 
 def _trailer_3() -> VehicleType:
     return VehicleType("Trailer (3-axle)", "TRAILER",
                        [Axle(1, "trailer"), Axle(2, "trailer"), Axle(3, "trailer")],
-                       TyreParams("trailer", (0, 4000), (-1500, 1500), (-1500, 1500), 50))
+                       _own_heatmap_bins(TyreParams("trailer", (0, 4000), (-1500, 1500), (-1500, 1500), 50)))
 
 
 PRESETS: List[VehicleType] = [
