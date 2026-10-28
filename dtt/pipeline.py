@@ -266,6 +266,14 @@ def run(
     histogram_range_mode: str = None,
     export_famos_validation_csv: bool = False,
     workflow_mode: str      = "both",
+    report_format: str      = None,
+    report_compare_study: Path = None,
+    report_label_a: str     = None,
+    report_label_b: str     = None,
+    report_route: str       = None,
+    report_subtitle: str    = None,
+    report_drive_axle_a: str = None,
+    report_drive_axle_b: str = None,
 ) -> Path:
     """``workflow_mode``: ``"both"`` (default, today's full pipeline,
     unchanged) | ``"preprocess"`` (ingestion + FAMOS recipe only, writes the
@@ -324,6 +332,15 @@ def run(
     if histogram_range_mode is not None: kwargs["histogram_range_mode"] = histogram_range_mode
     kwargs["export_famos_validation_csv"] = export_famos_validation_csv
     kwargs["workflow_mode"] = workflow_mode
+    for key, val in (("report_format", report_format),
+                     ("report_label_a", report_label_a), ("report_label_b", report_label_b),
+                     ("report_route", report_route), ("report_subtitle", report_subtitle),
+                     ("report_drive_axle_a", report_drive_axle_a),
+                     ("report_drive_axle_b", report_drive_axle_b)):
+        if val is not None:
+            kwargs[key] = val
+    if report_compare_study:
+        kwargs["report_compare_study"] = Path(report_compare_study)
 
     config = RunConfig(**kwargs)
     _setup_logging(config)
@@ -610,9 +627,18 @@ def run(
     except Exception as exc:
         logger.error("PSD generation failed: %s", exc, exc_info=True)
 
+    logger.info("[Report]  Result-slide figures")
+    result_spec = None
+    try:
+        from dtt.reporting.result_figures import generate_result_figures
+        result_spec = generate_result_figures(analysis_df, config)
+    except Exception as exc:
+        logger.error("Result-slide figures failed: %s", exc, exc_info=True)
+
     logger.info("[Report]  Building PowerPoint")
     report_path = build_report(config, validation_report, stats, metadata,
-                               analysis_only=(config.workflow_mode == "analysis"))
+                               analysis_only=(config.workflow_mode == "analysis"),
+                               result_spec=result_spec)
 
     elapsed = time.perf_counter() - t0
     logger.info("=" * 60)
@@ -688,6 +714,20 @@ def _cli() -> None:
                              '+ FAMOS recipe only, stop before any analysis stage. "analysis": '
                              "skip preprocessing, re-analyze an existing study's "
                              "processed_data.csv in place (requires --study).")
+    rep = parser.add_argument_group("result slides (charter report format)")
+    rep.add_argument("--report-format", choices=("auto", "pv", "cv"), default=None,
+                     help='"auto" (default): PV for a passenger-vehicle preset, CV otherwise')
+    rep.add_argument("--compare-study",
+                     help="Finished study folder (with processed_data.csv) drawn as dataset B "
+                          "-- on a CV report, the reference")
+    rep.add_argument("--label-a", help="Dataset A name on the slides (default: --vehicle)")
+    rep.add_argument("--label-b", help="Dataset B name (default: its study folder name)")
+    rep.add_argument("--route", help='Route label for the slide pill, e.g. "City"')
+    rep.add_argument("--report-subtitle", help="CV slide subtitle")
+    rep.add_argument("--drive-axle-a", choices=("front", "rear"), default=None,
+                     help="PV: driven axle of dataset A (default rear)")
+    rep.add_argument("--drive-axle-b", choices=("front", "rear"), default=None,
+                     help="PV: driven axle of dataset B (default rear)")
     args = parser.parse_args()
 
     if args.mode == "analysis":
@@ -729,6 +769,14 @@ def _cli() -> None:
         output_dir       = args.outdir,
         export_famos_validation_csv = args.export_famos_validation_csv,
         workflow_mode    = args.mode,
+        report_format        = args.report_format,
+        report_compare_study = args.compare_study,
+        report_label_a       = args.label_a,
+        report_label_b       = args.label_b,
+        report_route         = args.route,
+        report_subtitle      = args.report_subtitle,
+        report_drive_axle_a  = args.drive_axle_a,
+        report_drive_axle_b  = args.drive_axle_b,
     )
 
 

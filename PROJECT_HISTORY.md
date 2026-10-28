@@ -80,6 +80,7 @@ implementations turned out to be measurably wrong against the real thing.
 | 2026-09 | **Round 4**: four analysis features (distance-weighted heatmaps, Welch PSD, two-run comparison tables, RF Compare), three workflow modes, FAMOS-validation CSV export (§9A) | Claude + user |
 | 2026-09 | **Round 5**: histogram/AUC readability (soft-fill light restyle, x-axis autoscale), rainflow-page histograms restyled, GUI surfacing of terminal-only features (§9B) | Claude + user |
 | 2026-09 | **Round 6**: new-study UX (raw default, multi-session add, last-used dir), boxplot matched to analyzer + `BOX_YLIMS` rescaled, flat-channel diagnosis — no live bug (§9C) | Claude + user |
+| 2026-10-27 | **Round 7**: PPTX result slides rebuilt to the project-charter deck format — PV / CV force-distribution pages, combination heatmap, dataset-B comparison from config/CLI/GUI (§9D) | Claude + user |
 
 ---
 
@@ -816,6 +817,86 @@ The recurring lesson across all three: the symptom was almost always a **stale
 study or a pre-fix `.exe`**, not a live bug (see the growing stale-study debt in
 §10).
 
+## 9D. Round 7 — report result slides in the charter-deck format (2026-10-27)
+
+The brief (`report_format_prompt.md`): make the generated PPTX's result slides
+match the DTT project charter deck (*Project Charter - DTT Tyre Duty Cycle
+Dashboard*, slides 8-14) closely enough that an analyst only types
+observations — and change no analysis number while doing it.
+
+### 9D.1 Method: the deck as the specification
+The reference slides were rendered to PNG through PowerPoint COM (LibreOffice
+is not installed on the dev machine) and their shape geometry, fills and run
+fonts dumped with python-pptx. Where the brief and the deck disagreed, the deck
+won:
+- titles are 28 pt Arial bold `#6C2DC7` (brief: 36-40 pt `#7030A0`);
+- the "APOLLO TYRES LTD" footer is the logo picture of the charter's own
+  *Heading + text + 3 imgs (Apollo) A* layout, already in
+  `apollo_report_template.pptx` — using that layout gives the exact footer, so
+  no text box was added;
+- wheel labels (FL/FR/RL/RR, Left/Right), the Fy/Fz/Fx/My headings and the CV
+  row labels are **native text boxes laid over the plot pictures** in the deck,
+  not drawn inside the plots — the report does the same, so they stay editable.
+
+### 9D.2 What was built
+- `dtt/reporting/result_figures.py` (new) — `resolve_spec` decides the format
+  (`auto`: PV for a PV preset, CV otherwise), dataset names and CV axle rows
+  (one row per recorded axle, titled from the vehicle preset's axle role:
+  Steer / Drive / Tag); `generate_result_figures` draws every plot into
+  `figures/report/` under fixed names. Runs as a `[Report]` pipeline stage on
+  the same `analysis_df` every other stage used.
+- Dataset B is another finished study's `processed_data.csv`
+  (`report_compare_study`), given the **same stop removal** as A so both sides
+  are cut alike; a provenance mismatch is logged. An unreadable B degrades to a
+  single-study report rather than losing the report.
+- `plot_style.py` extended, not duplicated: `draw_comparison_kde` takes
+  `values_b=None` and `p5_in_legend`; `stats_strip_rows` takes `decimals`;
+  `draw_stats_strip(layout="text")` draws the deck's grey monospaced strip;
+  `draw_reference_kde` is new (CV: grey dashed reference, green P5-P95 "normal
+  zone", red "exceeds reference P95").
+- `heatmaps.py`: `fx_fy_combination_*` — % of occurrences (sample count, as
+  the slide title says), N, ±4000 N / 1000 N bins for PV, +Fy on the left and
+  −Fx at the top as in the reference, empty cells in the colormap's darkest
+  colour, one colorbar shared by both datasets.
+- `report_builder.py`: slide order is now cover/summary → "PV Format" or "CV
+  Format" section → force-distribution pages → box plots (unchanged figures,
+  result-slide title/footer) → combination heatmap (with an empty editable
+  "Projected tyre life" table) → the remaining analyses. Takeaway / Overall /
+  summary boxes hold "Key observation: …" placeholders; no conclusions,
+  bubbles or circles are generated.
+- Config: `RunConfig.report_format`, `report_compare_study`,
+  `report_label_a/_b`, `report_route`, `report_subtitle`,
+  `report_drive_axle_a/_b`, `report_ranges`; module constants
+  `REPORT_RANGES` and `REPORT_COMBO_HEATMAP_N`. CLI flags `--report-format`,
+  `--compare-study`, `--label-a/-b`, `--route`, `--report-subtitle`,
+  `--drive-axle-a/-b`; GUI: a "Report" section on the New Study page.
+
+### 9D.3 Validation
+- Numbers unchanged: on a real study, every stats-strip value equals
+  `stats_summary.json` for the same channel (plain sample-count statistics,
+  like the Statistics stage); the existing two-run comparison plot renders
+  byte-identical to the previous commit; `statistics.py`, `famos/` and
+  `preprocessing.py` untouched.
+- Side by side with the reference: generated slides rendered and compared
+  against slides 8-14; several layout passes (strip spacing, clipped last
+  tick, table borders written in schema order, empty table cells sized by
+  their 18 pt end-of-paragraph font, a 3-column truck heatmap's tick density).
+- **Only one recording exists locally** (every study is the same FR/RR run), so
+  the two-dataset PV and CV slides were checked on *synthetic* 4-wheel and
+  3-axle pairs derived from it — layout only. The real recording was used for a
+  single-study report and the stats check.
+- `tests/test_report_result_slides.py`: slide order, native text shapes, CV
+  rows, single-study and unreadable-B fallbacks, stats-strip equality, GUI →
+  CLI flag mapping.
+
+### 9D.4 A note on analysis-mode numbers
+Re-running a study in `workflow_mode="analysis"` gives statistics that differ
+from that study's original `stats_summary.json` in the 4th decimal
+(−511.1507 vs −511.151): the original run computed from the in-memory frame,
+analysis mode re-reads `processed_data.csv`, which is written at limited float
+precision. Pre-existing, not from this round, and far below any reported
+precision — but it means "re-run in analysis mode" is not byte-reproducible.
+
 ## 10. Open items / known gaps
 
 - **Raw reader 58-sample offset** (§4.6, Check 3) — still unfixed. A real,
@@ -868,12 +949,22 @@ study or a pre-fix `.exe`**, not a live bug (see the growing stale-study debt in
   artifacts, not code defects. Worth a deliberate cleanup pass: re-run the
   studies that matter on the current build, and clearly mark/quarantine the old
   ones so they aren't opened and mistaken for current output.
-- **Two-run comparison / RF Compare have no GUI** — the backend exists and works
+- **Two-run comparison / RF Compare have no GUI** (the PPTX result slides'
+  dataset-B comparison does, §9D) — the backend exists and works
   (§9A.1) but is reachable only via CLI/Python; the GUI was deferred pending a
   two-study picker design that pairs with the larger GUI restructure (§9B.3).
 - **Histogram/AUC split + readability scaling (items 4 & 7)** — briefed but not
   yet implemented as of this update: split histograms and AUC into two sections
   and fix axis/label readability on both.
+- **Result slides not yet seen on a real two-vehicle pair** (§9D.3) — the PV
+  and CV comparison layouts were validated on synthetic pairs only; generate
+  one real comparison once a second recording is available.
+- **Result-slide assumptions to confirm** (§9D) — moment axis is labelled
+  daN·m (the codebase's unit) while the reference deck says Nm; Acc/Brake and
+  Left/Right-turn tags follow the reference (−Fx = acceleration, +Fy = left
+  turn), since no sign convention is defined in code; the CV heatmap default
+  (±10000 N, 2500 N bins) is a guess, the deck only shows PV; a CV row plots one
+  wheel per axle (the left/outer one).
 - **Vehicle-specific boxplot limits** — `BOX_YLIMS` is now one global set per
   force type (§9C.2). `heatmaps.py::_comp_bins` already supports per-vehicle range
   overrides; boxplots don't. Only matters if vehicles with very different load

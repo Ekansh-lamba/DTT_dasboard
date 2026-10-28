@@ -276,8 +276,9 @@ def test_no_title_only_blank_slides_with_missing_figures_and_partial_wheels(tmp_
 def test_report_uses_the_apollo_template_layouts(tmp_path):
     """Cover, dividers and content slides come from the charter deck's own
     layouts, 16:9, with no empty "Click to add" placeholders left behind."""
-    from dtt.reporting.report_builder import (TEMPLATE, _LAYOUT_CONTENT,
-                                              _LAYOUT_COVER, _LAYOUT_DIVIDER)
+    from dtt.reporting.report_builder import (TEMPLATE, _LAYOUT_CONTENT, _LAYOUT_COVER,
+                                              _LAYOUT_DIVIDER, _LAYOUT_RESULT,
+                                              _LAYOUT_SECTION)
     assert TEMPLATE.exists()
     cfg = _fr_rr_config(tmp_path)
     out = build_report(cfg, _fr_rr_validation_report(), _fr_rr_stats(), _fr_rr_metadata())
@@ -286,7 +287,11 @@ def test_report_uses_the_apollo_template_layouts(tmp_path):
     layouts = [s.slide_layout.name for s in prs.slides]
     assert layouts[0] == _LAYOUT_COVER
     assert layouts.count(_LAYOUT_DIVIDER) == 3
-    assert layouts.count(_LAYOUT_CONTENT) == len(layouts) - 4
+    assert layouts.count(_LAYOUT_SECTION) == 1          # "PV Format"
+    # the charter-format result slides: two PV pages, box plots, combination
+    assert layouts.count(_LAYOUT_RESULT) >= 4
+    assert layouts.count(_LAYOUT_CONTENT) == (len(layouts) - 5
+                                              - layouts.count(_LAYOUT_RESULT))
     for i, slide in enumerate(prs.slides, start=1):
         for ph in slide.placeholders:
             assert ph.has_text_frame and ph.text_frame.text.strip(), (i, ph.name)

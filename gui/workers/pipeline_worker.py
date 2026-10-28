@@ -58,6 +58,15 @@ class RunRequest:
     histogram_range_mode: Optional[str] = None      # "full" | "autoscale"
     mode: str = "both"            # "both" | "preprocess" | "analysis"
     export_famos_validation_csv: bool = False  # TEMPORARY: post-recipe CSV for manual FAMOS cross-check
+    # Result slides (charter report format); empty/None leaves the CLI default
+    report_format: str = "auto"                    # "auto" | "pv" | "cv"
+    compare_study: Optional[Path] = None           # finished study drawn as dataset B
+    label_a: str = ""
+    label_b: str = ""
+    route: str = ""
+    report_subtitle: str = ""
+    drive_axle_a: str = ""                         # "" | "front" | "rear"
+    drive_axle_b: str = ""
 
     def to_cmd(self) -> List[str]:
         # A frozen .exe re-invokes itself in pipeline mode; from source we call
@@ -127,6 +136,16 @@ class RunRequest:
             cmd += ["--mode", self.mode]
         if self.export_famos_validation_csv:
             cmd += ["--export-famos-validation-csv"]
+        if self.report_format and self.report_format != "auto":
+            cmd += ["--report-format", self.report_format]
+        if self.compare_study:
+            cmd += ["--compare-study", str(self.compare_study)]
+        for flag, value in (("--label-a", self.label_a), ("--label-b", self.label_b),
+                            ("--route", self.route), ("--report-subtitle", self.report_subtitle),
+                            ("--drive-axle-a", self.drive_axle_a),
+                            ("--drive-axle-b", self.drive_axle_b)):
+            if value:
+                cmd += [flag, value]
         return cmd
 
 

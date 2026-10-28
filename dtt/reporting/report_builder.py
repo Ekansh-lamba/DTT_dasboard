@@ -44,6 +44,8 @@ TEMPLATE = Path(__file__).resolve().parent / "templates" / "apollo_report_templa
 _LAYOUT_CONTENT = "Heading + text x2 columns (Apollo) A"
 _LAYOUT_DIVIDER = "Divider opt 2 (Apollo) A"
 _LAYOUT_COVER   = "1_Title Slide opt 1 (Apolo Tyres) A"
+_LAYOUT_RESULT  = "Heading + text + 3 imgs (Apollo) A"   # charter slides 9-14: "APOLLO TYRES LTD" footer
+_LAYOUT_SECTION = "Title Only"                           # charter slides 8, 11, 13
 
 # Apollo palette, from the charter deck's theme.
 _PURPLE    = RGBColor(0x95, 0x19, 0xEF)     # accent1: table headers, labels
@@ -56,6 +58,19 @@ _ROW_ALT   = RGBColor(0xF3, 0xEA, 0xFD)     # alternate table rows
 _WHITE     = RGBColor(0xFF, 0xFF, 0xFF)
 _GREEN_RGB = RGBColor(0x1E, 0x84, 0x49)
 _RED_RGB   = RGBColor(0xC0, 0x39, 0x2B)
+
+# Result slides, from the charter deck's own shapes (slides 9-14).
+_R_TITLE   = RGBColor(0x6C, 0x2D, 0xC7)     # PV titles, takeaway text
+_R_PILL    = RGBColor(0xE8, 0x79, 0x2D)     # route pill
+_R_NAVY    = RGBColor(0x00, 0x00, 0x99)     # section pills
+_R_CYAN    = RGBColor(0x00, 0xB0, 0xF0)     # CV row label, candidate
+_R_BLUE    = RGBColor(0x44, 0x72, 0xC4)     # CV row label, reference
+_R_MAGENTA = RGBColor(0xBC, 0x32, 0xBE)     # heatmap subtitle, summary border
+_R_BOX     = RGBColor(0xF2, 0xF2, 0xF2)     # takeaway / summary fill
+_R_DIVIDE  = RGBColor(0x5B, 0x9B, 0xD5)     # heatmap halves divider
+_BLACK     = RGBColor(0x00, 0x00, 0x00)
+_R_FONT    = "Arial"
+_R_FONT_CV = "Verdana"
 
 # Slide geometry (16:9, 13.333 x 7.5 in). The Apollo logo sits bottom-left
 # (0.1..2.63 in, from 6.37 in down), so content stops above it.
@@ -169,6 +184,26 @@ class _Deck:
                          font_size=18, color=_PURPLE_DK)
         _drop_placeholders(slide, keep={0} | ({10} if subtitle else set()))
         self._number(slide)
+        return slide
+
+    def section(self, title: str):
+        """Plain centred-title section slide -- charter slides 8 and 11."""
+        slide = self.prs.slides.add_slide(_layout(self.prs, _LAYOUT_SECTION))
+        placed = {ph.placeholder_format.idx: ph for ph in slide.placeholders}
+        if 0 in placed:
+            placed[0].text = title
+        else:
+            _add_textbox(slide, title, Inches(0.92), Inches(0.4), Inches(11.5),
+                         Inches(1.45), font_size=40)
+        _drop_placeholders(slide, keep={0})
+        return slide
+
+    def result(self):
+        """An empty result slide on the charter's result layout, whose
+        "APOLLO TYRES LTD" footer comes with it. Its title is the first shape
+        the caller adds."""
+        slide = self.prs.slides.add_slide(_layout(self.prs, _LAYOUT_RESULT))
+        _drop_placeholders(slide)
         return slide
 
     def cover(self, title: str, lines: List[str]):
@@ -357,12 +392,335 @@ def _audit_slides(prs: Presentation) -> List[str]:
     guard, not expected to ever fire."""
     warnings = []
     for i, slide in enumerate(prs.slides, start=1):
+        if slide.slide_layout.name == _LAYOUT_SECTION:
+            continue                      # a section title is all a section slide holds
         n_pics   = sum(1 for sh in slide.shapes if sh.shape_type == 13)
         n_tables = sum(1 for sh in slide.shapes if sh.has_table)
         n_text   = sum(1 for sh in slide.shapes if sh.has_text_frame and sh.text_frame.text.strip())
         if n_pics == 0 and n_tables == 0 and n_text <= 1:
             warnings.append(f"slide {i} has only a title, no content and no explanation")
     return warnings
+
+
+# ------------------------------------------------------------- result slides
+#
+# The charter deck's result format (slides 8-14). Every title, heading, wheel
+# label, pill, divider and summary box is a native shape an analyst can edit;
+# only the plots are pictures (dtt.reporting.result_figures draws them). The
+# summary boxes hold placeholder text -- the observations are the analyst's.
+
+_OBSERVATION = "Key observation: …"
+
+
+def _runs_box(slide, paragraphs, left, top, width, height, *, align=PP_ALIGN.LEFT,
+              anchor=MSO_ANCHOR.TOP, fill: Optional[RGBColor] = None, inset: bool = False):
+    """Text box from ``[[(text, size, bold, color, font), ...], ...]`` --
+    one inner list per paragraph, one tuple per run."""
+    txb = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
+    tf = txb.text_frame
+    tf.word_wrap = True
+    tf.vertical_anchor = anchor
+    if not inset:
+        tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+    if fill is not None:
+        txb.fill.solid()
+        txb.fill.fore_color.rgb = fill
+    for i, runs in enumerate(paragraphs):
+        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+        p.alignment = align
+        for text, size, bold, color, font in runs:
+            r = p.add_run()
+            r.text = text
+            r.font.size = Pt(size)
+            r.font.bold = bold
+            r.font.name = font
+            r.font.color.rgb = color
+    return txb
+
+
+def _label(slide, text, left, top, width=1.0, height=0.3, size=14, color=_BLACK,
+           align=PP_ALIGN.LEFT, font=_R_FONT):
+    return _runs_box(slide, [[(text, size, True, color, font)]], left, top, width, height,
+                     align=align)
+
+
+def _pill(slide, text, left, top, width, height, fill: RGBColor, size: int):
+    pill = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(left), Inches(top),
+                                  Inches(width), Inches(height))
+    pill.fill.solid()
+    pill.fill.fore_color.rgb = fill
+    pill.line.fill.background()
+    tf = pill.text_frame
+    tf.margin_top = tf.margin_bottom = 0
+    p = tf.paragraphs[0]
+    p.alignment = PP_ALIGN.CENTER
+    r = p.add_run()
+    r.text = text
+    r.font.size = Pt(size)
+    r.font.name = _R_FONT
+    r.font.color.rgb = _WHITE
+    return pill
+
+
+def _rule(slide, x1, y1, x2, y2, color=_BLACK, width_pt=1.25):
+    from pptx.enum.shapes import MSO_CONNECTOR
+    line = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, Inches(x1), Inches(y1),
+                                      Inches(x2), Inches(y2))
+    line.line.color.rgb = color
+    line.line.width = Pt(width_pt)
+    return line
+
+
+def _note_box(slide, paragraphs, left, top, width, height):
+    """Light-grey takeaway box in bold purple -- placeholder text only."""
+    return _runs_box(slide, [[(t, 10.5, True, _R_TITLE, _R_FONT)] for t in paragraphs],
+                     left, top, width, height, fill=_R_BOX, inset=True,
+                     anchor=MSO_ANCHOR.MIDDLE)
+
+
+def _result_plot(slide, fig: Path, left, top, size_in, label: str, missing: str) -> None:
+    """A plot picture at its own size, with the wheel/side label written over
+    its top-left corner as an editable text box, as the charter deck does."""
+    placed = _insert_image_or_message(slide, fig, Inches(left), Inches(top),
+                                      Inches(size_in[0]), Inches(size_in[1]), reason=missing)
+    if placed and label:
+        _label(slide, label, left + 0.55, top + 0.12, 0.9, 0.3, size=14)
+
+
+def _vs(spec) -> str:
+    return f"{spec.label_a} vs {spec.label_b}" if spec.compared else spec.label_a
+
+
+def _pv_title(slide, spec, what: str) -> None:
+    _label(slide, f"Force Distribution - {_vs(spec)} – {what}", 0.13, 0.02, 11.6, 0.5,
+           size=28, color=_R_TITLE)
+    if spec.route:
+        _pill(slide, spec.route, 11.87, 0.23, 1.35, 0.34, _R_PILL, 18)
+
+
+def _missing(wheel: str, comp: str) -> str:
+    return f"{wheel} {comp}: not recorded in this study."
+
+
+def _pv_page_fy_fz(deck: "_Deck", spec, config) -> None:
+    from dtt.reporting.result_figures import PV_SLOT_IN, PV_WHEELS, figure_path
+    slide = deck.result()
+    _pv_title(slide, spec, "Fy & Fz")
+    _rule(slide, 6.74, 0.55, 6.74, 6.86)
+    halves = (("Fy", 0.1, ((0.1, 1.25), (3.45, 1.25), (0.1, 4.1), (3.45, 4.1))),
+              ("Fz", 6.8, ((6.8, 1.25), (10.05, 1.25), (6.8, 3.95), (10.05, 3.95))))
+    for comp, x0, slots in halves:
+        _label(slide, comp, x0, 0.72, 6.5, 0.3, size=16, align=PP_ALIGN.CENTER)
+        for wheel, (x, y) in zip(PV_WHEELS, slots):
+            _result_plot(slide, figure_path(config, f"pv_{comp}_{wheel}"), x, y,
+                         PV_SLOT_IN, wheel, _missing(wheel, comp))
+    _note_box(slide, [_OBSERVATION], 6.88, 6.66, 6.36, 0.52)
+
+
+def _pv_page_fx_my(deck: "_Deck", spec, config) -> None:
+    from dtt.reporting.result_figures import PV_SLOT_IN, PV_WHEELS, drive_wheels, figure_path
+    slide = deck.result()
+    _pv_title(slide, spec, "Fx")
+    _rule(slide, 6.74, 0.55, 6.74, 6.86)
+
+    _pill(slide, "By Wheel Position", 0.13, 0.65, 2.6, 0.31, _R_NAVY, 16)
+    _label(slide, "Fx", 2.75, 0.62, 1.2, 0.3, size=16, align=PP_ALIGN.CENTER)
+    for wheel, (x, y) in zip(PV_WHEELS, ((0.05, 1.0), (3.4, 1.0), (0.05, 4.05), (3.4, 4.05))):
+        _result_plot(slide, figure_path(config, f"pv_Fx_{wheel}"), x, y, PV_SLOT_IN,
+                     wheel, _missing(wheel, "Fx"))
+
+    _pill(slide, "Drive Tyres Comparison", 6.85, 0.44, 2.97, 0.39, _R_NAVY, 16)
+    for comp, head_y, y in (("Fx", 0.47, 0.9), ("My", 3.6, 3.95)):
+        _label(slide, comp, 9.9, head_y, 0.8, 0.3, size=16)
+        for side, wheel, x in zip(("Left", "Right"), drive_wheels(spec.drive_a), (6.8, 10.05)):
+            _result_plot(slide, figure_path(config, f"pv_drive_{comp}_{side}"), x, y,
+                         PV_SLOT_IN, side, _missing(wheel, comp))
+
+    _note_box(slide, [_OBSERVATION], 0.15, 6.86, 8.9, 0.52)
+    overall = f"Overall - {spec.route}:" if spec.route else "Overall:"
+    _note_box(slide, [overall, "•  …", "•  …", "•  …"], 9.25, 6.49, 3.6, 0.97)
+
+
+def _cv_slide(deck: "_Deck", spec, config, rows) -> None:
+    from dtt.reporting.result_figures import CV_SLOT_IN, figure_path
+    slide = deck.result()
+    subtitle = spec.subtitle or (f"Diff Btw {spec.label_b} vs {spec.label_a}"
+                                 if spec.compared else spec.label_a)
+    _runs_box(slide, [[("Force Distribution ", 20, True, _BLACK, _R_FONT_CV),
+                       (subtitle, 14, True, _BLACK, _R_FONT_CV)]], 0.13, 0.02, 13.0, 0.45)
+    cols = (("Fz", 1.5), ("Fx", 5.45), ("Fy", 9.3))
+    for comp, x in cols:
+        _label(slide, comp, x, 0.45, CV_SLOT_IN[0], 0.3, size=16, align=PP_ALIGN.CENTER)
+    if len(rows) > 1:
+        _rule(slide, 0.17, 3.75, 13.27, 3.75)
+    for row, y in zip(rows, (0.85, 3.9)):
+        names = [(f"{spec.label_a}", 14, True, _R_CYAN, _R_FONT_CV)]
+        if spec.compared:
+            names = [(f"{spec.label_a} vs ", 14, True, _R_CYAN, _R_FONT_CV),
+                     (spec.label_b, 14, True, _R_BLUE, _R_FONT_CV)]
+        _runs_box(slide, [[(f"{row.title} Force dstrb’n", 14, True, _BLACK, _R_FONT_CV)], names],
+                  0.15, y + 0.4, 1.3, 1.6)
+        for comp, x in cols:
+            _result_plot(slide, figure_path(config, f"cv_{comp}_axle{row.axle}"), x, y,
+                         CV_SLOT_IN, "", _missing(row.wheel, comp))
+            # an empty, unfilled box inside the plot for the analyst's note
+            _runs_box(slide, [[("", 12, False, _BLACK, _R_FONT_CV)]],
+                      x + 0.6, y + 0.55, 1.5, 0.9)
+
+
+def _cell_border(cell, color: str = "000000", width_emu: int = 9525) -> None:
+    from pptx.oxml.ns import qn
+    from lxml import etree
+    tcPr = cell._tc.get_or_add_tcPr()
+    # schema order: the four borders come before the cell fill
+    for i, tag in enumerate(("a:lnL", "a:lnR", "a:lnT", "a:lnB")):
+        ln = etree.Element(qn(tag), w=str(width_emu))
+        fill = etree.SubElement(ln, qn("a:solidFill"))
+        etree.SubElement(fill, qn("a:srgbClr"), val=color)
+        tcPr.insert(i, ln)
+
+
+def _tyre_life_table(slide, spec) -> None:
+    """Empty "Projected tyre life" grid for the analyst: Front/Rear rows,
+    Left/Right per dataset. The tool does not compute tyre life."""
+    names = [spec.label_a] + ([spec.label_b] if spec.compared else [])
+    ncols = 1 + 3 * len(names) - 1          # label, then Left/Right per dataset, spacer between
+    col_w, row_h = 0.56, 0.25
+    left = 11.93 - ncols * col_w
+    table = slide.shapes.add_table(5, ncols, Inches(left), Inches(0.02),
+                                   Inches(ncols * col_w), Inches(5 * row_h)).table
+    table.first_row = False
+    table.horz_banding = False
+    for c in range(ncols):
+        table.columns[c].width = Inches(col_w)
+    spacers = {3 * k for k in range(1, len(names))}       # gap column between datasets
+    for r in range(5):
+        table.rows[r].height = Inches(row_h)
+        for c in range(ncols):
+            cell = table.cell(r, c)
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = _WHITE
+            cell.margin_left = cell.margin_right = Inches(0.02)
+            cell.margin_top = cell.margin_bottom = 0
+            cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+            # an empty cell is sized by its end-of-paragraph font, 18 pt by default
+            cell.text_frame.paragraphs[0]._p.get_or_add_endParaRPr().set("sz", "900")
+            if not ((c == 0 and r <= 2) or c in spacers):
+                _cell_border(cell)
+
+    def put(r, c, text, bold=False, size=9):
+        cell = table.cell(r, c)
+        cell.text = text
+        p = cell.text_frame.paragraphs[0]
+        p.alignment = PP_ALIGN.CENTER
+        for run in p.runs:
+            run.font.size, run.font.bold, run.font.name = Pt(size), bold, "Calibri"
+            run.font.color.rgb = _BLACK
+
+    table.cell(0, 1).merge(table.cell(0, ncols - 1))
+    put(0, 1, "Projected tyre life", bold=True, size=11)
+    for k, name in enumerate(names):
+        c = 1 + 3 * k
+        table.cell(1, c).merge(table.cell(1, c + 1))
+        put(1, c, name)
+        put(2, c, "Left")
+        put(2, c + 1, "Right")
+    put(3, 0, "Front", bold=True)
+    put(4, 0, "Rear", bold=True)
+
+
+def _combination_slide(deck: "_Deck", spec, config) -> None:
+    from dtt.reporting.result_figures import COMBO_CBAR_IN, COMBO_IN, figure_path
+    slide = deck.result()
+    _runs_box(slide, [[("Combination of Fx & Fy", 20, True, _BLACK, _R_FONT_CV),
+                       (" – All wheels", 14, True, _BLACK, _R_FONT_CV)]],
+              0.17, 0.04, 7.8, 0.4)
+    vs = f"{spec.label_a} Vs {spec.label_b}" if spec.compared else spec.label_a
+    _runs_box(slide, [[(f"{vs} - Heatmap of Fx & Fy", 16, False, _R_MAGENTA, _R_FONT_CV)]],
+              0.2, 0.42, 8.2, 0.37)
+
+    w, h = COMBO_IN
+    if spec.compared:
+        halves = (("combo_a", spec.label_a, 0.35), ("combo_b", spec.label_b, 6.7))
+        cbar_x = 12.58
+        _rule(slide, 6.67, 0.82, 6.67, 6.73, color=_R_DIVIDE, width_pt=3.0)
+    else:
+        halves = (("combo_a", spec.label_a, 3.4),)
+        cbar_x = 3.4 + w + 0.05
+    for name, label, x in halves:
+        _insert_image_or_message(slide, figure_path(config, name), Inches(x), Inches(1.55),
+                                 Inches(w), Inches(h),
+                                 reason="Not available: no Fx/Fy pair was recorded.")
+        _label(slide, label, x, 6.36, w, 0.35, size=18, align=PP_ALIGN.CENTER)
+    cbar = figure_path(config, "combo_cbar")
+    if cbar.exists():
+        _add_picture_fit(slide, cbar, Inches(cbar_x), Inches(1.75),
+                         Inches(COMBO_CBAR_IN[0]), Inches(COMBO_CBAR_IN[1]))
+    _tyre_life_table(slide, spec)              # last, so it sits above the pictures
+
+    box = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(1.64), Inches(6.76),
+                                 Inches(11.69), Inches(0.67))
+    box.fill.solid()
+    box.fill.fore_color.rgb = _R_BOX
+    box.line.color.rgb = _R_MAGENTA
+    box.line.width = Pt(2.25)
+    from pptx.enum.dml import MSO_LINE_DASH_STYLE
+    box.line.dash_style = MSO_LINE_DASH_STYLE.SQUARE_DOT
+    tf = box.text_frame
+    tf.margin_top = tf.margin_bottom = Inches(0.02)
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    for i in range(2):
+        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+        p.alignment = PP_ALIGN.LEFT
+        r = p.add_run()
+        r.text = f"•   {_OBSERVATION}"
+        r.font.size, r.font.name = Pt(14), _R_FONT
+        r.font.color.rgb = _BLACK
+
+
+def _result_slides(deck: "_Deck", spec, config) -> None:
+    """The format's section slide, then its force-distribution pages."""
+    if spec.fmt == "pv":
+        deck.section("PV Format")
+        _pv_page_fy_fz(deck, spec, config)
+        _pv_page_fx_my(deck, spec, config)
+    else:
+        deck.section("CV Format")
+        rows = spec.cv_rows or []
+        if not rows:
+            slide = deck.result()
+            _label(slide, "Force Distribution", 0.13, 0.02, 12.0, 0.45, size=20, font=_R_FONT_CV)
+            _add_textbox(slide, "Not available: no wheel positions were recognised in this "
+                                "study.", L, T, IMG_W, Inches(0.5), font_size=12, italic=True,
+                         color=_GREY)
+        for i in range(0, len(rows), 2):
+            _cv_slide(deck, spec, config, rows[i:i + 2])
+
+
+def _boxplot_slides(deck: "_Deck", figs: Path) -> None:
+    """Box plots unchanged, under the result slides' title style and footer."""
+    for group, title in ((("Fx", "Fy", "Fz"), "Force Distribution"),
+                         (("Mx", "My", "Mz"), "Moment Distribution")):
+        present = [c for c in group if (figs / f"boxplot_{c}.png").exists()]
+        if not present and group[0] == "Mx":
+            continue                      # a forces-only study has no moment slide
+        slide = deck.result()
+        _label(slide, f"Box Plots – {title} ({' / '.join(group)})", 0.13, 0.02, 12.5, 0.5,
+               size=28, color=_R_TITLE)
+        _label(slide, "Median, quartiles, P5 / mean / P95 per wheel", 0.15, 0.62, 12.0, 0.3,
+               size=14, color=_GREY)
+        third_w = int(IMG_W) // 3
+        for i, comp in enumerate(group):
+            _insert_image_or_message(slide, figs / f"boxplot_{comp}.png",
+                                     L + i * third_w, Inches(1.05), third_w, Inches(5.6))
+    if (figs / "boxplot_parameters.png").exists():
+        slide = deck.result()
+        _label(slide, "Box Plots – Vehicle & Other Parameters", 0.13, 0.02, 12.5, 0.5,
+               size=28, color=_R_TITLE)
+        _label(slide, "Every other measured channel, each on its own unit", 0.15, 0.62,
+               12.0, 0.3, size=14, color=_GREY)
+        _insert_image_or_message(slide, figs / "boxplot_parameters.png", L, Inches(1.05),
+                                 IMG_W, Inches(5.6))
 
 
 # ------------------------------------------------------------------- content
@@ -414,8 +772,17 @@ def build_report(
     stats: Dict,
     metadata: Dict,
     analysis_only: bool = False,
+    result_spec=None,
 ) -> Path:
-    """``analysis_only=True`` marks the report as produced by
+    """``result_spec`` is what :func:`dtt.reporting.result_figures.generate_result_figures`
+    returned for this run -- it knows whether the comparison study could
+    actually be read. Omitted, it is resolved from ``config``.
+
+    Slide order: cover and data summary; the result slides in the charter
+    format (PV or CV section, its force-distribution pages); box plots; the
+    Fx & Fy combination heatmap; then the remaining analyses.
+
+    ``analysis_only=True`` marks the report as produced by
     ``workflow_mode="analysis"`` — no fresh preprocessing/validation pass, the
     channel-validation and file/duration/units figures describe the
     *existing* processed_data.csv this run read, not a run that just
@@ -486,6 +853,14 @@ def build_report(
                          "Per wheel force channel, daN")
     _add_stats_table(slide, stats, stat_channels, L, T, IMG_W, IMG_H)
 
+    # ---- result slides (charter format), box plots, combination heatmap
+    if result_spec is None:
+        from dtt.reporting.result_figures import resolve_spec
+        result_spec = resolve_spec(config)
+    _result_slides(deck, result_spec, config)
+    _boxplot_slides(deck, figs)
+    _combination_slide(deck, result_spec, config)
+
     # ---- module 1
     deck.divider("Module 1", "Tyre load severity & distributions")
 
@@ -520,22 +895,6 @@ def build_report(
                          "Sample density, log scale")
     for (lf, tf, gw, gh), wheel in zip(_grid_positions(len(wheels), L, T, IMG_W, IMG_H), wheels):
         _insert_image_or_message(slide, figs / f"heatmap_hexbin_{wheel}.png", lf, tf, gw, gh)
-
-    for group, title in ((("Fx", "Fy", "Fz"), "Force Distribution"),
-                         (("Mx", "My", "Mz"), "Moment Distribution")):
-        present = [c for c in group if (figs / f"boxplot_{c}.png").exists()]
-        if not present and group[0] == "Mx":
-            continue                      # a forces-only study has no moment slide
-        slide = deck.content(f"Boxplots  –  {title} ({' / '.join(group)})",
-                             "Median, quartiles, P5 / mean / P95 per wheel")
-        third_w = int(IMG_W) // 3
-        for i, comp in enumerate(group):
-            _insert_image_or_message(slide, figs / f"boxplot_{comp}.png",
-                                     L + i * third_w, T, third_w, IMG_H)
-    if (figs / "boxplot_parameters.png").exists():
-        slide = deck.content("Boxplots  –  Vehicle & Other Parameters",
-                             "Every other measured channel, each on its own unit")
-        _insert_image_or_message(slide, figs / "boxplot_parameters.png", L, T, IMG_W, IMG_H)
 
     # ---- fatigue & frequency
     deck.divider("Fatigue & PSD", "Rainflow counting · Welch PSD")

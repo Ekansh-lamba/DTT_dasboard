@@ -67,6 +67,21 @@ HEXBIN_GRIDSIZE  = 80
 
 PERCENTILES: List[int] = [80, 90, 95]
 
+# Result slides (the charter-deck "Force Distribution" format). X-axis span of
+# every distribution plot, per report format; a moment (My) span only matters
+# on the PV drive-tyre page. Units are the pipeline's own: daN, daN·m.
+REPORT_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
+    "pv": {"Fx": (-300.0, 300.0), "Fy": (-300.0, 300.0), "Fz": (100.0, 1000.0),
+           "My": (-900.0, 700.0)},
+    "cv": {"Fx": (-1000.0, 1000.0), "Fy": (-1000.0, 1000.0), "Fz": (5000.0, 12000.0),
+           "My": (-9000.0, 7000.0)},
+}
+# Fx & Fy combination heatmap: (half-range, bin width) in N, both axes.
+REPORT_COMBO_HEATMAP_N: Dict[str, Tuple[float, float]] = {
+    "pv": (4000.0, 1000.0),
+    "cv": (10000.0, 2500.0),
+}
+
 PLOT_COLORS = {
     "bg":       "#0D1B2A",
     "panel":    "#1B3A5C",
@@ -175,6 +190,18 @@ class RunConfig:
     histogram_range_mode: str = "full"  # "full" (configured FORCE_RANGES_DAN span, today's default) | "autoscale" (P0.5-P99.5 of the actual data)
     export_famos_validation_csv: bool = False  # TEMPORARY: one wide post-recipe CSV for manual FAMOS cross-check; off by default, not part of the normal study output
     workflow_mode:  str   = "both"     # "preprocess" | "analysis" | "both" (default, today's full pipeline)
+    # Result slides (charter "Force Distribution" format). Dataset A is this
+    # study; dataset B is another finished study, optional -- without one the
+    # same slides are drawn for A alone. On a CV report B is the reference.
+    report_format:        str  = "auto"   # "auto" (PV preset -> "pv", any other class -> "cv") | "pv" | "cv"
+    report_compare_study: Optional[Path] = None   # finished study folder holding processed_data.csv
+    report_label_a:       str  = ""       # dataset A name (default: vehicle_name)
+    report_label_b:       str  = ""       # dataset B name (default: its study folder name)
+    report_route:         str  = ""       # route pill, e.g. "City"; blank = no pill
+    report_subtitle:      str  = ""       # CV title subtitle, e.g. "Diff Btw MRF vs Apollo - 10x2 Rigid ..."
+    report_drive_axle_a:  str  = "rear"   # PV driven axle of A: "front" | "rear"
+    report_drive_axle_b:  str  = "rear"   # PV driven axle of B: "front" | "rear"
+    report_ranges:        Optional[dict] = None   # per-component x-span override, {"Fz": (lo, hi)}
     output_dir:     Path  = field(default_factory=lambda: OUTPUTS_DIR)
     run_channels:   object = None      # ChannelSet-derived config, built at run time
     tyre:           object = None      # resolved TyreParams for the vehicle type
@@ -185,6 +212,13 @@ class RunConfig:
             raise ValueError(
                 f'workflow_mode must be "preprocess", "analysis", or "both", '
                 f'got {self.workflow_mode!r}')
+        if self.report_format not in ("auto", "pv", "cv"):
+            raise ValueError(f'report_format must be "auto", "pv" or "cv", '
+                             f'got {self.report_format!r}')
+        for name in ("report_drive_axle_a", "report_drive_axle_b"):
+            if getattr(self, name) not in ("front", "rear"):
+                raise ValueError(f'{name} must be "front" or "rear", '
+                                 f'got {getattr(self, name)!r}')
         if not self.study_name:
             self.study_name = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.run_output_dir = Path(self.output_dir) / self.study_name
