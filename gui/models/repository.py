@@ -19,8 +19,11 @@ Backend output contract (one folder per study under ``dtt/outputs/``)::
             hist_distance_*.png      hist_percentage_*.png
             heatmap_*.png            heatmap_hexbin_*.png
             boxplot_*.png
-            rainflow_*.png           rainflow_cycles_*.csv
+        heatmap_bins.json       heatmap bin range set in the GUI (optional)
         logs/pipeline.log
+
+Studies made before 2026-10-28 may also hold rainflow_*/psd_* files from the
+since-disabled rainflow and PSD stages; nothing reads them.
         WFT_Report_{vehicle}_{date}.pptx
 """
 
@@ -53,7 +56,6 @@ PIPELINE_STAGES: List[str] = [
     "Histograms",
     "Heatmaps",
     "Boxplots",
-    "Rainflow",
     "Report Generation",
 ]
 
@@ -324,9 +326,6 @@ class Study:
         suffix = "" if range_mode == "full" else f"_{range_mode}"
         return self.figure(f"auc_{kind}_{wheel}{suffix}.png")
 
-    def psd(self, wheel: str) -> Optional[Path]:
-        return self.figure(f"psd_{wheel}.png")
-
     def heatmap(self, name: str) -> Optional[Path]:
         return self.figure(f"heatmap_{name}.png")
 
@@ -335,12 +334,6 @@ class Study:
 
     def boxplot(self, signal: str) -> Optional[Path]:
         return self.figure(f"boxplot_{signal}.png")
-
-    def rainflow_image(self, wheel: str) -> Optional[Path]:
-        return self.figure(f"rainflow_{wheel}.png")
-
-    def rainflow_cycle_csvs(self) -> List[Path]:
-        return self.figures("rainflow_cycles_*.csv")
 
     # Log
     def read_log(self) -> str:

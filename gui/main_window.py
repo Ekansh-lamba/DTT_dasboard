@@ -22,8 +22,6 @@ from gui.pages.histograms_page import HistogramsPage
 from gui.pages.auc_page import AucPage
 from gui.pages.heatmaps_page import HeatmapsPage
 from gui.pages.boxplots_page import BoxplotsPage
-from gui.pages.rainflow_page import RainflowPage
-from gui.pages.psd_page import PsdPage
 from gui.pages.reports_page import ReportsPage
 from gui.pages.comparison_page import ComparisonPage
 from gui.pages.study_compare_page import StudyComparePage
@@ -42,8 +40,6 @@ NAV_ITEMS = [
     ("auc",        "AUC",         "∫"),
     ("heatmaps",   "Heatmaps",    "▦"),
     ("boxplots",   "Boxplots",    "◫"),
-    ("rainflow",   "Rainflow",    "∿"),
-    ("psd",        "PSD",         "∼"),
     ("reports",    "Reports",     "▤"),
     ("comparison", "Compare",     "⇄"),
     ("study_compare", "Compare studies", "⚖"),
@@ -52,7 +48,7 @@ NAV_ITEMS = [
 ]
 _STUDY_PAGES = {
     "preprocess", "signals", "validation", "statistics", "histograms", "auc",
-    "heatmaps", "boxplots", "rainflow", "psd", "reports", "channel_names",
+    "heatmaps", "boxplots", "reports", "channel_names",
 }
 
 
@@ -196,8 +192,6 @@ class MainWindow(QMainWindow):
         self.auc        = AucPage(self.repo)
         self.heatmaps   = HeatmapsPage(self.repo)
         self.boxplots   = BoxplotsPage(self.repo)
-        self.rainflow   = RainflowPage(self.repo)
-        self.psd        = PsdPage(self.repo)
         self.reports    = ReportsPage(self.repo)
         self.comparison = ComparisonPage(self.repo)
         self.study_compare = StudyComparePage(self.repo)
@@ -212,7 +206,7 @@ class MainWindow(QMainWindow):
             "statistics": self.statistics, "histograms": self.histograms,
             "auc": self.auc,
             "heatmaps": self.heatmaps, "boxplots": self.boxplots,
-            "rainflow": self.rainflow, "psd": self.psd, "reports": self.reports,
+            "reports": self.reports,
             "comparison": self.comparison,
             "study_compare": self.study_compare,
             "history": self.history,

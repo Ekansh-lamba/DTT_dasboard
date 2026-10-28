@@ -3,7 +3,7 @@
 Before this file, report_builder.py had zero test coverage anywhere in the
 repo -- which is exactly how it drifted onto the legacy hardcoded
 WHEEL_GROUPS/MANDATORY_CHANNELS constants while every other analysis module
-(statistics.py, histograms.py, heatmaps.py, boxplots.py, rainflow.py) had
+(statistics.py, histograms.py, heatmaps.py, boxplots.py) had
 already moved to the dynamic config.run_channels model. A real FR/RR-only
 recording (no FL/RL) produced: an empty statistics slide (legacy channel
 names never matched the study's real, axle-suffixed stats keys) and
@@ -12,7 +12,7 @@ title-only blank FL/RL slides (legacy wheel list always assumed all four).
 These tests build report_builder's own inputs by hand -- no full pipeline
 run, no real recording -- fast and deterministic, matching the rest of this
 suite. The one real-data end-to-end check lives outside pytest (see the
-session notes), since running the full 9-stage pipeline is much too slow to
+session notes), since running the full pipeline is much too slow to
 run on every `pytest tests/`.
 """
 
@@ -101,34 +101,56 @@ def test_report_slide_count_matches_wheel_count_not_legacy_four(tmp_path):
 
     titles = _slide_titles(out)
     histogram_slides = [t for t in titles if t.startswith("Histograms")]
-    rainflow_slides  = [t for t in titles if t.startswith("Rainflow")]
+    auc_slides       = [t for t in titles if t.startswith("AUC Distribution")]
     assert len(histogram_slides) == 2   # FR, RR -- not the legacy 4
-    assert len(rainflow_slides) == 2
+    assert len(auc_slides) == 2
 
 
-# ------------------------------------------------------------- severity
+# ------------------------------------- severity & fatigue removed (2026-10-28)
 
-def test_severity_slide_present_with_table_image(tmp_path):
-    """severity_table.png (Gx/Gy/Gxy/DLC per wheel, saved every run by
-    dtt/analysis/severity.py) must land on its own slide -- it used to be
-    computed and saved but never referenced anywhere in report_builder."""
+def _png_1x1() -> bytes:
     import base64
-    cfg = _fr_rr_config(tmp_path)
-    png_1x1 = base64.b64decode(
+    return base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42Y"
         "AAAAASUVORK5CYII=")
-    (cfg.figures_dir / "severity_table.png").write_bytes(png_1x1)
+
+
+def test_no_severity_slide_even_when_its_table_exists(tmp_path):
+    """G-severity and DLC are still computed and saved (severity_summary.json,
+    severity_table.png) but are no longer a report slide."""
+    cfg = _fr_rr_config(tmp_path)
+    (cfg.figures_dir / "severity_table.png").write_bytes(_png_1x1())
 
     out = build_report(cfg, _fr_rr_validation_report(), _fr_rr_stats(), _fr_rr_metadata())
-    prs = Presentation(str(out))
-
     titles = _slide_titles(out)
-    sev_idx = next(i for i, t in enumerate(titles) if t.startswith("Load Severity"))
-    sev_slide = prs.slides[sev_idx]
-    pics  = [sh for sh in sev_slide.shapes if sh.shape_type == 13]
-    texts = [sh.text_frame.text for sh in sev_slide.shapes if sh.has_text_frame]
-    assert len(pics) == 1
-    assert not any("Not available" in t for t in texts)
+    assert not any("Severity" in t or "G-severity" in t for t in titles), titles
+
+
+def test_no_fatigue_or_psd_section_even_when_old_figures_exist(tmp_path):
+    """An old study's rainflow/PSD figures are ignored: no divider, no slide."""
+    cfg = _fr_rr_config(tmp_path)
+    for wheel in ("FR", "RR"):
+        (cfg.figures_dir / f"rainflow_{wheel}.png").write_bytes(_png_1x1())
+        (cfg.figures_dir / f"psd_{wheel}.png").write_bytes(_png_1x1())
+
+    out = build_report(cfg, _fr_rr_validation_report(), _fr_rr_stats(), _fr_rr_metadata())
+    text = " ".join(_slide_titles(out)).lower()
+    for word in ("rainflow", "psd", "fatigue", "welch", "miner"):
+        assert word not in text, word
+    assert _slide_titles(out)[-1] == "Engineering Conclusions"
+
+
+def test_slide_numbers_run_without_gaps(tmp_path):
+    """Every numbered slide carries its own position -- no hole is left
+    where the removed slides used to be."""
+    cfg = _fr_rr_config(tmp_path)
+    prs = Presentation(str(build_report(cfg, _fr_rr_validation_report(), _fr_rr_stats(),
+                                        _fr_rr_metadata())))
+    for i, slide in enumerate(prs.slides, start=1):
+        numbers = [sh.text_frame.text for sh in slide.shapes
+                   if sh.has_text_frame and sh.text_frame.text.strip().isdigit()]
+        if numbers:
+            assert numbers[-1] == str(i), (i, numbers)
 
 
 # --------------------------------------------------- statistical summary
@@ -276,8 +298,9 @@ def test_no_title_only_blank_slides_with_missing_figures_and_partial_wheels(tmp_
 def test_report_uses_the_apollo_template_layouts(tmp_path):
     """Cover, dividers and content slides come from the charter deck's own
     layouts, 16:9, with no empty "Click to add" placeholders left behind."""
-    from dtt.reporting.report_builder import (TEMPLATE, _LAYOUT_CONTENT,
-                                              _LAYOUT_COVER, _LAYOUT_DIVIDER)
+    from dtt.reporting.report_builder import (TEMPLATE, _LAYOUT_CONTENT, _LAYOUT_COVER,
+                                              _LAYOUT_DIVIDER, _LAYOUT_RESULT,
+                                              _LAYOUT_SECTION)
     assert TEMPLATE.exists()
     cfg = _fr_rr_config(tmp_path)
     out = build_report(cfg, _fr_rr_validation_report(), _fr_rr_stats(), _fr_rr_metadata())
@@ -285,8 +308,12 @@ def test_report_uses_the_apollo_template_layouts(tmp_path):
     assert (prs.slide_width, prs.slide_height) == (12192000, 6858000)
     layouts = [s.slide_layout.name for s in prs.slides]
     assert layouts[0] == _LAYOUT_COVER
-    assert layouts.count(_LAYOUT_DIVIDER) == 3
-    assert layouts.count(_LAYOUT_CONTENT) == len(layouts) - 4
+    assert layouts.count(_LAYOUT_DIVIDER) == 2          # "Data & Processing", "Module 1"
+    assert layouts.count(_LAYOUT_SECTION) == 1          # "PV Format"
+    # the charter-format result slides: two PV pages, box plots, combination
+    assert layouts.count(_LAYOUT_RESULT) >= 4
+    assert layouts.count(_LAYOUT_CONTENT) == (len(layouts) - 4
+                                              - layouts.count(_LAYOUT_RESULT))
     for i, slide in enumerate(prs.slides, start=1):
         for ph in slide.placeholders:
             assert ph.has_text_frame and ph.text_frame.text.strip(), (i, ph.name)

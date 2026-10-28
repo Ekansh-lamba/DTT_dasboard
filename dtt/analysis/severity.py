@@ -172,7 +172,8 @@ def severity_table_rows(results: Dict[str, dict]) -> Tuple[List[str], List[List[
 
 
 def generate_severity_figure(results: Dict[str, dict], config: RunConfig) -> None:
-    """Render the severity/DLC table as a figure for the PowerPoint report."""
+    """Render the severity/DLC table as a figure (severity_table.png). Not a
+    report slide since 2026-10-28; the numbers are in severity_summary.json."""
     if not results:
         return
     import matplotlib

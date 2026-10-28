@@ -32,7 +32,6 @@ def _self_test() -> int:
         ("openpyxl (Excel export)", lambda: __import__("openpyxl")),
         ("matplotlib PDF backend",
          lambda: __import__("matplotlib.backends.backend_pdf", fromlist=["x"])),
-        ("rainflow", lambda: __import__("rainflow")),
         ("pptx (report builder)", lambda: __import__("pptx")),
     ]
     failed = 0

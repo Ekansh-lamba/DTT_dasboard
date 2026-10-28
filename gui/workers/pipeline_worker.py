@@ -7,7 +7,7 @@ the project documents::
     python -m dtt.pipeline --csv <path> --vehicle <name> --study <name> ...
 
 run from the project root, captures the merged stdout/stderr stream line by
-line, and translates the pipeline's ``[n/9]  Stage`` log markers into
+line, and translates the pipeline's ``[n/8]  Stage`` log markers into
 structured Qt signals the Processing screen consumes.
 """
 
@@ -38,7 +38,6 @@ class RunRequest:
     study: str = ""
     cutoff: Optional[float] = None
     order: Optional[int] = None
-    miner: Optional[float] = None
     no_filter: bool = False
     no_famos: bool = False        # fall back to the legacy Butterworth LPF
     deglitch: bool = False        # rolling-median removal of DAQ artifact spikes
@@ -58,6 +57,15 @@ class RunRequest:
     histogram_range_mode: Optional[str] = None      # "full" | "autoscale"
     mode: str = "both"            # "both" | "preprocess" | "analysis"
     export_famos_validation_csv: bool = False  # TEMPORARY: post-recipe CSV for manual FAMOS cross-check
+    # Result slides (charter report format); empty/None leaves the CLI default
+    report_format: str = "auto"                    # "auto" | "pv" | "cv"
+    compare_study: Optional[Path] = None           # finished study drawn as dataset B
+    label_a: str = ""
+    label_b: str = ""
+    route: str = ""
+    report_subtitle: str = ""
+    drive_axle_a: str = ""                         # "" | "front" | "rear"
+    drive_axle_b: str = ""
 
     def to_cmd(self) -> List[str]:
         # A frozen .exe re-invokes itself in pipeline mode; from source we call
@@ -87,8 +95,6 @@ class RunRequest:
             cmd += ["--cutoff", str(self.cutoff)]
         if self.order is not None:
             cmd += ["--order", str(self.order)]
-        if self.miner is not None:
-            cmd += ["--miner", str(self.miner)]
         if self.no_filter:
             cmd += ["--no-filter"]
         if self.no_famos:
@@ -127,11 +133,21 @@ class RunRequest:
             cmd += ["--mode", self.mode]
         if self.export_famos_validation_csv:
             cmd += ["--export-famos-validation-csv"]
+        if self.report_format and self.report_format != "auto":
+            cmd += ["--report-format", self.report_format]
+        if self.compare_study:
+            cmd += ["--compare-study", str(self.compare_study)]
+        for flag, value in (("--label-a", self.label_a), ("--label-b", self.label_b),
+                            ("--route", self.route), ("--report-subtitle", self.report_subtitle),
+                            ("--drive-axle-a", self.drive_axle_a),
+                            ("--drive-axle-b", self.drive_axle_b)):
+            if value:
+                cmd += [flag, value]
         return cmd
 
 
 # Ordered stage list shown in the Processing screen. The regex maps a log line
-# to the stage index. The backend logs e.g. "[1/9]  Data Ingestion".
+# to the stage index. The backend logs e.g. "[1/8]  Data Ingestion".
 STAGES: List[str] = [
     "Data Ingestion",
     "Validation",
@@ -141,21 +157,19 @@ STAGES: List[str] = [
     "Histograms",
     "Heatmaps",
     "Boxplots",
-    "Rainflow",
     "Report Generation",
 ]
 
 # Backend log phrase  ->  GUI stage name
 _STAGE_MARKERS = [
-    (re.compile(r"\[1/9\].*Ingest", re.I),        "Data Ingestion"),
-    (re.compile(r"\[2/9\].*Valid", re.I),         "Validation"),
-    (re.compile(r"\[3/9\].*Sanitiz", re.I),       "Sanitization"),
-    (re.compile(r"\[4/9\].*(Signal|Filter|Butter)", re.I), "Filtering"),
-    (re.compile(r"\[5/9\].*Statist", re.I),       "Statistics"),
-    (re.compile(r"\[6/9\].*Histogram", re.I),     "Histograms"),
-    (re.compile(r"\[7/9\].*Heatmap", re.I),       "Heatmaps"),
-    (re.compile(r"\[8/9\].*Boxplot", re.I),       "Boxplots"),
-    (re.compile(r"\[9/9\].*Rainflow", re.I),      "Rainflow"),
+    (re.compile(r"\[1/8\].*Ingest", re.I),        "Data Ingestion"),
+    (re.compile(r"\[2/8\].*Valid", re.I),         "Validation"),
+    (re.compile(r"\[3/8\].*Sanitiz", re.I),       "Sanitization"),
+    (re.compile(r"\[4/8\].*(Signal|Filter|Butter)", re.I), "Filtering"),
+    (re.compile(r"\[5/8\].*Statist", re.I),       "Statistics"),
+    (re.compile(r"\[6/8\].*Histogram", re.I),     "Histograms"),
+    (re.compile(r"\[7/8\].*Heatmap", re.I),       "Heatmaps"),
+    (re.compile(r"\[8/8\].*Boxplot", re.I),       "Boxplots"),
     (re.compile(r"\[Report\]", re.I),             "Report Generation"),
 ]
 

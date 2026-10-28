@@ -243,13 +243,31 @@ def draw_histogram(ax, values: np.ndarray, bins: np.ndarray,
 _STATS_COLS = ("Min", "P5", "Q1", "Median", "Mean", "Q3", "P95", "Max")
 
 
-def draw_comparison_kde(ax, values_a: np.ndarray, values_b: np.ndarray,
+def _finite(values) -> np.ndarray:
+    v = np.asarray(values, dtype=float)
+    return v[np.isfinite(v)]
+
+
+def _plot_span(*arrays: np.ndarray) -> Tuple[float, float]:
+    both = np.concatenate(arrays)
+    lo = float(np.percentile(both, 0.5))
+    hi = float(np.percentile(both, 99.5))
+    if not (hi > lo):
+        lo, hi = float(both.min()), float(both.max()) or 1.0
+    return lo, hi
+
+
+def draw_comparison_kde(ax, values_a: np.ndarray, values_b: Optional[np.ndarray],
                         label_a: str, label_b: str,
                         color_a: str, color_b: str,
                         weights_a: Optional[np.ndarray] = None,
                         weights_b: Optional[np.ndarray] = None,
                         xlim: Optional[Tuple[float, float]] = None,
-                        n: int = 500) -> dict:
+                        n: int = 500,
+                        p5_in_legend: bool = False,
+                        fill_alpha: float = 0.28,
+                        line_width: float = 1.8,
+                        legend_fontsize: float = 7) -> dict:
     """Filled KDE overlay of two runs on one axis, with dashed P5/P95 lines
     per run and a legend naming each run. Returns the P5/P95 values used, so
     a caller building a Miner-ratio-style summary line can reuse them.
@@ -257,47 +275,127 @@ def draw_comparison_kde(ax, values_a: np.ndarray, values_b: np.ndarray,
     ``weights_a``/``weights_b`` (e.g. per-sample distance) make each curve a
     weighted density via :func:`dtt.analysis.auc.kde_curve` -- pass ``None``
     for a plain sample-count KDE.
+
+    ``values_b=None`` draws run A alone, in run A's style -- a single-study
+    report uses the same plot. ``p5_in_legend`` names every percentile line
+    with its value (``"EV P5: -40"``), P5s before P95s, as the charter report
+    does; off, the legend is exactly as before.
     """
-    a = np.asarray(values_a, dtype=float)
-    a = a[np.isfinite(a)]
-    b = np.asarray(values_b, dtype=float)
-    b = b[np.isfinite(b)]
-    if a.size < 2 or b.size < 2:
+    a = _finite(values_a)
+    b = None if values_b is None else _finite(values_b)
+    if a.size < 2 or (b is not None and b.size < 2):
         ax.text(0.5, 0.5, "insufficient data", ha="center", va="center", transform=ax.transAxes)
         return {}
 
-    if xlim is None:
-        both = np.concatenate([a, b])
-        lo = float(np.percentile(both, 0.5))
-        hi = float(np.percentile(both, 99.5))
-        if not (hi > lo):
-            lo, hi = float(both.min()), float(both.max()) or 1.0
-    else:
-        lo, hi = xlim
+    lo, hi = xlim if xlim is not None else _plot_span(a, *([b] if b is not None else []))
     x = np.linspace(lo, hi, n)
 
-    ka = kde_curve(a, x, weights=weights_a)
-    kb = kde_curve(b, x, weights=weights_b)
-    ax.fill_between(x, ka, alpha=0.28, color=color_a)
-    ax.fill_between(x, kb, alpha=0.28, color=color_b)
-    ax.plot(x, ka, color=color_a, linewidth=1.8, label=label_a)
-    ax.plot(x, kb, color=color_b, linewidth=1.8, linestyle="--", label=label_b)
+    runs = [("a", a, weights_a, label_a, color_a, "-")]
+    if b is not None:
+        runs.append(("b", b, weights_b, label_b, color_b, "--"))
+    curves = [kde_curve(v, x, weights=w) for _, v, w, *_ in runs]
+    for k, (_, _, _, _, color, _) in zip(curves, runs):
+        ax.fill_between(x, k, alpha=fill_alpha, color=color)
+    for k, (_, _, _, label, color, style) in zip(curves, runs):
+        ax.plot(x, k, color=color, linewidth=line_width, linestyle=style, label=label)
 
-    p5a, p95a = float(np.percentile(a, 5)), float(np.percentile(a, 95))
-    p5b, p95b = float(np.percentile(b, 5)), float(np.percentile(b, 95))
-    ax.axvline(p5a, color=color_a, linewidth=1.1, linestyle=":")
-    ax.axvline(p95a, color=color_a, linewidth=1.6, linestyle="--",
-               label=f"{label_a} P95 {p95a:.0f}")
-    ax.axvline(p5b, color=color_b, linewidth=1.1, linestyle=":")
-    ax.axvline(p95b, color=color_b, linewidth=1.6, linestyle="--",
-               label=f"{label_b} P95 {p95b:.0f}")
-    ax.legend(fontsize=7, facecolor=PLOT_COLORS["bg"], labelcolor="white", framealpha=0.85)
+    out = {}
+    for key, v, _, label, color, _ in runs:
+        p5, p95 = float(np.percentile(v, 5)), float(np.percentile(v, 95))
+        ax.axvline(p5, color=color, linewidth=1.1, linestyle=":",
+                   label=f"{label} P5: {p5:.0f}" if p5_in_legend else None)
+        ax.axvline(p95, color=color, linewidth=1.6, linestyle="--",
+                   label=f"{label} P95: {p95:.0f}" if p5_in_legend else f"{label} P95 {p95:.0f}")
+        out[f"p5_{key}"], out[f"p95_{key}"] = p5, p95
 
-    return {"p5_a": p5a, "p95_a": p95a, "p5_b": p5b, "p95_b": p95b}
+    if p5_in_legend:
+        handles, labels = ax.get_legend_handles_labels()
+        rank = lambda l: 2 if " P95: " in l else (1 if " P5: " in l else 0)   # noqa: E731
+        order = sorted(range(len(labels)), key=lambda i: rank(labels[i]))
+        ax.legend([handles[i] for i in order], [labels[i] for i in order],
+                  fontsize=legend_fontsize, facecolor=_LEGEND_BG, edgecolor=_LEGEND_BG,
+                  labelcolor="white", framealpha=0.95, loc="upper right",
+                  handlelength=1.6, borderpad=0.4, labelspacing=0.25)
+    else:
+        ax.legend(fontsize=legend_fontsize, facecolor=PLOT_COLORS["bg"], labelcolor="white",
+                  framealpha=0.85)
+
+    return out
+
+
+_LEGEND_BG = "#263445"            # the charter plots' dark slate legend box
+_ZONE_GREEN = "#3AA76D"
+_EXCEED_RED = "#D9534F"
+_REFERENCE_GREY = "#A6A6A6"
+
+
+def draw_reference_kde(ax, values_cand: np.ndarray, values_ref: Optional[np.ndarray],
+                       label_cand: str, label_ref: str, color_cand: str,
+                       xlim: Optional[Tuple[float, float]] = None, n: int = 500,
+                       line_width: float = 1.4, legend_fontsize: float = 5) -> dict:
+    """A candidate run against a reference baseline -- the CV charter slide.
+
+    The reference is drawn as a grey dashed curve and the band between its
+    own P5 and P95 is shaded green ("normal zone"); wherever the candidate
+    runs past the reference P95 its area is shaded red. Vertical rules: the
+    reference P5 (green, dotted) and P95 (red, dashed), and the candidate P95
+    (dashed, in the candidate's colour). Plain sample-count KDEs, the same
+    kernel as :func:`draw_comparison_kde`.
+
+    ``values_ref=None`` draws the candidate alone with its own P5/P95.
+    Returns the percentiles used.
+    """
+    from matplotlib.lines import Line2D
+
+    c = _finite(values_cand)
+    r = None if values_ref is None else _finite(values_ref)
+    if c.size < 2 or (r is not None and r.size < 2):
+        ax.text(0.5, 0.5, "insufficient data", ha="center", va="center", transform=ax.transAxes)
+        return {}
+    lo, hi = xlim if xlim is not None else _plot_span(c, *([r] if r is not None else []))
+    x = np.linspace(lo, hi, n)
+    kc = kde_curve(c, x)
+    p5c, p95c = float(np.percentile(c, 5)), float(np.percentile(c, 95))
+    out = {"p5_cand": p5c, "p95_cand": p95c}
+
+    if r is None:
+        ax.fill_between(x, kc, color=color_cand, alpha=0.25, linewidth=0)
+        ax.plot(x, kc, color=color_cand, linewidth=line_width)
+        ax.axvline(p5c, color=color_cand, linewidth=1.0, linestyle=":")
+        ax.axvline(p95c, color=color_cand, linewidth=1.2, linestyle="--")
+        handles = [Line2D([], [], color=color_cand, linewidth=line_width),
+                   Line2D([], [], color=color_cand, linestyle=":"),
+                   Line2D([], [], color=color_cand, linestyle="--")]
+        labels = [label_cand, f"{label_cand} P5: {p5c:.0f}", f"{label_cand} P95: {p95c:.0f}"]
+    else:
+        kr = kde_curve(r, x)
+        p5r, p95r = float(np.percentile(r, 5)), float(np.percentile(r, 95))
+        out.update(p5_ref=p5r, p95_ref=p95r)
+        top = np.maximum(kc, kr)
+        ax.fill_between(x, kr, color=_REFERENCE_GREY, alpha=0.18, linewidth=0)
+        ax.fill_between(x, kc, where=x <= p5r, color=color_cand, alpha=0.15, linewidth=0)
+        zone = ax.fill_between(x, top, where=(x >= p5r) & (x <= p95r),
+                               color=_ZONE_GREEN, alpha=0.35, linewidth=0)
+        exceed = ax.fill_between(x, kc, where=x >= p95r, color=_EXCEED_RED,
+                                 alpha=0.6, linewidth=0)
+        ref_line, = ax.plot(x, kr, color=_REFERENCE_GREY, linewidth=line_width, linestyle="--")
+        cand_line, = ax.plot(x, kc, color=color_cand, linewidth=line_width)
+        p5_line = ax.axvline(p5r, color=_ZONE_GREEN, linewidth=1.0, linestyle=":")
+        p95_line = ax.axvline(p95r, color=_EXCEED_RED, linewidth=1.2, linestyle="--")
+        cand95 = ax.axvline(p95c, color=color_cand, linewidth=1.2, linestyle="--")
+        handles = [zone, exceed, ref_line, cand_line, p5_line, p95_line, cand95]
+        labels = [f"{label_ref} normal zone (P5-P95)", f"{label_cand} exceeds {label_ref} P95",
+                  f"{label_ref} (reference)", label_cand, f"{label_ref} P5: {p5r:.0f}",
+                  f"{label_ref} P95: {p95r:.0f}", f"{label_cand} P95: {p95c:.0f}"]
+    ax.legend(handles, labels, fontsize=legend_fontsize, facecolor=_LEGEND_BG,
+              edgecolor=_LEGEND_BG, labelcolor="white", framealpha=0.95, loc="upper right",
+              handlelength=1.6, borderpad=0.4, labelspacing=0.25)
+    return out
 
 
 def stats_strip_rows(series: Sequence[Tuple[str, np.ndarray]],
                      weights: Optional[Sequence[Optional[np.ndarray]]] = None,
+                     decimals: int = 1,
                      ) -> Tuple[List[str], List[List[str]]]:
     """``(header, rows)`` for the Min/P5/Q1/Median/Mean/Q3/P95/Max strip, one
     row per ``(label, values)`` pair. Matplotlib-free so it is independently
@@ -307,6 +405,9 @@ def stats_strip_rows(series: Sequence[Tuple[str, np.ndarray]],
     distance-weighted, so the strip agrees with a weighted curve drawn above
     it. Min and Max are the same either way -- a weight changes how much a
     sample counts, not whether it happened. Omitted, the output is unchanged.
+
+    ``decimals`` is display rounding only (the charter report prints whole
+    numbers); the statistics are the same either way.
     """
     from dtt.analysis.auc import weighted_percentile
 
@@ -332,8 +433,18 @@ def stats_strip_rows(series: Sequence[Tuple[str, np.ndarray]],
             q = lambda p: weighted_percentile(v, w, p)          # noqa: E731
             stats = [v.min(), q(5), q(25), q(50), float(np.average(v, weights=w)),
                      q(75), q(95), v.max()]
-        rows.append([label] + [f"{s:.1f}" for s in stats])
+        rows.append([label] + [f"{s:.{decimals}f}" for s in stats])
     return header, rows
+
+
+def stats_strip_lines(header: List[str], rows: List[List[str]]) -> List[str]:
+    """``EV | Min:  -244 | P5:   -40 | ...`` -- one fixed-width line per row,
+    columns aligned across rows, as the charter report's strips read."""
+    lab_w = max(len(r[0]) for r in rows)
+    widths = [max(len(r[i]) for r in rows) for i in range(1, len(header))]
+    return [" | ".join([r[0].ljust(lab_w)] +
+                       [f"{h}: {v.rjust(w)}" for h, v, w in zip(header[1:], r[1:], widths)])
+            for r in rows]
 
 
 _STATS_STRIP_THEMES = {
@@ -358,6 +469,7 @@ def draw_stats_strip(ax, series: Sequence[Tuple[str, np.ndarray]],
                      theme: str = "dark", fontsize: float = 7,
                      bbox: Optional[List[float]] = None,
                      weights: Optional[Sequence[Optional[np.ndarray]]] = None,
+                     layout: str = "table", decimals: int = 1,
                      ) -> None:
     """Render the Min/P5/Q1/Median/Mean/Q3/P95/Max strip as a small table
     directly under ``ax`` — the "more informative" element the reference
@@ -367,9 +479,23 @@ def draw_stats_strip(ax, series: Sequence[Tuple[str, np.ndarray]],
     ``theme``: ``"dark"`` (default, unchanged from before) matches the app's
     navy chrome; ``"light"`` matches the white-background force-histogram/AUC
     style instead of clashing with it.
+
+    ``layout="text"`` is the charter report's strip instead: ``ax`` is an
+    axes of its own (turned off here), filled by a grey rounded panel of
+    monospaced ``label | Min: | P5: | ...`` lines. ``theme``/``colors``/
+    ``bbox`` do not apply to it.
     """
-    header, rows = stats_strip_rows(series, weights=weights)
+    header, rows = stats_strip_rows(series, weights=weights, decimals=decimals)
     if not rows:
+        return
+    if layout == "text":
+        ax.axis("off")
+        ax.text(0.5, 0.5, "\n".join(stats_strip_lines(header, rows)),
+                transform=ax.transAxes, ha="center", va="center",
+                family="monospace", fontsize=fontsize, color="#262626",
+                linespacing=1.5,
+                bbox=dict(boxstyle="round,pad=0.45", facecolor="#E9E9E9",
+                          edgecolor="#BFBFBF", linewidth=0.6))
         return
     th = _STATS_STRIP_THEMES[theme]
     tbl = ax.table(cellText=rows, colLabels=header, loc="bottom",

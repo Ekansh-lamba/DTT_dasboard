@@ -42,9 +42,6 @@ Generates two-dimensional percentage occurrence heatmaps and logarithmic hexbin 
 ### 8. Boxplot Generation
 Visualizes load distributions across channels with fixed-axis constraints to facilitate cross-vehicle comparisons. Accurately maps the 5th percentile, median, mean, 95th percentile, and interquartile ranges.
 
-### 9. Rainflow & Damage Analysis
-Executes fatigue and durability analysis utilizing the standard Rainflow counting algorithm. Outputs include Siemens-style 16x16 from-to matrices, cycle distribution datasets, and cumulative Miner's rule damage calculations.
-
 ### Reporting
 Compiles all generated statistics and visualizations into a comprehensive 16-slide PowerPoint presentation native to the Microsoft Office ecosystem, structured for immediate engineering review.
 
@@ -79,7 +76,6 @@ python -m dtt.pipeline --csv "path/to/dataset.csv" --vehicle "Vehicle_Name" --st
 - `--cutoff`: Override the default low-pass filter cutoff frequency.
 - `--order`: Override the default Butterworth filter order.
 - `--no-filter`: Bypass the signal processing stage entirely.
-- `--miner`: Override the default Miner's rule exponent (default: 8.0).
 
 ## Output Structure
 
@@ -95,8 +91,6 @@ dtt/outputs/{Study_Name}/
 ├── figures/
 │   ├── hist_*.png             # Histogram exports
 │   ├── heatmap_*.png          # Heatmap & hexbin exports
-│   ├── boxplot_*.png          # Boxplot exports
-│   ├── rainflow_*.png         # Rainflow matrix exports
-│   └── rainflow_cycles_*.csv  # Raw Rainflow cycle data
+│   └── boxplot_*.png          # Boxplot exports
 └── WFT_Report_{Vehicle}_{Date}.pptx  # Final presentation report
 ```

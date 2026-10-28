@@ -76,7 +76,7 @@ class NewStudyPage(BasePage):
         self.mode_combo.setToolTip(
             "Full run: today's normal pipeline.\n"
             "Preprocess only: ingest + condition the signal, save processed_data.csv / "
-            "raw_data.csv, then stop -- no histograms/heatmaps/rainflow/report.\n"
+            "raw_data.csv, then stop -- no histograms/heatmaps/report.\n"
             "Analysis only: skip preprocessing entirely and re-run just the analysis "
             "stages on an existing study's processed_data.csv, in place. Checks that "
             "study's saved processing provenance and warns (never silently) if it "
@@ -423,12 +423,6 @@ class NewStudyPage(BasePage):
         self.order_spin.setValue(4)
         fform.addRow("Filter order", self.order_spin)
 
-        self.miner_spin = QDoubleSpinBox()
-        self.miner_spin.setRange(1.0, 20.0)
-        self.miner_spin.setSingleStep(0.5)
-        self.miner_spin.setValue(8.0)
-        fform.addRow("Miner's exponent", self.miner_spin)
-
         self.range_mode_combo = QComboBox()
         self.range_mode_combo.addItem("Full range (configured span)", "full")
         self.range_mode_combo.addItem("Autoscale to data (P0.5-P99.5)", "autoscale")
@@ -439,13 +433,71 @@ class NewStudyPage(BasePage):
         fform.addRow("Histogram x-axis", self.range_mode_combo)
         right.layout().addLayout(fform)
 
+        # Result slides in the charter-deck format. Dataset A is this study;
+        # dataset B, optional, is another finished study. Every field may stay
+        # blank -- the report then draws this study alone under its vehicle name.
+        right.layout().addWidget(_card_title("Report"))
+        rform = QFormLayout()
+        rform.setSpacing(10)
+        self.report_format_combo = QComboBox()
+        self.report_format_combo.addItem("Auto (from vehicle type)", "auto")
+        self.report_format_combo.addItem("PV format (FL/FR/RL/RR, 2 pages)", "pv")
+        self.report_format_combo.addItem("CV format (one row per axle)", "cv")
+        self.report_format_combo.setToolTip(
+            "Layout of the Force Distribution slides. Auto: PV for a passenger-"
+            "vehicle preset, CV for any commercial class.")
+        self.report_format_combo.currentIndexChanged.connect(self._on_report_format)
+        rform.addRow("Slide format", self.report_format_combo)
+
+        cmp_row = QWidget()
+        cmp_lay = QHBoxLayout(cmp_row)
+        cmp_lay.setContentsMargins(0, 0, 0, 0)
+        self.compare_combo = QComboBox()
+        self.compare_combo.setMinimumWidth(200)
+        self.compare_combo.setToolTip(
+            "A finished study to draw as dataset B on every result slide (on a "
+            "CV report, the reference). None: this study alone.")
+        self.compare_combo.currentIndexChanged.connect(self._on_compare_changed)
+        refresh_cmp = QPushButton("Refresh")
+        refresh_cmp.setObjectName("Secondary")
+        refresh_cmp.clicked.connect(self._reload_compare_studies)
+        cmp_lay.addWidget(self.compare_combo, 1)
+        cmp_lay.addWidget(refresh_cmp)
+        rform.addRow("Compare with", cmp_row)
+
+        self.label_a_edit = QLineEdit()
+        self.label_a_edit.setPlaceholderText("Default: vehicle name  (e.g. EV)")
+        rform.addRow("Dataset A name", self.label_a_edit)
+        self.label_b_edit = QLineEdit()
+        self.label_b_edit.setPlaceholderText("Default: compared study's name  (e.g. IC)")
+        rform.addRow("Dataset B name", self.label_b_edit)
+        self.route_edit = QLineEdit()
+        self.route_edit.setPlaceholderText("e.g. City, Highway  (blank: no route pill)")
+        rform.addRow("Route", self.route_edit)
+
+        self.drive_a_combo = QComboBox()
+        self.drive_b_combo = QComboBox()
+        for combo in (self.drive_a_combo, self.drive_b_combo):
+            combo.addItem("Rear-wheel drive", "rear")
+            combo.addItem("Front-wheel drive", "front")
+            combo.setToolTip("PV Drive Tyres Comparison: which axle of this dataset is "
+                             "driven. Left/Right overlay each dataset's own driven wheels.")
+        rform.addRow("Drive axle A", self.drive_a_combo)
+        rform.addRow("Drive axle B", self.drive_b_combo)
+
+        self.subtitle_edit = QLineEdit()
+        self.subtitle_edit.setPlaceholderText("CV title, e.g. Diff Btw MRF vs Apollo - 10x2 Rigid")
+        rform.addRow("CV subtitle", self.subtitle_edit)
+        right.layout().addLayout(rform)
+        self._reload_compare_studies()
+
         right.layout().addWidget(_card_title("Analysis Modules"))
         mod_grid = QGridLayout()
         mod_grid.setSpacing(8)
         self.module_checks = {}
         for i, m in enumerate([
                 "Statistics", "Histograms", "Heatmaps",
-                "Boxplots", "Rainflow", "PowerPoint Report"]):
+                "Boxplots", "PowerPoint Report"]):
             cb = QCheckBox(m)
             cb.setChecked(True)
             cb.setEnabled(False)
@@ -453,7 +505,7 @@ class NewStudyPage(BasePage):
             self.module_checks[m] = cb
             mod_grid.addWidget(cb, i // 2, i % 2)
         right.layout().addLayout(mod_grid)
-        note = QLabel("Modules reflect the backend's fixed 9-stage pipeline.")
+        note = QLabel("Modules reflect the backend's fixed 8-stage pipeline.")
         note.setStyleSheet(f"color:{theme.TEXT_FAINT}; font-size:11px;")
         right.layout().addWidget(note)
         columns.addWidget(right, 1)
@@ -513,9 +565,42 @@ class NewStudyPage(BasePage):
             self.stops_check.setEnabled(True)
             self.stop_min_spin.setEnabled(self.stops_check.isChecked())
             self.stop_speed_spin.setEnabled(self.stops_check.isChecked())
-        # Miner's exponent still matters in analysis-only mode (rainflow runs).
-        self.miner_spin.setEnabled(True)
         self.study_edit.setEnabled(not is_analysis)
+        # Preprocess-only writes no report, so the report fields do nothing there.
+        makes_report = mode != "preprocess"
+        for w in (self.report_format_combo, self.compare_combo, self.label_a_edit,
+                  self.route_edit):
+            w.setEnabled(makes_report)
+        if makes_report:
+            self._on_report_format()
+        else:
+            for w in (self.label_b_edit, self.drive_a_combo, self.drive_b_combo,
+                      self.subtitle_edit):
+                w.setEnabled(False)
+
+    # Report fields
+    def _reload_compare_studies(self) -> None:
+        keep = self.compare_combo.currentData()
+        self.compare_combo.clear()
+        self.compare_combo.addItem("None (this study alone)", None)
+        for s in self.repo.list_studies():
+            if s.processed_csv.exists():
+                self.compare_combo.addItem(s.name, str(s.path))
+        if keep:
+            i = self.compare_combo.findData(keep)
+            if i >= 0:
+                self.compare_combo.setCurrentIndex(i)
+
+    def _on_report_format(self, *_) -> None:
+        fmt = self.report_format_combo.currentData()
+        self.drive_a_combo.setEnabled(fmt != "cv")       # PV drive-tyre page only
+        self.subtitle_edit.setEnabled(fmt != "pv")       # CV title only
+        self._on_compare_changed()
+
+    def _on_compare_changed(self, *_) -> None:
+        compared = self.compare_combo.currentData() is not None
+        self.label_b_edit.setEnabled(compared)
+        self.drive_b_combo.setEnabled(compared and self.report_format_combo.currentData() != "cv")
 
     def _reload_existing_studies(self) -> None:
         self.existing_study_combo.clear()
@@ -776,7 +861,6 @@ class NewStudyPage(BasePage):
             study=self.study_edit.text().strip(),
             cutoff=self.cutoff_spin.value() if self.cutoff_spin.isEnabled() else None,
             order=self.order_spin.value() if self.order_spin.isEnabled() else None,
-            miner=self.miner_spin.value(),
             no_filter=not self.filter_check.isChecked(),
             no_famos=not self.famos_check.isChecked(),
             deglitch=self.deglitch_check.isChecked(),
@@ -807,12 +891,29 @@ class NewStudyPage(BasePage):
             mode=mode,
             export_famos_validation_csv=self.famos_validation_check.isChecked(),
         )
+        compare = self.compare_combo.currentData()
+        fmt = self.report_format_combo.currentData() or "auto"
+        common.update(
+            report_format=fmt,
+            compare_study=Path(compare) if compare else None,
+            label_a=self.label_a_edit.text().strip(),
+            label_b=self.label_b_edit.text().strip() if compare else "",
+            route=self.route_edit.text().strip(),
+            report_subtitle=self.subtitle_edit.text().strip() if fmt != "pv" else "",
+            drive_axle_a=self.drive_a_combo.currentData() if fmt != "cv" else "",
+            drive_axle_b=(self.drive_b_combo.currentData()
+                          if compare and fmt != "cv" else ""),
+        )
 
         if mode == "analysis":
             study_name = self.existing_study_combo.currentData()
             if not study_name:
                 self.error_label.setText(
                     "Select an existing study with a processed_data.csv to analyze.")
+                return
+            if compare and Path(compare).name == study_name:
+                self.error_label.setText(
+                    "Compare with: pick a different study than the one being analyzed.")
                 return
             common["study"] = study_name
             self.start_requested.emit(RunRequest(**common))

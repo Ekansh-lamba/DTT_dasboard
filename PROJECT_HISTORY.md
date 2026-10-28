@@ -31,8 +31,9 @@ It ingests Wheel Force Transducer (WFT) recordings — the forces and moments
 at each wheel, hundreds of samples per second, captured over real-world
 durability routes — reproduces the exact signal conditioning a licensed imc
 **FAMOS** installation would apply, and turns the result into statistics,
-histograms, heatmaps, rainflow fatigue counts, load-severity numbers, and a
-PowerPoint report, through a PySide6 desktop GUI or a CLI.
+histograms, heatmaps, box plots, load-severity numbers, and a PowerPoint
+report, through a PySide6 desktop GUI or a CLI. (Rainflow fatigue counting
+and a Welch PSD existed until Round 8 and are disabled for now, §9E.)
 
 The one architectural fact that explains almost every decision in this
 document: **the platform's entire value proposition is that its numbers
@@ -44,8 +45,10 @@ implementations turned out to be measurably wrong against the real thing.
 
 ### Codebase shape
 - `dtt/` — the pipeline: ingestion, validation, sanitization, signal
-  processing, statistics, histograms, heatmaps, boxplots, rainflow,
-  severity, reporting.
+  processing, statistics, histograms, heatmaps, boxplots, severity,
+  reporting.
+- `legacy/` — the disabled rainflow, Welch PSD and RF Compare code (§9E);
+  nothing in the app imports it.
 - `famos/` — the canonical FAMOS operator library (`smo`, `FiltLP`, `red`,
   and a chain/translation layer), added mid-project to end three drifting
   copies of the same math (see §4.9).
@@ -80,12 +83,9 @@ implementations turned out to be measurably wrong against the real thing.
 | 2026-09 | **Round 4**: four analysis features (distance-weighted heatmaps, Welch PSD, two-run comparison tables, RF Compare), three workflow modes, FAMOS-validation CSV export (§9A) | Claude + user |
 | 2026-09 | **Round 5**: histogram/AUC readability (soft-fill light restyle, x-axis autoscale), rainflow-page histograms restyled, GUI surfacing of terminal-only features (§9B) | Claude + user |
 | 2026-09 | **Round 6**: new-study UX (raw default, multi-session add, last-used dir), boxplot matched to analyzer + `BOX_YLIMS` rescaled, flat-channel diagnosis — no live bug (§9C) | Claude + user |
-<<<<<<< Updated upstream
-=======
 | 2026-10-27 | **Round 7**: PPTX result slides rebuilt to the project-charter deck format — PV / CV force-distribution pages, combination heatmap, dataset-B comparison from config/CLI/GUI (§9D) | Claude + user |
 | 2026-10-28 | **Round 8**: Rainflow, Welch PSD and RF Compare disabled (code kept in `legacy/`); report heatmaps on the standard daN bins from one source; severity slide and "Fatigue & PSD" section dropped from the report; `.exe` rebuilt (§9E) | Claude + user |
 | 2026-10-28 | **Round 9**: WFT samples identical to FAMOS's — `Cb` buffer instead of the padded `CS` block, no end-to-end resampling onto the first file's length (the 5.22 ppm stretch), imc3 read by its `\|RC5` record framing (58-sample offset closed); RR dead-stretch difference documented; "All channels — at a glance" removed from Compare studies (§9F) | Claude + user |
->>>>>>> Stashed changes
 
 ---
 
@@ -823,8 +823,6 @@ The recurring lesson across all three: the symptom was almost always a **stale
 study or a pre-fix `.exe`**, not a live bug (see the growing stale-study debt in
 §10).
 
-<<<<<<< Updated upstream
-=======
 ## 9D. Round 7 — report result slides in the charter-deck format (2026-10-27)
 
 The brief (`report_format_prompt.md`): make the generated PPTX's result slides
@@ -1127,7 +1125,6 @@ fail the same way, so nothing else was changed.
   stats strip, KPIs and the RMS/DLC/G-severity table all populated.
 - `.exe` rebuilt.
 
->>>>>>> Stashed changes
 ## 10. Open items / known gaps
 
 - ~~**Raw reader 58-sample offset**~~ (§4.6) — **closed in Round 9** (§9F):
@@ -1186,12 +1183,31 @@ fail the same way, so nothing else was changed.
   artifacts, not code defects. Worth a deliberate cleanup pass: re-run the
   studies that matter on the current build, and clearly mark/quarantine the old
   ones so they aren't opened and mistaken for current output.
-- **Two-run comparison / RF Compare have no GUI** — the backend exists and works
-  (§9A.1) but is reachable only via CLI/Python; the GUI was deferred pending a
-  two-study picker design that pairs with the larger GUI restructure (§9B.3).
+- **Rainflow / PSD / RF Compare are disabled, not deleted** (§9E) — to bring
+  one back, move it out of `legacy/`, re-add the stage, flag and page, and
+  `rainflow>=3.1.0` to the requirements and the exe's hidden imports. An old
+  script that still passes `--miner` now fails at argument parsing.
+- **Single-study G-severity/DLC has no GUI view** — since the report slide went
+  (§9E), a study's own Gx/Gy/Gxy/DLC are only in `severity_summary.json`,
+  `severity_table.png` and the log; Compare studies shows them as deltas.
+- **Correlation-heatmap suptitle overlaps the right panel's title and top
+  tick** — pre-existing figure layout (`_pair_heatmap`), visible on the
+  report's heatmap slides; not touched in Round 8.
+- **The Processing tracker counts "Report Generation" twice** — both
+  `[Report]` log lines (result figures, PowerPoint) match its marker since
+  Round 7; cosmetic.
 - **Histogram/AUC split + readability scaling (items 4 & 7)** — briefed but not
   yet implemented as of this update: split histograms and AUC into two sections
   and fix axis/label readability on both.
+- **Result slides not yet seen on a real two-vehicle pair** (§9D.3) — the PV
+  and CV comparison layouts were validated on synthetic pairs only; generate
+  one real comparison once a second recording is available.
+- **Result-slide assumptions to confirm** (§9D) — moment axis is labelled
+  daN·m (the codebase's unit) while the reference deck says Nm; Acc/Brake and
+  Left/Right-turn tags follow the reference (−Fx = acceleration, +Fy = left
+  turn), since no sign convention is defined in code; a CV row plots one
+  wheel per axle (the left/outer one). (The CV combination-heatmap guess of
+  ±10000 N / 2500 N is gone: it now uses the vehicle preset's bins, §9E.3.)
 - **Vehicle-specific boxplot limits** — `BOX_YLIMS` is now one global set per
   force type (§9C.2). `heatmaps.py::_comp_bins` already supports per-vehicle range
   overrides; boxplots don't. Only matters if vehicles with very different load
