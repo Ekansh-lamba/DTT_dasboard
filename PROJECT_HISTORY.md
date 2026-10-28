@@ -86,6 +86,7 @@ implementations turned out to be measurably wrong against the real thing.
 | 2026-10-27 | **Round 7**: PPTX result slides rebuilt to the project-charter deck format — PV / CV force-distribution pages, combination heatmap, dataset-B comparison from config/CLI/GUI (§9D) | Claude + user |
 | 2026-10-28 | **Round 8**: Rainflow, Welch PSD and RF Compare disabled (code kept in `legacy/`); report heatmaps on the standard daN bins from one source; severity slide and "Fatigue & PSD" section dropped from the report; `.exe` rebuilt (§9E) | Claude + user |
 | 2026-10-28 | **Round 9**: WFT samples identical to FAMOS's — `Cb` buffer instead of the padded `CS` block, no end-to-end resampling onto the first file's length (the 5.22 ppm stretch), imc3 read by its `\|RC5` record framing (58-sample offset closed); RR dead-stretch difference documented; "All channels — at a glance" removed from Compare studies (§9F) | Claude + user |
+| 2026-10-29 | **Branch recovery**: Rounds 7–8 were stranded on an unmerged local branch while `main`/`v1.6` carried only Round 9 (plus a conflicted history file); merged into `main`, verified identical to the pre-switch tree, `.exe` rebuilt (§9G) | Claude + user |
 
 ---
 
@@ -1124,6 +1125,64 @@ fail the same way, so nothing else was changed.
 - GUI: Compare studies run on two studies — panel gone, no gap, AUC panels,
   stats strip, KPIs and the RMS/DLC/G-severity table all populated.
 - `.exe` rebuilt.
+
+## 9G. Branch recovery — Rounds 7–8 merged into `main` (2026-10-29)
+
+**What was found.** Rounds 7 (`eeca7cb`) and 8 (`f50ad19`) had been committed
+on a local branch, `round8-remove-rainflow-psd`, that was never merged or
+pushed. Round 9 and the Compare-studies change were then made on that branch
+uncommitted. Switching to `main` in GitHub Desktop ("bring my changes") stashed
+them (`!!GitHub_Desktop<main>`, `05c7b07`) and re-applied them to `main`, where
+they were committed as `123e329` / tag `v1.6`. The code applied cleanly, but
+`PROJECT_HISTORY.md` conflicted and was committed **with conflict markers**,
+describing Rounds 7–8 whose code `main` did not contain. So `main` (and any
+build from it) still had Rainflow/PSD/RF Compare, the Load Severity and
+"Fatigue & PSD" report sections and the old report format. Nothing was lost.
+The three dropped 2026-10-27 "WIP on main" stashes are earlier drafts of
+Round 7.
+
+**What was done.**
+- Safety branches: `backup/main-2026-10-29`, `backup/round8-2026-10-29`,
+  `rescue/gh-desktop-stash-2026-10-29` (`05c7b07`),
+  `rescue/round7-draft-2026-10-27` (`da1a28a`).
+- `git merge --no-ff round8-remove-rainflow-psd` into `main` (`3bcb7e9`). The
+  only conflict was `PROJECT_HISTORY.md`, resolved with the stash's copy
+  (Round 8 file + Round 9 section, no markers). `study_compare.py` and
+  `study_compare_page.py` auto-merged (Round 8's RF Compare removal + 9F.5's
+  `summary_chart`). `imc_reader.py` and `famos/` were untouched by Rounds 7–8.
+- Check: `git diff rescue/gh-desktop-stash-2026-10-29 HEAD` is empty, so the
+  merged `main` is exactly the pre-switch working tree.
+
+**Files changed on `main` by the merge** (the Round 7 + 8 set):
+`DTT-Platform.spec`, `README.md`, `build_exe.ps1`, `dtt/README.md`,
+`dtt/analysis/{heatmaps,plot_style,severity,study_compare}.py`,
+`dtt/config.py`, `dtt/pipeline.py`,
+`dtt/reporting/{report_builder,result_figures}.py`, `dtt/requirements.txt`,
+`dtt/spectral.py`, `dtt/vehicles.py`, `gui/README.md`, `gui/main.py`,
+`gui/main_window.py`, `gui/models/repository.py`,
+`gui/pages/{heatmaps_page,new_study_page,study_compare_page}.py`,
+`gui/workers/pipeline_worker.py`, `report_format_prompt.md`, `legacy/`
+(`README.md`, `psd.py`, `rainflow.py`, `rf_compare.py`; `psd.py`/`rainflow.py`
+moved from `dtt/analysis/`), deleted `gui/pages/{psd,rainflow}_page.py`,
+`tests/{test_heatmap_ranges_and_removals,test_report_builder,test_report_result_slides}.py`,
+and this file.
+
+**Verified after the merge.**
+- Full suite: 374 passed, 30 skipped, 1 failed (the pre-existing missing
+  channel-mapping `.txt` test).
+- 2-wheel recording, mode `both`, FAMOS CSV on, despike / transient / stop
+  removal off: `preprocessed_for_famos_validation.csv` = 554,783 rows,
+  byte-identical to the pre-merge Round 9 run (`dtt/outputs/merged_main_r9check`).
+- Report: 22 slides with PV Format / Force Distribution / Combination of Fx &
+  Fy; no Load Severity, Fatigue & PSD, Rainflow or Welch PSD slides (the
+  `v1.6`-era run `20261029_003140` had all of them).
+- GUI sidebar: 17 entries, no Rainflow or PSD; Compare studies builds its AUC
+  panel with `show_summary=False` (the card remains on the AUC Compare page
+  only, as intended in 9F.5); Heatmaps on the standard daN bins.
+- `.exe` rebuilt from the merged `main`: rainflow/PSD modules absent from the
+  bundle; its headless run gives the same 554,783-row CSV (byte-identical) and
+  the same 22-slide report.
+- Not pushed; `v1.6` predates this merge.
 
 ## 10. Open items / known gaps
 
