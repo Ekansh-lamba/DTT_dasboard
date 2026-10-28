@@ -53,10 +53,13 @@ class AucComparePanel(QWidget):
     def __init__(self, labels: Callable[[], tuple],
                  start_dir: Callable[[], str],
                  unit_fn: Optional[Callable[[str], str]] = None,
-                 noun: str = "study", parent=None):
+                 noun: str = "study", show_summary: bool = True, parent=None):
+        """``show_summary=False`` leaves out the all-channels chart, on screen
+        and in "Export all…" (Compare studies, since Round 9)."""
         super().__init__(parent)
         from dtt.analysis.study_compare import channel_unit
 
+        self._show_summary = show_summary
         self._labels = labels
         self._start_dir = start_dir
         self._unit_fn = unit_fn or channel_unit
@@ -85,8 +88,9 @@ class AucComparePanel(QWidget):
         self.batch_btn = QPushButton("Export all…")
         self.batch_btn.setObjectName("Secondary")
         self.batch_btn.setToolTip(
-            "A PNG for every channel in the current mode, one summary CSV with "
-            "the labels in the column names, and the all-channels chart.")
+            "A PNG for every channel in the current mode and one summary CSV "
+            "with the labels in the column names"
+            + (", and the all-channels chart." if show_summary else "."))
         self.batch_btn.clicked.connect(self._export_batch)
         head.addWidget(self.batch_btn)
         auc_card.layout().addLayout(head)
@@ -180,6 +184,12 @@ class AucComparePanel(QWidget):
         auc_card.layout().addWidget(self.coverage)
         lay.addWidget(auc_card)
 
+        self.summary_plot = None
+        if show_summary:
+            self._build_summary(lay)
+        self._set_enabled(False)
+
+    def _build_summary(self, lay) -> None:
         # ---- every channel at once -----------------------------------------
         sum_card = Card()
         sum_card.layout().addWidget(_mini("All channels — at a glance"))
@@ -195,8 +205,6 @@ class AucComparePanel(QWidget):
         self.summary_plot = PlotPanel(height=4.0, light=True)
         sum_card.layout().addWidget(self.summary_plot)
         lay.addWidget(sum_card)
-
-        self._set_enabled(False)
 
     # ------------------------------------------------------------------ data
 
@@ -244,8 +252,9 @@ class AucComparePanel(QWidget):
         self.channel_combo.clear()
         self.auc.clear()
         self.auc.draw()
-        self.summary_plot.clear()
-        self.summary_plot.draw()
+        if self.summary_plot is not None:
+            self.summary_plot.clear()
+            self.summary_plot.draw()
         self.footer.setText("")
         self.coverage.setText("")
         self._set_enabled(False)
@@ -392,7 +401,7 @@ class AucComparePanel(QWidget):
         return self._summary_cache[key]
 
     def draw_summary(self) -> None:
-        if self._df_a is None:
+        if self._df_a is None or self.summary_plot is None:
             return
         from dtt.analysis.study_compare import draw_auc_summary
 
@@ -464,7 +473,7 @@ class AucComparePanel(QWidget):
                 self._channels, self._df_a, self._df_b, a, b, Path(folder),
                 range_mode=self.range_combo.currentData() or "autoscale",
                 weights_a=wa, weights_b=wb, progress=progress,
-                unit_fn=self._unit_fn)
+                unit_fn=self._unit_fn, summary_chart=self._show_summary)
         except _Cancelled:
             QMessageBox.information(self, "Export cancelled",
                                     "Stopped. Files already written were kept.")
@@ -475,10 +484,16 @@ class AucComparePanel(QWidget):
             return
         finally:
             dlg.close()
-        QMessageBox.information(
-            self, "Export complete",
-            f"{len(pngs)} channel figures, the summary CSV and the all-channels "
-            f"chart written to:\n{folder}\n\n{csv_path.name}\n{summary_png.name}")
+        if summary_png is not None:
+            QMessageBox.information(
+                self, "Export complete",
+                f"{len(pngs)} channel figures, the summary CSV and the all-channels "
+                f"chart written to:\n{folder}\n\n{csv_path.name}\n{summary_png.name}")
+        else:
+            QMessageBox.information(
+                self, "Export complete",
+                f"{len(pngs)} channel figures and the summary CSV written to:"
+                f"\n{folder}\n\n{csv_path.name}")
 
     def auc_rows(self) -> list:
         """Export rows for every channel in the current mode and weighting --

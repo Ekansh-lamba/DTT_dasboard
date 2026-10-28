@@ -183,11 +183,13 @@ class StudyComparePage(BasePage):
 
         # ---- the AUC comparison ---------------------------------------------
         # One implementation, shared with the AUC Compare screen: the
-        # selectors, panels, strip, footer, overview chart and export all live
-        # in AucComparePanel. This page supplies the study frames, the names,
-        # and keeps its KPI cards current from the panel's signals.
+        # selectors, panels, strip, footer and export all live in
+        # AucComparePanel. This page supplies the study frames, the names,
+        # and keeps its KPI cards current from the panel's signals. The
+        # all-channels chart is left out here (Round 9).
         self.panel = AucComparePanel(labels=self._labels,
-                                     start_dir=self._start_dir, noun="study")
+                                     start_dir=self._start_dir, noun="study",
+                                     show_summary=False)
         self.panel.drawn.connect(self._on_panel_drawn)
         self.panel.channels_changed.connect(self._on_panel_channels)
         body.addWidget(self.panel)

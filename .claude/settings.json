@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py -m pytest tests/test_report_result_slides.py tests/test_report_builder.py -x -q)"
+    ]
+  }
+}

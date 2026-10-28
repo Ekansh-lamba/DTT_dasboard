@@ -1010,8 +1010,12 @@ def export_auc_batch(channels: List[tuple], df_a: pd.DataFrame,
                      out_dir: Path, range_mode: str = "autoscale",
                      weights_a: Optional[np.ndarray] = None,
                      weights_b: Optional[np.ndarray] = None,
-                     progress=None, unit_fn=None) -> tuple:
+                     progress=None, unit_fn=None,
+                     summary_chart: bool = True) -> tuple:
     """A PNG per channel plus one summary CSV and the all-channels chart.
+
+    ``summary_chart=False`` skips the chart (Compare studies no longer shows
+    it); ``summary_png`` is then None.
 
     The reference generates every channel in one go; one-at-a-time "Save
     PNG" does not scale to twelve wheels times six components. ``progress``,
@@ -1051,6 +1055,11 @@ def export_auc_batch(channels: List[tuple], df_a: pd.DataFrame,
 
     csv_path = out_dir / safe(f"auc_summary_{label_a}_vs_{label_b}.csv")
     pd.DataFrame(rows).to_csv(csv_path, index=False)
+
+    if not summary_chart:
+        if progress is not None:
+            progress(len(channels), len(channels), "done")
+        return pngs, csv_path, None
 
     summary = auc_summary(channels, df_a, df_b, weights_a, weights_b,
                           unit_fn=unit_fn)

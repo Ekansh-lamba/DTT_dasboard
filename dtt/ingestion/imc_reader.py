@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 import re
 import struct
 import xml.etree.ElementTree as ET
@@ -7,8 +8,9 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
-_EVENT_SIG = b"|RC5"
-_EVENT_LEN = 16
+
+logger = logging.getLogger(__name__)
+
 _WFT_RE = re.compile(r"WFT_(F[xyz]|M[xyz])_(fl|fr|rl|rr)$", re.I)
 
 _AUX_MAP = {
@@ -38,7 +40,7 @@ def _find_block(raw: bytes, key: bytes) -> int:
 
 
 def _cm_factor_unit(raw: bytes) -> tuple[float, str]:
-    """CM block: <u32><double factor> ... <len-prefixed unit string>."""
+    """CM block: <u32 number format><double factor> ... <len-prefixed unit string>."""
     i = _find_block(raw, b"|CM1")
     if i < 0:
         return 1.0, ""
@@ -66,113 +68,118 @@ def _channel_name(raw: bytes) -> tuple[str, str]:
     return name, comment
 
 
-def _smoothness(a: np.ndarray) -> float:
-    if a.size < 4:
-        return 1.0
-    a = a - a.mean()
-    return float(np.std(np.diff(a)) / (np.std(a) + 1e-9))
+def _imc3_dtype(raw: bytes) -> str:
+    """Sample type: the u32 that opens ``|CM1``, in the same numbering as a
+    classic FAMOS ``CP`` key (4 = int16, 6 = int32, 7 = float32, ...)."""
+    i = _find_block(raw, b"|CM1")
+    if i < 0:
+        raise ValueError("imc3: no |CM1 block, sample type unknown")
+    code = struct.unpack("<I", raw[i + 4:i + 8])[0]
+    if code not in _FAMOS_DT:
+        raise ValueError(f"imc3: unknown sample type code {code} in |CM1")
+    return _FAMOS_DT[code]
 
 
-def _locate_data(raw: bytes, itemsize: int) -> int:
-    """Find the first byte of the sample blob: the header ends where the
-    byte stream stops looking like ascii metadata and becomes a smooth signal.
+def _imc3_x_delta(raw: bytes) -> Optional[float]:
+    """Sample interval in seconds: the double after the u32 that opens ``|CC1``."""
+    i = _find_block(raw, b"|CC1")
+    if i < 0:
+        return None
+    dx = struct.unpack("<d", raw[i + 8:i + 16])[0]
+    return dx if np.isfinite(dx) and dx > 0 else None
+
+
+def _imc3_payload(raw: bytes) -> bytes:
+    """The channel's stored sample bytes, in order, from the explicit record framing.
+
+    After the metadata blocks the data section is a sequence of records, each
+    with a 4-byte key and a fixed or self-declared size:
+
+    * ``|RR1`` -- 4 bytes, no body;
+    * ``|RT1`` -- 32 bytes (key + 28-byte body);
+    * ``|RC5`` -- key + three int32 (1, 1, payload length) + the payload: the
+      samples themselves;
+    * ``|Ri1`` -- key + two int32, the second a count N, followed by an index
+      of N 16-byte entries: copies of the segment's ``|RT1`` record and
+      ``|RC5`` headers *without* payload;
+    * ``|RE1`` -- end of the data section.
+
+    Every byte is accounted for, so an unknown key is an error, not something
+    to skip: it means the layout is not the one this was written against, and
+    returning a plausible-looking signal anyway is exactly how the old
+    smoothness heuristic hid a 58-sample offset (PROJECT_HISTORY §4.6).
     """
     cp = _find_block(raw, b"|CP1")
-    cs = raw.find(b"|CS")
-    if cs < 0:
-        cs = len(raw)
-    dt = "<i2" if itemsize == 2 else "<i4"
-    best_s, best_r = cp + 4, 1e9
-    for s in range(cp + 4, min(cp + 2000, cs - 40000), 2):
-        seg = np.frombuffer(raw[s:s + 40000], dtype=dt).astype(float)
-        r = _smoothness(seg)
-        if r < best_r:
-            best_r, best_s = r, s
-    return best_s
+    starts = [s for s in (raw.find(k, max(cp, 0)) for k in (b"|RR1", b"|RT1", b"|RC5"))
+              if s >= 0]
+    if not starts:
+        raise ValueError("imc3: no data records found")
+    i = min(starts)
+    parts = []
+    n = len(raw)
+    while i < n:
+        key = raw[i:i + 4]
+        if key == b"|RC5":
+            length = struct.unpack("<i", raw[i + 12:i + 16])[0]
+            parts.append(raw[i + 16:i + 16 + length])
+            i += 16 + length
+        elif key == b"|RR1":
+            i += 4
+        elif key == b"|RT1":
+            i += 32
+        elif key == b"|Ri1":
+            count = struct.unpack("<i", raw[i + 8:i + 12])[0]
+            i += 12
+            for _ in range(count):
+                entry = raw[i:i + 4]
+                if entry == b"|RT1":
+                    i += 32
+                elif entry == b"|RC5":
+                    i += 16
+                else:
+                    raise ValueError(f"imc3: unexpected index entry {entry!r} at byte {i}")
+        elif key == b"|RE1":
+            return b"".join(parts)
+        else:
+            raise ValueError(f"imc3: unknown data record {key!r} at byte {i}")
+    raise ValueError("imc3: data section has no |RE1 end record")
 
 
-def _strip_event_records(blob: bytes) -> bytes:
-    """Remove the embedded 16-byte ``|RC5`` event records from a data blob.
-
-    imc STUDIO interleaves these marker records into the streamed samples; read
-    as int16 they show up as ~40k spikes per channel. FAMOS skips them.
-    """
-    if _EVENT_SIG not in blob:
-        return blob
-    out = bytearray()
-    i = blob.find(_EVENT_SIG)
-    prev = 0
-    while i != -1:
-        out += blob[prev:i]
-        prev = i + _EVENT_LEN
-        i = blob.find(_EVENT_SIG, prev)
-    out += blob[prev:]
-    return bytes(out)
-
-
-def _find_data_start(clean: bytes, itemsize: int = 2) -> int:
-    """Byte offset in the marker-stripped blob where the ascii header ends and
-    smooth signal begins. Picks the offset whose window is both smoothest and
-    not full-scale garbage (which is how a wrong byte alignment looks).
-    """
-    dt = "<i2" if itemsize == 2 else "<i4"
-    best_s, best = 0, 1e18
-    hi = max(1, min(600, len(clean) - 40000))
-    for s in range(0, hi):
-        seg = np.frombuffer(clean[s:s + 40000], dtype=dt).astype(float)
-        seg = seg - seg.mean()
-        smooth = np.std(np.diff(seg)) / (np.std(seg) + 1e-9)   # low = smooth
-        rng = np.percentile(np.abs(seg), 99) / 32768.0          # ~1 if garbage
-        if smooth + rng < best:
-            best, best_s = smooth + rng, s
-    return best_s
-
-
-def read_raw(path: Path, fs: float, itemsize: int = 2,
+def read_raw(path: Path, fs: Optional[float] = None,
+             itemsize: Optional[int] = None,
              n_force: Optional[int] = None) -> Optional[ImcChannel]:
+    """Read one imc3 channel as its stored samples x calibration factor.
+
+    Sample type, factor and sample interval all come from the file's own
+    header (``|CM1``, ``|CC1``); ``fs`` / ``itemsize`` only override a header
+    that lacks them. No sample is added, dropped or interpolated: sample n is
+    at ``n * x_delta``.
+    """
     raw = Path(path).read_bytes()
     if not raw.startswith(b"|imc3"):
         return None
-    cs = raw.rfind(b"|CS")               # trailer (last occurrence)
-    if cs < 0:
-        cs = len(raw)
     raw_name, comment = _channel_name(raw)
     factor, unit = _cm_factor_unit(raw)
-    cp = raw.find(b"|CP1")
-    region = raw[(cp if cp >= 0 else 0):cs]
-    clean = _strip_event_records(region)          # drop |RC5 event records
-    start = _find_data_start(clean, itemsize)     # header -> data boundary
-    end = len(clean) - ((len(clean) - start) % itemsize)
-    dt = "<i2" if itemsize == 2 else "<i4"
-    samples = np.frombuffer(clean[start:end], dtype=dt).astype(np.float64)
-    # Trim the leading header/preamble garbage: _find_data_start's coarse 40k
-    # window can land a few hundred bytes early, inside a messy transition where
-    # header bytes are interspersed with the first samples (shows as a spike at
-    # t=0). Advance to where a stable clean run of real samples begins.
-    if samples.size > 3000:
-        ref = samples[500:2500]
-        m = np.median(ref)
-        sd = 1.4826 * np.median(np.abs(ref - m)) or 1.0
-        thr = 15.0 * sd
-        win = 50
-        lim = min(500, samples.size - win)
-        k = 0
-        while k < lim and not np.all(np.abs(samples[k:k + win] - m) < thr):
-            k += 1
-        if k:
-            samples = samples[k:]
-        # trailing garbage (mirror of the leading trim)
-        j = samples.size
-        low = max(win, samples.size - 500)
-        while j > low and not np.all(np.abs(samples[j - win:j] - m) < thr):
-            j -= 1
-        if j < samples.size:
-            samples = samples[:j]
-    data = samples * factor
+    try:
+        dt = _imc3_dtype(raw)
+    except ValueError:
+        if itemsize is None:
+            raise
+        dt = "<i2" if itemsize == 2 else "<i4"
+    payload = _imc3_payload(raw)
+    size = np.dtype(dt).itemsize
+    if len(payload) % size:
+        raise ValueError(f"imc3: {len(payload)} payload bytes is not a whole "
+                         f"number of {size}-byte samples")
+    samples = np.frombuffer(payload, dtype=dt).astype(np.float64)
+    dx = _imc3_x_delta(raw)
+    rate = (1.0 / dx) if dx else fs
+    if rate is None:
+        raise ValueError("imc3: no sample interval in |CC1 and none given")
 
     return ImcChannel(
         name=_map_name(raw_name), raw_name=raw_name, unit=unit,
-        factor=factor, data=data, fs=fs, comment=comment,
+        factor=factor, data=samples * factor, fs=rate, comment=comment,
     )
 
 
@@ -314,6 +321,42 @@ def _cr_scaling(fields: List[bytes]) -> tuple[float, float, str]:
     return factor, offset, unit
 
 
+def _cb_extent(fields: List[bytes]) -> Optional[tuple[int, int]]:
+    """``(start, nbytes)`` of the sample bytes inside the ``CS`` block, from a
+    ``Cb`` key, or None when it does not describe exactly one buffer.
+
+    ``Cb`` fields: buffer count, user-info bytes, then per buffer: buffer
+    reference, ``CS`` key index, offset of the buffer in that ``CS`` block,
+    buffer size, offset of the first sample in the buffer, bytes filled, ...
+
+    The ``CS`` block can be longer than its buffer. imc's recorder pads it
+    (8,296 zero bytes per channel on the 2006-08-25 reference recording), and
+    reading the whole block turned that padding into 4,148 extra samples of 0 N
+    at the end of every channel -- the start of the Round 9 timebase stretch.
+    """
+    try:
+        if int(fields[0]) != 1:
+            return None
+        offset_in_cs = int(fields[4])
+        first = int(fields[6])
+        filled = int(fields[7])
+    except (ValueError, IndexError):
+        return None
+    if filled <= 0 or offset_in_cs < 0 or first < 0:
+        return None
+    return offset_in_cs + first, filled
+
+
+def _cs_samples(blob: bytes, cb: Optional[tuple[int, int]]) -> bytes:
+    """The sample bytes of a ``CS`` block: the ``Cb`` buffer if one was given
+    and fits, else the whole block (files written without ``Cb``)."""
+    if cb is not None:
+        start, nbytes = cb
+        if start + nbytes <= len(blob):
+            return blob[start:start + nbytes]
+    return blob
+
+
 def read_famos_all(path: Path) -> List[ImcChannel]:
     """Every channel in a FAMOS file, in file order.
 
@@ -339,6 +382,7 @@ def read_famos_all(path: Path) -> List[ImcChannel]:
     dtype = "<i2"
     name = ""
     index = 0
+    cb = None
 
     for key, content in _parse_famos_keys(raw):
         fields = content.split(b",")
@@ -356,9 +400,12 @@ def read_famos_all(path: Path) -> List[ImcChannel]:
             factor, offset, unit = _cr_scaling(fields)
         elif key == "CN" and len(fields) >= 5:
             name = fields[4].decode("latin1").strip()
+        elif key == "Cb":
+            cb = _cb_extent(fields)
         elif key == "CS":
             ci = content.find(b",")
-            blob = content[ci + 1:] if ci >= 0 else content
+            blob = _cs_samples(content[ci + 1:] if ci >= 0 else content, cb)
+            cb = None
             if not blob or not dx:
                 continue
             size = np.dtype(dtype).itemsize
@@ -387,6 +434,7 @@ def read_famos(path: Path) -> Optional[ImcChannel]:
     dtype = "<i2"
     name = Path(path).stem
     data_bytes = b""
+    cb = None
     for key, content in _parse_famos_keys(raw):
         fields = content.split(b",")
         if key == "CD":
@@ -403,9 +451,11 @@ def read_famos(path: Path) -> Optional[ImcChannel]:
             factor, offset, unit = _cr_scaling(fields)
         elif key == "CN" and len(fields) >= 5:
             name = fields[4].decode("latin1").strip()
+        elif key == "Cb":
+            cb = _cb_extent(fields)
         elif key == "CS":
             ci = content.find(b",")
-            data_bytes = content[ci + 1:] if ci >= 0 else content
+            data_bytes = _cs_samples(content[ci + 1:] if ci >= 0 else content, cb)
 
     if not data_bytes or not dx:
         return None
@@ -439,38 +489,90 @@ def _read_channels(files, spans) -> List[ImcChannel]:
             if ch is not None and ch.data.size:
                 channels.append(ch)
         return channels
-    prelim = []
-    wft_counts: List[int] = []
     for f in files:
         if not f.read_bytes()[:8].startswith(b"|imc3"):
             continue
-        is_wft = bool(_WFT_RE.match(f.stem))
         try:
-            ch = read_raw(f, fs=1.0, itemsize=2)
-        except Exception:
+            ch = read_raw(f)
+        except Exception as exc:                                  # noqa: BLE001
+            logger.warning("Skipped %s: %s", f.name, exc)
             continue
         if ch is None or ch.data.size == 0:
             continue
-        if is_wft:
-            wft_counts.append(ch.data.size)
-        prelim.append((f, is_wft, ch))
-
-    ref_n = int(np.median(wft_counts)) if wft_counts else 0
-    for f, is_wft, ch in prelim:
-        # A 32-bit aux channel (GPS) read as int16 yields ~2x samples: re-read.
-        if not is_wft and ref_n and ch.data.size > ref_n * 1.6:
-            try:
-                ch32 = read_raw(f, fs=1.0, itemsize=4)
-                if ch32 is not None and ch32.data.size:
-                    ch = ch32
-            except Exception:
-                pass
+        # Storage.imcdbc supplies the start time only. The rate is the
+        # channel's own x-delta: a rate re-derived as samples / logged duration
+        # (as this did until Round 9) is only as right as the sample count, and
+        # with the old heuristic reader's count it put the imc3 WFT channels on
+        # a 999.93 Hz clock.
         span = spans.get(f.stem)
         if span and span[1] > span[0]:
-            ch.fs = ch.data.size / (span[1] - span[0])   # -> true ~1000 Hz
             ch.start_epoch = span[0]
         channels.append(ch)
     return channels
+
+
+def _common_timeline(channels) -> tuple[dict, float, dict]:
+    """Put every channel on one time axis without touching the WFT samples.
+
+    The time base is the WFT channels' own: ``fs`` is their header rate and
+    row n is at ``n / fs``, exactly as FAMOS places sample n of a channel. Its
+    length is the longest WFT channel at that rate.
+
+    * A channel at the same rate is placed sample for sample from row 0 (every
+      channel of a recording starts at the same instant -- Storage.imcdbc
+      gives one start time for all of them). A shorter one is padded with NaN
+      at the end; a longer non-WFT one is cut at the end. Nothing is resampled.
+    * A channel at a different rate (GPS at 5 Hz) is interpolated from its own
+      ``k * x_delta`` axis onto the rows, NaN past its last sample. These are
+      never WFT channels; if one were, it would be refused, not interpolated.
+
+    This replaced stretching every channel end to end onto the first file's
+    length (``np.interp`` over ``linspace(0, 1, n)``). On the 2006-08-25
+    recording the first file was ``Acceleration.raw``, 29 samples longer than
+    the WFT channels once both carried their padding, so every WFT channel was
+    linearly resampled by 5.22 ppm -- the drift FAMOS showed.
+
+    Returns ``(columns, fs, length_adjust)``; ``length_adjust`` maps a channel
+    name to how many samples were padded (+) or cut (-) to fit.
+    """
+    from dtt.preprocessing import is_wft_channel
+
+    wft = [c for c in channels if is_wft_channel(c.name)]
+    master = wft[0] if wft else channels[0]
+    fs = master.fs
+
+    def same_rate(c):
+        return np.isclose(c.fs, fs, rtol=1e-9, atol=0.0)
+
+    for c in wft:
+        if not same_rate(c):
+            raise ValueError(
+                f"WFT channel {c.name} is sampled at {c.fs:g} Hz and {master.name} "
+                f"at {fs:g} Hz; WFT channels are never resampled, so they cannot "
+                f"share one time axis")
+    n = max(c.data.size for c in (wft or [master]))
+    t = np.arange(n) / fs
+
+    out = {"Time": t}
+    length_adjust: Dict[str, int] = {}
+    for c in channels:
+        if same_rate(c):
+            if c.data.size >= n:
+                arr = c.data[:n]
+            else:
+                arr = np.full(n, np.nan)
+                arr[:c.data.size] = c.data
+            if c.data.size != n:
+                length_adjust[c.name] = n - c.data.size
+        else:
+            tc = np.arange(c.data.size) / c.fs
+            arr = np.interp(t, tc, c.data, left=np.nan, right=np.nan)
+        out[c.name] = arr
+    if length_adjust:
+        logger.info("Channels fitted to the %d-sample WFT timeline "
+                    "(+ padded with NaN at the end, - cut at the end): %s",
+                    n, ", ".join(f"{k} {v:+d}" for k, v in length_adjust.items()))
+    return out, fs, length_adjust
 
 
 def _assemble(channels, target_fs, source, famos: bool = True,
@@ -486,19 +588,7 @@ def _assemble(channels, target_fs, source, famos: bool = True,
     if not channels:
         return pd.DataFrame(), {"error": "no imc channels found"}
 
-    wft = [c for c in channels if _WFT_RE.match(c.raw_name)]
-    master = wft[0] if wft else channels[0]
-    fs = master.fs
-    n = master.data.size
-
-    out = {"Time": np.arange(n) / fs}
-    for c in channels:
-        if c.data.size == n:
-            arr = c.data
-        else:
-            xp = np.linspace(0, 1, c.data.size)
-            arr = np.interp(np.linspace(0, 1, n), xp, c.data)
-        out[c.name] = arr
+    out, fs, length_adjust = _common_timeline(channels)
     df = pd.DataFrame(out)
 
     fs_out = fs
@@ -576,6 +666,7 @@ def _assemble(channels, target_fs, source, famos: bool = True,
         "deglitch": bool(deglitch),
         "despike": bool(despike),
         "raw_frame": raw_frame,
+        "length_adjust": length_adjust,
     }
     return df, meta
 

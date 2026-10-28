@@ -340,7 +340,7 @@ def _recipe_chain(name: str, fs: float, scale: float = 1.0):
     chain = {}
     # The raw channel as FAMOS itself read it. Nothing is computed on either
     # side, so a difference here is the file reader alone -- byte offsets,
-    # |RC5 event-record stripping, the leading/trailing trim -- and no amount
+    # record framing, buffer extents -- and no amount
     # of operator work would fix it. Perfect operators on misread samples
     # still give wrong answers.
     chain["raw"] = pre

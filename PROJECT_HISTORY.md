@@ -80,6 +80,12 @@ implementations turned out to be measurably wrong against the real thing.
 | 2026-09 | **Round 4**: four analysis features (distance-weighted heatmaps, Welch PSD, two-run comparison tables, RF Compare), three workflow modes, FAMOS-validation CSV export (§9A) | Claude + user |
 | 2026-09 | **Round 5**: histogram/AUC readability (soft-fill light restyle, x-axis autoscale), rainflow-page histograms restyled, GUI surfacing of terminal-only features (§9B) | Claude + user |
 | 2026-09 | **Round 6**: new-study UX (raw default, multi-session add, last-used dir), boxplot matched to analyzer + `BOX_YLIMS` rescaled, flat-channel diagnosis — no live bug (§9C) | Claude + user |
+<<<<<<< Updated upstream
+=======
+| 2026-10-27 | **Round 7**: PPTX result slides rebuilt to the project-charter deck format — PV / CV force-distribution pages, combination heatmap, dataset-B comparison from config/CLI/GUI (§9D) | Claude + user |
+| 2026-10-28 | **Round 8**: Rainflow, Welch PSD and RF Compare disabled (code kept in `legacy/`); report heatmaps on the standard daN bins from one source; severity slide and "Fatigue & PSD" section dropped from the report; `.exe` rebuilt (§9E) | Claude + user |
+| 2026-10-28 | **Round 9**: WFT samples identical to FAMOS's — `Cb` buffer instead of the padded `CS` block, no end-to-end resampling onto the first file's length (the 5.22 ppm stretch), imc3 read by its `\|RC5` record framing (58-sample offset closed); RR dead-stretch difference documented; "All channels — at a glance" removed from Compare studies (§9F) | Claude + user |
+>>>>>>> Stashed changes
 
 ---
 
@@ -239,8 +245,9 @@ the structural-rules approach is in §14.
   58 samples early relative to FAMOS's own sample 0. Left unfixed —
   explicitly out of scope for that round, flagged for whoever owns
   `imc_reader.py` — but it means **every channel read via `read_raw` is
-  silently misaligned by 58ms** unless corrected. Not yet addressed as of
-  this document (§10).
+  silently misaligned by 58ms** unless corrected. **Fixed in Round 9
+  (§9F.2):** the reader now uses the `|RC5` record framing and matches at
+  offset 0.
 
 ### 4.7 Result
 
@@ -816,17 +823,328 @@ The recurring lesson across all three: the symptom was almost always a **stale
 study or a pre-fix `.exe`**, not a live bug (see the growing stale-study debt in
 §10).
 
+<<<<<<< Updated upstream
+=======
+## 9D. Round 7 — report result slides in the charter-deck format (2026-10-27)
+
+The brief (`report_format_prompt.md`): make the generated PPTX's result slides
+match the DTT project charter deck (*Project Charter - DTT Tyre Duty Cycle
+Dashboard*, slides 8-14) closely enough that an analyst only types
+observations — and change no analysis number while doing it.
+
+### 9D.1 Method: the deck as the specification
+The reference slides were rendered to PNG through PowerPoint COM (LibreOffice
+is not installed on the dev machine) and their shape geometry, fills and run
+fonts dumped with python-pptx. Where the brief and the deck disagreed, the deck
+won:
+- titles are 28 pt Arial bold `#6C2DC7` (brief: 36-40 pt `#7030A0`);
+- the "APOLLO TYRES LTD" footer is the logo picture of the charter's own
+  *Heading + text + 3 imgs (Apollo) A* layout, already in
+  `apollo_report_template.pptx` — using that layout gives the exact footer, so
+  no text box was added;
+- wheel labels (FL/FR/RL/RR, Left/Right), the Fy/Fz/Fx/My headings and the CV
+  row labels are **native text boxes laid over the plot pictures** in the deck,
+  not drawn inside the plots — the report does the same, so they stay editable.
+
+### 9D.2 What was built
+- `dtt/reporting/result_figures.py` (new) — `resolve_spec` decides the format
+  (`auto`: PV for a PV preset, CV otherwise), dataset names and CV axle rows
+  (one row per recorded axle, titled from the vehicle preset's axle role:
+  Steer / Drive / Tag); `generate_result_figures` draws every plot into
+  `figures/report/` under fixed names. Runs as a `[Report]` pipeline stage on
+  the same `analysis_df` every other stage used.
+- Dataset B is another finished study's `processed_data.csv`
+  (`report_compare_study`), given the **same stop removal** as A so both sides
+  are cut alike; a provenance mismatch is logged. An unreadable B degrades to a
+  single-study report rather than losing the report.
+- `plot_style.py` extended, not duplicated: `draw_comparison_kde` takes
+  `values_b=None` and `p5_in_legend`; `stats_strip_rows` takes `decimals`;
+  `draw_stats_strip(layout="text")` draws the deck's grey monospaced strip;
+  `draw_reference_kde` is new (CV: grey dashed reference, green P5-P95 "normal
+  zone", red "exceeds reference P95").
+- `heatmaps.py`: `fx_fy_combination_*` — % of occurrences (sample count, as
+  the slide title says), N, ±4000 N / 1000 N bins for PV, +Fy on the left and
+  −Fx at the top as in the reference, empty cells in the colormap's darkest
+  colour, one colorbar shared by both datasets.
+- `report_builder.py`: slide order is now cover/summary → "PV Format" or "CV
+  Format" section → force-distribution pages → box plots (unchanged figures,
+  result-slide title/footer) → combination heatmap (with an empty editable
+  "Projected tyre life" table) → the remaining analyses. Takeaway / Overall /
+  summary boxes hold "Key observation: …" placeholders; no conclusions,
+  bubbles or circles are generated.
+- Config: `RunConfig.report_format`, `report_compare_study`,
+  `report_label_a/_b`, `report_route`, `report_subtitle`,
+  `report_drive_axle_a/_b`, `report_ranges`; module constants
+  `REPORT_RANGES` and `REPORT_COMBO_HEATMAP_N`. CLI flags `--report-format`,
+  `--compare-study`, `--label-a/-b`, `--route`, `--report-subtitle`,
+  `--drive-axle-a/-b`; GUI: a "Report" section on the New Study page.
+
+### 9D.3 Validation
+- Numbers unchanged: on a real study, every stats-strip value equals
+  `stats_summary.json` for the same channel (plain sample-count statistics,
+  like the Statistics stage); the existing two-run comparison plot renders
+  byte-identical to the previous commit; `statistics.py`, `famos/` and
+  `preprocessing.py` untouched.
+- Side by side with the reference: generated slides rendered and compared
+  against slides 8-14; several layout passes (strip spacing, clipped last
+  tick, table borders written in schema order, empty table cells sized by
+  their 18 pt end-of-paragraph font, a 3-column truck heatmap's tick density).
+- **Only one recording exists locally** (every study is the same FR/RR run), so
+  the two-dataset PV and CV slides were checked on *synthetic* 4-wheel and
+  3-axle pairs derived from it — layout only. The real recording was used for a
+  single-study report and the stats check.
+- `tests/test_report_result_slides.py`: slide order, native text shapes, CV
+  rows, single-study and unreadable-B fallbacks, stats-strip equality, GUI →
+  CLI flag mapping.
+
+### 9D.4 A note on analysis-mode numbers
+Re-running a study in `workflow_mode="analysis"` gives statistics that differ
+from that study's original `stats_summary.json` in the 4th decimal
+(−511.1507 vs −511.151): the original run computed from the in-memory frame,
+analysis mode re-reads `processed_data.csv`, which is written at limited float
+precision. Pre-existing, not from this round, and far below any reported
+precision — but it means "re-run in analysis mode" is not byte-reproducible.
+
+## 9E. Round 8 — Rainflow and PSD disabled, standard report heatmaps (2026-10-28)
+
+The brief asked for five things: remove the Rainflow and PSD analyses "for
+now", make the report's heatmaps use the GUI's standard bin ranges, and drop
+the G-severity slide and the whole "Fatigue & PSD" section from the report --
+with no other number changing.
+
+### 9E.1 Removed from the app
+- **Rainflow** — the sidebar page (matrices, cycle table, "Export all cycle
+  CSVs"), the `[9/9]` pipeline stage, its outputs (`rainflow_*.png`,
+  `rainflow_cycles_*.csv`), `RunConfig.miner_exponent`, `--miner`, the New
+  Study "Miner's exponent" spinbox and "Rainflow" module tick, the Processing
+  tracker's Rainflow stage, the `rainflow` package from the requirements,
+  the exe's hidden imports and the GUI self-check.
+- **Welch PSD** — the sidebar page, the `[9b/9]` stage and its `psd_*.png`.
+  `dtt/spectral.py` keeps `amplitude_spectrum_db`, `log_downsample` and
+  `estimate_lag` (the Signals page's FFT and time-sync); only `welch_psd` left.
+- **RF Compare** — backend-only (no CLI flag or GUI ever reached it); its
+  block in `study_compare.py` is gone. The rest of the two-run comparison
+  (RMS / DLC / G-severity deltas, AUC overlays, Compare studies page) is
+  unchanged.
+- The pipeline is now eight stages, logged `[1/8]`..`[8/8]`; the GUI stage
+  regexes and the New Study note follow.
+- Report: the "Load Severity – Gx / Gy / Gxy / DLC" slide, the "Fatigue &
+  PSD" divider and its rainflow and PSD slides. The "Module 1" divider's
+  subtitle no longer mentions severity. There is no agenda/TOC slide; slide
+  numbers are assigned as slides are added, so they stay continuous
+  (now tested). 28 → 22 slides on the reference recording.
+
+### 9E.2 Unwired but kept
+- `legacy/rainflow.py`, `legacy/psd.py` (with `welch_psd`) and
+  `legacy/rf_compare.py`, made self-contained (the rainflow constants and
+  Miner exponent moved in with them), plus a one-line README. The folder is
+  outside `dtt/`, so `collect_submodules("dtt")` does not bundle it into the
+  exe, and a test fails if anything in `dtt/`, `gui/` or `famos/` imports it.
+- G-severity and DLC are still computed every run (`[5b/8]`, the log,
+  `severity_summary.json`, `severity_table.png`) and still feed the two-run
+  comparison. They were never on a single-study GUI page, and still are not.
+- `plot_style.py` untouched (the soft/banded histogram paths are shared).
+- Stop removal's seam handling was validated against a rainflow damage
+  ratio (§5.4); no test re-runs that check, so nothing needed keeping for it.
+
+### 9E.3 Heatmap bins: one source
+`config.HEATMAP_BIN_RANGES_DAN` — Fx −300..300/100, Fy −300..300/100,
+Fz 100..1000/100 daN — is now the only place the numbers live. The GUI's
+"Bin range (daN)" boxes, the pipeline's correlation heatmaps and hexbins, and
+the report's Fx & Fy combination heatmap all resolve their bins through
+`heatmaps.resolve_bin_ranges(config)`:
+1. a range the user generated for this study on the Heatmaps page, saved as
+   `heatmap_bins.json` in the study folder ("Reset to standard" deletes it);
+2. else the vehicle preset's own bins (`TyreParams.heatmap_bins_dan`);
+3. else the standard.
+
+What it replaced: the GUI defaulted to `FORCE_RANGES_DAN` + step 100, while the
+pipeline used `_comp_bins(config.tyre)` — and because the pipeline always sets
+`config.tyre`, the *tyre* ranges were the real default: a PV got Fz 0..1000 in
+166.7 daN bins, not the GUI's 100..1000/100. The result-slide combination
+heatmap used yet another range (±4000 N / 1000 N, §9D; CV ±10000 N / 2500 N).
+Now the PV preset declares no override and gets the standard. Every other
+preset declares its tyre ranges in six equal bins — exactly the bins it drew
+before — so truck/bus/trailer heatmaps are unchanged and the per-vehicle
+override still works, now explicitly. The combination heatmap and the hexbins
+are in daN (hexbin ±3000 N → ±300 daN is the same physical span). Axis ticks
+sit on the bin edges.
+
+**Out-of-range samples are dropped, not clipped** — unchanged behaviour of
+`np.histogram2d`: a sample outside the edges is not counted, and each cell's
+percentage is a share of the *in-range* samples (or distance). On the
+reference recording the standard bins leave out 0.02–3.2 % of samples per
+panel (most from Fx beyond ±300 daN); the cells add to 100 % of what is
+shown, not of the whole drive.
+
+### 9E.4 Validation
+- Same raw recording, before (a snapshot of the pre-change tree) and after:
+  `stats_summary.json`, `severity_summary.json`, `validation_report.json`,
+  provenance, `processed_data.csv`, `raw_data.csv` and both FAMOS-layout CSVs
+  identical; 49 figures byte-identical (histograms, AUC, box plots, PV
+  distribution plots, and `heatmap_fx_fy_all.png`, whose bins did not move).
+  Only the Fz heatmaps, the hexbins and the combination heatmap differ.
+  The same study run through the GUI's own `PipelineWorker` matched the CLI run.
+- GUI: every sidebar page visited for the new study, the pre-change study and
+  three real old studies holding rainflow/PSD files — no exception, no error
+  dialog; History lists all 30 studies. A custom range set on the Heatmaps
+  page was used by the next analysis-mode run and by its report.
+- Old configs: `RunConfig.from_dict` drops unknown keys (`miner_exponent`, …)
+  with one warning; old `run_provenance.json` files load unchanged.
+- Report rendered through PowerPoint COM (still no LibreOffice/pdftoppm on
+  the dev machine) and every slide looked at.
+- `.exe` rebuilt (onedir) and a study run through it.
+
+## 9F. Round 9 — WFT samples identical to FAMOS's: the timebase stretch (2026-10-28)
+
+A licensed-FAMOS comparison (the mentor's sequence: `smo(x,0.1)` on the WFT
+channels, `FiltLP(Lat_acc,0,0,4,5)` → `smo(…,0.5)`, then `red(…,10)`) against
+the app's 100 Hz output on the 2006-08-25 recording (FR_*_2 / RR_*_1, 1 kHz)
+showed an offset of 0 at the start drifting linearly to −29 samples at the
+end (≈ −5.26 ppm, same on every channel), raw-vs-raw not exact even inside one
+20 s window, `preprocessed_for_famos_validation.csv` at 554,785 rows against
+FAMOS's 554,783, and `raw_data.csv` at 555,200. The FAMOS operators were not
+at fault; the samples fed to them were.
+
+### 9F.1 Cause — two reader faults stacked
+This recording is the classic `|CF,2` FAMOS format, so it goes through
+`imc_reader.read_famos`, not the imc3 `read_raw`.
+1. **`read_famos` read the whole `CS` block.** The samples are the `Cb` buffer
+   inside it (`Cb`: buffer offset 0, 11,095,642 bytes filled = 5,547,821
+   int16). The recorder pads the `CS` block: 8,296 zero bytes on `FR_Fx_2`
+   (8,294 on most RR channels, 16,708 on the float32 `Acceleration`). Read as
+   samples, every channel gained ~4,148 zeros at the end —
+   `FR_Fx_2`: **5,551,969** samples instead of 5,547,821. The values up to
+   the stored count were still exact.
+2. **`_assemble` stretched every channel onto the first file's length.** The
+   master was "the first WFT channel" by `_WFT_RE` (`WFT_Fx_fr` naming), which
+   matches nothing in this recording, so the master fell back to the first
+   file — `Acceleration.raw`, padded to **5,551,998**. Every channel of a
+   different length was linearly resampled end to end
+   (`np.interp(linspace(0,1,n), linspace(0,1,m), x)`). For the WFT channels:
+   29 / 5,551,968 = **5.22 ppm**, and 5,547,821 × 5.22 × 10⁻⁶ = **29.0
+   samples** by the end of the data — the measured −29 (the 5.26 estimate was
+   the line fit). Interpolation is also why raw-vs-raw was never bit-exact.
+
+**The 415 extra rows.** The padding zeros are a bit-exact constant run over
+1 s, so `blank_dead_runs` (§9F.4) turned them into NaN on every WFT channel;
+the sanitizer's `_remove_all_nan_rows` then dropped every row where all force
+channels were NaN: rows 554,785 … 555,199, i.e. 415 at 100 Hz.
+`raw_data.csv` is not sanitized, so it kept all 555,200.
+
+The imc3 path had its own version of the same problem (§4.6, §12): a
+smoothness heuristic for the data start (58 samples early on `WFT_Fx_fr`),
+leading/trailing "garbage" trims, an int16-then-guess-int32 re-read, and the
+rate re-derived as *samples / Storage.imcdbc duration*. With the heuristic's
+counts (4,218,835 instead of 4,219,125 on the WFT channels) that put them on a
+999.93 Hz clock.
+
+### 9F.2 Fix (`dtt/ingestion/imc_reader.py` only; `famos/` and `dtt/preprocessing.py` untouched)
+- **Classic FAMOS:** `read_famos` / `read_famos_all` take the sample bytes from
+  the `Cb` buffer (`_cb_extent`, `_cs_samples`); a file without a `Cb` key
+  still reads the whole `CS` block, as before.
+- **imc3:** `read_raw` walks the data section by its explicit record framing
+  (`_imc3_payload`): `|RR1` (4 bytes), `|RT1` (32), `|RC5` (16 + the length at
+  +12, the samples), `|Ri1` (12 + an index of N 16-byte copies of the
+  segment's `|RT1`/`|RC5` headers, no payload — the "event records" the old
+  reader stripped blindly), `|RE1` (end). An unknown key raises instead of
+  returning a plausible signal. Sample type is the u32 opening `|CM1` (same
+  codes as a FAMOS `CP` key: 4 int16, 6 int32, 7 float32), the x-delta is the
+  double in `|CC1`. `_find_data_start`, `_locate_data`, `_strip_event_records`,
+  `_smoothness` and the trims are gone. Checked on all 50 files of the
+  2026-05-13 imc3 recording: every count equals imcdbc duration / x-delta
+  exactly; `WFT_MxCorr_*` turn out to be float32 (previously decoded as int16
+  noise).
+- **One timeline, no resampling** (`_common_timeline`): the time base is the
+  WFT channels' own rate (`is_wft_channel`, which knows every naming scheme),
+  row n at n / fs, length = the longest WFT channel. Same-rate channels are
+  placed sample for sample from row 0 — every channel of a recording starts at
+  the same instant (one start time for all in Storage.imcdbc) — and a shorter
+  one is **padded with NaN at the end**, a longer non-WFT one cut at the end
+  (logged as "Channels fitted to the … WFT timeline"). Only a channel at a
+  different rate (5 Hz GPS) is interpolated, from its own k·x-delta axis, NaN
+  past its last sample; a WFT channel at a different rate is refused.
+- `Storage.imcdbc` now supplies the start epoch only. No cross-device clock
+  sync is kept as an option: the only one that existed was the duration-based
+  rate, and it compensated for wrong counts rather than a real clock
+  difference — with exact counts duration / x-delta is an integer.
+
+### 9F.3 Before / after (same recording, same settings: mode `both`, FAMOS CSV on, despike / transient / stop removal off)
+| | before (study `20261028_222941`) | after (`r9_timebase`) |
+|---|---|---|
+| samples read, `FR_Fx_2` | 5,551,969 | **5,547,821** (`Cb` buffer / 2) |
+| `preprocessed_for_famos_validation.csv` rows | 554,785 | **554,783** (FAMOS's count) |
+| `raw_data.csv` rows | 555,200 | **554,783** |
+| `raw_data.csv` vs stored samples [::10], offset 0 | max error 20 % of range | **bit-exact** (6 × 10⁻¹⁷) |
+| validation CSV vs `red(smo(stored))`, offset 0 | max error 6 % of range | **exact** to the CSV's 6 digits |
+| `WFT_Fx_fr.raw` vs FAMOS `Fx_raw_cut` | offset +58 | **offset 0**, max error 0.005 N |
+
+Statistics, G-severity and DLC barely move (a 5 ppm stretch does not change
+a distribution): FR Gx 0.1157 / DLC 0.0939, RR Gx 0.1444 / DLC 0.0999 before
+and after. The FAMOS 1 kHz comparison (`famos_compare.py --only-1k`) needs the
+user's FAMOS export and is run on their side.
+
+### 9F.4 Known, deliberate difference from FAMOS: RR's dead stretch
+RR's transducer stops early: two bit-exact runs of 0 — 13.7 s (5363.4–5377.1
+s), 1.1 s of live data, then 169.6 s to the end, 183.3 s in all.
+`dtt/preprocessing.py::blank_dead_runs`, called from `apply_famos_recipe` on
+every WFT channel with `blank_dead_s = 1.0`, turns any bit-exact constant run
+of ≥ 1 s into NaN (timeline intact). FAMOS keeps the zeros and averages them
+in: RR Static Fz **710.9 daN (FAMOS) vs 735.2 daN (app)**, DLC **0.211 vs
+0.100**. Outside those runs RR is exact; 15 rows at their edges differ because
+`smo`'s 0.1 s window sees zeros in FAMOS and a gap in the app. Unchanged in
+this round — changing it is the user's call.
+
+### 9F.5 Compare studies: "All channels — at a glance" removed
+The panel (title, note, toolbar, chart) is gone from Compare studies, and that
+page's "Export all…" no longer writes `auc_all_channels_*.png`
+(`AucComparePanel(show_summary=False)`, `export_auc_batch(summary_chart=False)`).
+The AUC Compare screen shares the widget and keeps it. The per-channel numbers
+it showed (P95 exceedance share, ΔP95) still come from `compare_distributions`
+for the KPI cards, footer, stats strip and CSV export; `auc_summary` /
+`draw_auc_summary` stay for AUC Compare.
+
+**Why it was empty: not reproduced.** Driven through the real page with two
+real studies (including the user's two of 2026-10-28), the chart drew 12 bars,
+with no exception and no swallowed error. The only state that shows exactly
+"default axes, no bars" is before a comparison has run (and after `clear()`):
+the panel is built with a blank canvas and stays blank until Compare is
+pressed. The other plots on the page share no code path with it that could
+fail the same way, so nothing else was changed.
+
+### 9F.6 Validation
+- New `tests/test_reader_stored_samples.py` (10): `Cb` padding ignored;
+  `FR_Fx_2` count = its `Cb` length / 2 and values = stored int16 × factor,
+  bit for bit; the folder reader keeps it exact on a 5,547,821-row 1 kHz grid;
+  synthetic imc3 files with `|Ri1` indexes, int32 / 5 Hz header types, and an
+  unknown record failing loudly; `WFT_Fx_fr` vs `Fx_raw_cut` at offset 0; the
+  timeline pads / cuts / refuses instead of interpolating. Real-data tests skip
+  without the gitignored files (`DTT_REF_RECORDING` points at the recording).
+- `tests/test_compare_studies_no_overview.py` (3). Full suite: 376 passed, 28
+  skipped, 1 failed — the pre-existing missing-file test
+  (`test_seq_translation_of_the_real_imc_file`).
+- GUI: Compare studies run on two studies — panel gone, no gap, AUC panels,
+  stats strip, KPIs and the RMS/DLC/G-severity table all populated.
+- `.exe` rebuilt.
+
+>>>>>>> Stashed changes
 ## 10. Open items / known gaps
 
-- **Raw reader 58-sample offset** (§4.6, Check 3) — still unfixed. A real,
-  reproducible latent bug in `imc_reader.py::read_raw`'s data-start
-  detection. Needs its own investigation (why 58, constant across
-  files/channels?, is it `_find_data_start`'s window search or the
-  leading-trim loop?). A regression check already exists: `WFT_Fx_fr.raw`
-  sample `[1000000+58 : 1030001+58]` vs. `Fx_raw_cut.csv`. The structural
-  imc3 format that lets a reader use explicit chunk lengths instead of a
-  data-start heuristic (the deterministic fix at the source) is documented
-  in §12.
+- ~~**Raw reader 58-sample offset**~~ (§4.6) — **closed in Round 9** (§9F):
+  `read_raw` walks the explicit `|RC5` framing; `WFT_Fx_fr.raw` now matches
+  `Fx_raw_cut.csv` at offset 0 (`test_wft_fx_fr_matches_famos_raw_cut_at_offset_zero`).
+  The same round fixed the classic-FAMOS padding read and the end-to-end
+  resampling behind the 5 ppm FAMOS drift.
+- **RR dead stretch blanked, FAMOS averages it in** (§9F.4) — deliberate,
+  documented, not changed: RR Static Fz 735.2 daN (app) vs 710.9 (FAMOS), DLC
+  0.100 vs 0.211 on the reference recording. Revisit only on request.
+- **Studies ingested before Round 9 are resampled by ~5 ppm** (classic-FAMOS
+  recordings) or offset/clocked wrongly (imc3) — re-run to get the stored
+  samples; statistics barely move, sample-level comparisons do.
+- **The imc3 `|CM1` / `|CC1` field meanings are inferred**, from one
+  recording's 50 files (int16, int32, float32; 1 kHz and 5 Hz). A file with a
+  record type the walker does not know fails loudly and is skipped with a
+  warning in the log.
 - **`--stop-min-s` CLI flag is parsed but never wired into `run()`'s
   kwargs** — a small pre-existing gap from the teammate's own commit,
   noticed during the merge reconciliation, not yet fixed. Both the CLI
@@ -958,9 +1276,16 @@ FAMOS's sample 0 (the §4.6 Check 3 finding), and because it always returns
 something plausible it never fails loudly on a misread. The structural format
 above is the deterministic alternative: reading the explicit `|RC5` length
 fields and starting at the first chunk removes the need for a data-start
-heuristic and would close the 58-sample offset at its source. This remains an
-open item (§10); the structural understanding is recorded here as the reference
-for that fix.
+heuristic and would close the 58-sample offset at its source. **Done in Round 9
+(§9F.2)**, with one correction to the description above: the `|RC5` records
+are not all data. Every ~638 chunks an `|Ri1` record (two int32, the second a
+count N) is followed by N 16-byte copies of the segment's `|RT1`/`|RC5`
+headers with no payload — an index. Walking the records by their sizes
+(`|RR1` 4, `|RT1` 32, `|RC5` 16 + length, `|Ri1` 12 + N entries, `|RE1` end)
+gives 4,219,125 samples for `WFT_Fx_fr`, which is exactly the imcdbc duration
+/ x-delta. The 4,364,839 above is about 146,000 samples too many; a walk that
+treats the index copies as chunk headers lands close to it (4,364,987), so that
+is the likely origin.
 
 ---
 
